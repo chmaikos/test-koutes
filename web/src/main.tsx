@@ -5,7 +5,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MsalProvider } from "@azure/msal-react";
 import { EventType } from "@azure/msal-browser";
 import "./index.css";
-import { msalInstance } from "@/auth/msal";
+import { disableSso, msalInstance, ssoAvailable } from "@/auth/msal";
 import { AuthGate } from "@/auth/AuthGate";
 import { AppShell } from "@/components/AppShell";
 import { CredentialsGate } from "@/components/CredentialsGate";
@@ -27,22 +27,32 @@ const queryClient = new QueryClient({
 });
 
 async function bootstrap() {
-  await msalInstance.initialize();
+  // MSAL needs window.crypto.subtle (HTTPS or localhost). When the SPA is
+  // served from a plain-HTTP WAN IP the browser hides that API and
+  // initialize() throws "crypto_nonexistent". We swallow it so the rest of
+  // the app still mounts and the user can sign in via the local admin tab.
+  if (ssoAvailable()) {
+    try {
+      await msalInstance.initialize();
 
-  const accounts = msalInstance.getAllAccounts();
-  if (accounts.length > 0) {
-    msalInstance.setActiveAccount(accounts[0]);
-  }
-  msalInstance.addEventCallback((event) => {
-    if (
-      event.eventType === EventType.LOGIN_SUCCESS &&
-      event.payload &&
-      "account" in event.payload &&
-      event.payload.account
-    ) {
-      msalInstance.setActiveAccount(event.payload.account);
+      const accounts = msalInstance.getAllAccounts();
+      if (accounts.length > 0) {
+        msalInstance.setActiveAccount(accounts[0]);
+      }
+      msalInstance.addEventCallback((event) => {
+        if (
+          event.eventType === EventType.LOGIN_SUCCESS &&
+          event.payload &&
+          "account" in event.payload &&
+          event.payload.account
+        ) {
+          msalInstance.setActiveAccount(event.payload.account);
+        }
+      });
+    } catch (err) {
+      disableSso((err as Error)?.message ?? "msal init failed");
     }
-  });
+  }
 
   ReactDOM.createRoot(document.getElementById("root")!).render(
     <React.StrictMode>

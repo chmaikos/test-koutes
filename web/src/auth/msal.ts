@@ -15,6 +15,38 @@ if (!clientId) {
   );
 }
 
+// MSAL.js needs window.crypto.subtle for PKCE code-verifier generation, which
+// browsers only expose in a secure context (HTTPS, or http on localhost /
+// 127.0.0.1). When you hit the SPA over plain HTTP via a LAN/WAN IP, MSAL
+// throws BrowserAuthError "crypto_nonexistent" the moment we touch it. We
+// detect that up-front so the rest of the app can fall back to the local-admin
+// login path instead of crashing on a blank page.
+const supportsWebCrypto =
+  typeof window !== "undefined" &&
+  typeof window.crypto !== "undefined" &&
+  typeof window.crypto.subtle !== "undefined" &&
+  // window.isSecureContext is true for HTTPS and for http://localhost.
+  (typeof window.isSecureContext === "undefined" || window.isSecureContext);
+
+let ssoAvailableFlag = supportsWebCrypto && !!clientId;
+
+export const ssoAvailable = (): boolean => ssoAvailableFlag;
+
+export function disableSso(reason?: string) {
+  ssoAvailableFlag = false;
+  if (reason) {
+    console.warn(`[auth] Microsoft SSO disabled: ${reason}`);
+  }
+}
+
+if (!supportsWebCrypto) {
+  console.warn(
+    "[auth] Microsoft SSO is unavailable in this context. The browser only " +
+      "exposes window.crypto.subtle on HTTPS or http://localhost. The local " +
+      "admin login still works.",
+  );
+}
+
 const msalConfig: Configuration = {
   auth: {
     clientId: clientId || "00000000-0000-0000-0000-000000000000",
@@ -34,6 +66,9 @@ export const loginRequest = {
 };
 
 export async function acquireApiToken(account: AccountInfo): Promise<string> {
+  if (!ssoAvailableFlag) {
+    throw new Error("Microsoft SSO is not available in this context");
+  }
   const request: SilentRequest = {
     scopes: [apiScope],
     account,

@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useMsal } from "@azure/msal-react";
-import { acquireApiToken } from "@/auth/msal";
+import { acquireApiToken, ssoAvailable } from "@/auth/msal";
 import { getLocalToken } from "@/auth/local";
 import { queryKeys } from "@/api/hooks";
 
@@ -23,6 +23,7 @@ export function useLiveStream() {
     (async () => {
       let token: string | null = getLocalToken();
       if (!token) {
+        if (!ssoAvailable()) return;
         const account =
           instance.getActiveAccount() ?? instance.getAllAccounts()[0];
         if (!account) return;

@@ -92,6 +92,9 @@ api_router.include_router(imports.router, dependencies=gated)
 api_router.include_router(alerts.router, dependencies=gated)
 api_router.include_router(dashboard.router, dependencies=gated)
 api_router.include_router(exports.router, dependencies=gated)
-api_router.include_router(stream.router, dependencies=gated)
+# The SSE stream takes its access token via `?access_token=` (EventSource cannot
+# set headers), so it does its own auth + credentials-must-change check inline
+# instead of going through the Authorization-header gate.
+api_router.include_router(stream.router)
 
 app.include_router(api_router)

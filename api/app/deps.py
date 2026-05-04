@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth import TokenClaims, validate_access_token
+from app.config import get_settings
 from app.db import get_db
 from app.models.users import User, UserRole
 from app.security import decode_local_token, looks_like_local_token
@@ -47,19 +48,30 @@ def _resolve_local_user(db: Session, token: str) -> User:
     return user
 
 
-async def get_current_user(
-    db: DbSession,
-    authorization: Annotated[str | None, Header()] = None,
-) -> User:
-    token = await _extract_token(authorization)
-
-    # Local-issued JWT? Validate with our HS256 secret, no JWKS round-trip.
+async def resolve_user_from_token(db: Session, token: str) -> User:
+    """Validate a bearer/access token (local HS256 or Entra RS256) and return
+    the matching `User` row. Shared by `get_current_user` (Authorization header)
+    and the SSE endpoint (which receives the token via query string because
+    EventSource cannot send custom headers)."""
     if looks_like_local_token(token):
         return _resolve_local_user(db, token)
 
+    # If Entra is not configured the only valid token shape is a local one;
+    # fail closed with 401 instead of leaking the 503 "auth not configured"
+    # the Entra validator would emit. This stops a misconfigured proxy or a
+    # stale Entra token from looking like a server outage.
+    if not get_settings().auth_configured:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="invalid token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     claims: TokenClaims = await validate_access_token(token)
     if not claims.oid:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="oid missing")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="oid missing"
+        )
 
     user = db.scalar(select(User).where(User.entra_oid == claims.oid))
     role_from_token = claims.best_role()
@@ -98,6 +110,14 @@ async def get_current_user(
             status_code=status.HTTP_403_FORBIDDEN, detail="user is disabled"
         )
     return user
+
+
+async def get_current_user(
+    db: DbSession,
+    authorization: Annotated[str | None, Header()] = None,
+) -> User:
+    token = await _extract_token(authorization)
+    return await resolve_user_from_token(db, token)
 
 
 CurrentUser = Annotated[User, Depends(get_current_user)]

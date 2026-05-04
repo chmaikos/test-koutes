@@ -1,5 +1,5 @@
 import axios, { type InternalAxiosRequestConfig } from "axios";
-import { acquireApiToken, msalInstance } from "@/auth/msal";
+import { acquireApiToken, msalInstance, ssoAvailable } from "@/auth/msal";
 import { clearLocalSession, getLocalToken } from "@/auth/local";
 
 const baseURL = (import.meta.env.VITE_API_BASE_URL as string) || "/api";
@@ -12,6 +12,11 @@ api.interceptors.request.use(
     const localToken = getLocalToken();
     if (localToken) {
       config.headers.Authorization = `Bearer ${localToken}`;
+      return config;
+    }
+    if (!ssoAvailable()) {
+      // No local token and SSO is off — let the request go out unauthenticated;
+      // the API will return 401 and the AuthGate will be visible already.
       return config;
     }
     const accounts = msalInstance.getAllAccounts();
@@ -35,7 +40,7 @@ api.interceptors.response.use(
       const hadLocal = getLocalToken() !== null;
       if (hadLocal) {
         clearLocalSession();
-      } else {
+      } else if (ssoAvailable()) {
         msalInstance.loginRedirect().catch(() => {});
       }
     }

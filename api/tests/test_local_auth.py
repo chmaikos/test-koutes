@@ -111,6 +111,62 @@ def test_login_unknown_user_returns_401_not_404(local_client):
     assert resp.status_code == 401
 
 
+def test_stream_rejects_missing_or_bad_token(local_client):
+    # No `?access_token=` -> 401 missing.
+    no_token = local_client.get("/api/stream")
+    assert no_token.status_code == 401
+
+    # Random garbage -> 401 (could not be parsed as either token type).
+    bad = local_client.get("/api/stream", params={"access_token": "garbage"})
+    assert bad.status_code == 401
+
+
+def test_stream_blocks_on_must_change_credentials(local_client):
+    token = _login(local_client, DEFAULT_USERNAME, DEFAULT_PASSWORD).json()[
+        "access_token"
+    ]
+    blocked = local_client.get(
+        "/api/stream", params={"access_token": token}
+    )
+    assert blocked.status_code == 428
+
+
+def test_resolve_user_from_token_accepts_local_token(local_client):
+    """Unit-level proof that the same helper used by /api/stream now resolves
+    a local-issued HS256 token to its user (this is the regression behind the
+    SSE 401s when running behind a reverse proxy with the local admin)."""
+    import asyncio
+
+    from app import db as db_module
+    from app.deps import resolve_user_from_token
+
+    # Get a fresh, post-rotation local token via the public login flow.
+    token0 = _login(local_client, DEFAULT_USERNAME, DEFAULT_PASSWORD).json()[
+        "access_token"
+    ]
+    rotated = local_client.post(
+        "/api/auth/change-credentials",
+        headers={"Authorization": f"Bearer {token0}"},
+        json={
+            "current_password": DEFAULT_PASSWORD,
+            "new_password": "BrandNewPass!2026",
+        },
+    )
+    assert rotated.status_code == 200, rotated.text
+    fresh_token = _login(
+        local_client, DEFAULT_USERNAME, "BrandNewPass!2026"
+    ).json()["access_token"]
+
+    db = db_module.SessionLocal()
+    try:
+        user = asyncio.run(resolve_user_from_token(db, fresh_token))
+    finally:
+        db.close()
+    assert user.is_local is True
+    assert user.role.value == "admin"
+    assert user.must_change_credentials is False
+
+
 def test_gated_endpoint_returns_428_until_credentials_changed(local_client):
     token = _login(local_client, DEFAULT_USERNAME, DEFAULT_PASSWORD).json()[
         "access_token"
