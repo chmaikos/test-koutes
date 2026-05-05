@@ -19,16 +19,12 @@ from app.db import Base
 
 class BoxStatus(str, enum.Enum):
     received = "received"
-    in_progress = "in_progress"
-    processing_complete = "processing_complete"
     ready_to_return = "ready_to_return"
     returned = "returned"
 
 
 ACTIVE_STATUSES: tuple[BoxStatus, ...] = (
     BoxStatus.received,
-    BoxStatus.in_progress,
-    BoxStatus.processing_complete,
     BoxStatus.ready_to_return,
 )
 

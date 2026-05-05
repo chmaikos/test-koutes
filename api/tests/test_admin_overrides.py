@@ -35,22 +35,22 @@ def test_force_lets_admin_resurrect_returned_box(client):
     _advance(client, box_id, "ready_to_return", "returned")
 
     no_force = client.patch(
-        f"/api/boxes/{box_id}", json={"status": "in_progress"}
+        f"/api/boxes/{box_id}", json={"status": "received"}
     )
     assert no_force.status_code == 400
 
     forced = client.patch(
         f"/api/boxes/{box_id}",
-        json={"status": "in_progress", "force": True, "note": "mistake fix"},
+        json={"status": "received", "force": True, "note": "mistake fix"},
     )
     assert forced.status_code == 200, forced.text
-    assert forced.json()["status"] == "in_progress"
+    assert forced.json()["status"] == "received"
 
     events = client.get(f"/api/boxes/{box_id}/events").json()
     forced_event = next(
         ev
         for ev in events
-        if ev["from_status"] == "returned" and ev["to_status"] == "in_progress"
+        if ev["from_status"] == "returned" and ev["to_status"] == "received"
     )
     assert forced_event["note"].startswith("[admin override]")
     assert "mistake fix" in forced_event["note"]
@@ -81,7 +81,7 @@ def test_force_requires_admin(client, make_user):
     try:
         resp = client.patch(
             f"/api/boxes/{box_id}",
-            json={"status": "in_progress", "force": True},
+            json={"status": "received", "force": True},
         )
         assert resp.status_code == 403
         assert "admin" in resp.json()["detail"].lower()
@@ -159,7 +159,7 @@ def test_bulk_force_requires_admin(client, make_user):
 
 def test_admin_can_delete_box_and_history_vanishes(client):
     box_id = _create_box(client, box_number="D-1")
-    _advance(client, box_id, "in_progress")
+    _advance(client, box_id, "ready_to_return")
 
     resp = client.delete(f"/api/boxes/{box_id}")
     assert resp.status_code == 204

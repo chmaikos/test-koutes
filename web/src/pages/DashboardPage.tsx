@@ -92,8 +92,8 @@ function WarehouseCard({ summary }: { summary: WarehouseSummary }) {
           icon={<TrendingDown className="h-4 w-4 text-sky-500" />}
         />
         <Stat
-          label="In progress"
-          value={summary.counts_by_status.in_progress ?? 0}
+          label="Received"
+          value={summary.counts_by_status.received ?? 0}
         />
         <Stat
           label="Ready to return"

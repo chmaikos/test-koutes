@@ -16,9 +16,7 @@ from app.models.warehouses import Warehouse
 
 # Valid forward transitions; "returned" is terminal.
 _ALLOWED_TRANSITIONS: dict[BoxStatus, set[BoxStatus]] = {
-    BoxStatus.received: {BoxStatus.in_progress, BoxStatus.ready_to_return},
-    BoxStatus.in_progress: {BoxStatus.processing_complete, BoxStatus.ready_to_return},
-    BoxStatus.processing_complete: {BoxStatus.ready_to_return},
+    BoxStatus.received: {BoxStatus.ready_to_return},
     BoxStatus.ready_to_return: {BoxStatus.returned},
     BoxStatus.returned: set(),
 }
@@ -146,8 +144,6 @@ def update_box(
             )
         old_status = box.status
         box.status = new_status
-        if new_status == BoxStatus.processing_complete:
-            box.processing_completed_at = now
         if new_status == BoxStatus.returned:
             box.returned_at = now
         events.append(

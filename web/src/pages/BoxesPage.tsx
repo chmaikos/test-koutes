@@ -37,9 +37,7 @@ import { useHasRole } from "@/components/RoleGate";
 const PAGE_SIZE = 25;
 
 const NEXT_STATUS: Record<BoxStatus, BoxStatus[]> = {
-  received: ["in_progress", "ready_to_return"],
-  in_progress: ["processing_complete", "ready_to_return"],
-  processing_complete: ["ready_to_return"],
+  received: ["ready_to_return"],
   ready_to_return: ["returned"],
   returned: [],
 };

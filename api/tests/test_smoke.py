@@ -1,16 +1,14 @@
 """End-to-end smoke test through the HTTP layer.
 
-Walks the full happy path: receive -> in_progress -> processing_complete ->
-ready_to_return -> returned, plus exports, dashboard, alerts, and warehouse
-threshold updates. SQLite is the substrate so this runs anywhere without
-Docker or Postgres.
+Walks the full happy path: receive -> ready_to_return -> returned, plus
+exports, dashboard, alerts, and warehouse threshold updates. SQLite is the
+substrate so this runs anywhere without Docker or Postgres.
 """
 from __future__ import annotations
 
 from io import BytesIO
 
 from openpyxl import load_workbook
-from sqlalchemy import select
 
 
 def _box_count(client) -> int:
@@ -44,17 +42,16 @@ def test_full_box_lifecycle_and_dashboard(client):
     bad = client.patch(f"/api/boxes/{box_id}", json={"status": "returned"})
     assert bad.status_code == 400
 
-    for transition in ("in_progress", "processing_complete", "ready_to_return", "returned"):
+    for transition in ("ready_to_return", "returned"):
         resp = client.patch(f"/api/boxes/{box_id}", json={"status": transition})
         assert resp.status_code == 200, resp.text
         assert resp.json()["status"] == transition
 
     detail = client.get(f"/api/boxes/{box_id}").json()
     assert detail["returned_at"] is not None
-    assert detail["processing_completed_at"] is not None
 
     events = client.get(f"/api/boxes/{box_id}/events").json()
-    assert len(events) >= 5
+    assert len(events) >= 3
     types = [ev["event_type"] for ev in events]
     assert "created" in types
     assert "returned" in types
@@ -126,9 +123,8 @@ def test_xlsx_export_with_timezone_aware_timestamps():
         box_number="TZ-1",
         owner="Acme",
         current_warehouse_id=1,
-        status=BoxStatus.processing_complete,
+        status=BoxStatus.ready_to_return,
         received_at=datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
-        processing_completed_at=datetime(2026, 1, 2, 4, 0, 0, tzinfo=UTC),
         returned_at=None,
         created_at=datetime(2026, 1, 2, 3, 0, 0, tzinfo=UTC),
         updated_at=datetime(2026, 1, 2, 4, 0, 0, tzinfo=UTC),

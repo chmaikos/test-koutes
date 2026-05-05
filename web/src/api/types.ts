@@ -1,16 +1,9 @@
 export type Role = "admin" | "operator" | "viewer";
 
-export type BoxStatus =
-  | "received"
-  | "in_progress"
-  | "processing_complete"
-  | "ready_to_return"
-  | "returned";
+export type BoxStatus = "received" | "ready_to_return" | "returned";
 
 export const ALL_BOX_STATUSES: BoxStatus[] = [
   "received",
-  "in_progress",
-  "processing_complete",
   "ready_to_return",
   "returned",
 ];

@@ -19,7 +19,6 @@ EXPORT_COLUMNS = [
     "Warehouse",
     "Status",
     "Received At",
-    "Processing Completed At",
     "Returned At",
     "Created At",
     "Updated At",
@@ -27,12 +26,10 @@ EXPORT_COLUMNS = [
 
 # Indices of columns whose values are datetimes. Used by the XLSX writer to
 # apply a date number_format and by the CSV writer to format them as text.
-_DATETIME_COLUMN_INDICES = (5, 6, 7, 8, 9)
+_DATETIME_COLUMN_INDICES = (5, 6, 7, 8)
 
 STATUS_LABELS: dict[BoxStatus, str] = {
     BoxStatus.received: "Received",
-    BoxStatus.in_progress: "In progress",
-    BoxStatus.processing_complete: "Processing complete",
     BoxStatus.ready_to_return: "Ready to return",
     BoxStatus.returned: "Returned",
 }
@@ -62,7 +59,6 @@ def _row_for(box: Box, warehouses: Mapping[int, str]) -> list:
         warehouses.get(box.current_warehouse_id, ""),
         STATUS_LABELS.get(box.status, box.status.value),
         _to_naive_utc(box.received_at),
-        _to_naive_utc(box.processing_completed_at),
         _to_naive_utc(box.returned_at),
         _to_naive_utc(box.created_at),
         _to_naive_utc(box.updated_at),

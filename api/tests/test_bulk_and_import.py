@@ -67,7 +67,7 @@ def test_bulk_status_change_mixed(client):
 
     resp = client.post(
         "/api/boxes/bulk",
-        json={"box_ids": [a, b, done], "status": "in_progress"},
+        json={"box_ids": [a, b, done], "status": "ready_to_return"},
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()

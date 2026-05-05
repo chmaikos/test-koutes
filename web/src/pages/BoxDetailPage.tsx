@@ -15,9 +15,7 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useHasRole } from "@/components/RoleGate";
 
 const NEXT_STATUS: Record<BoxStatus, BoxStatus[]> = {
-  received: ["in_progress", "ready_to_return"],
-  in_progress: ["processing_complete", "ready_to_return"],
-  processing_complete: ["ready_to_return"],
+  received: ["ready_to_return"],
   ready_to_return: ["returned"],
   returned: [],
 };
@@ -75,14 +73,9 @@ export function BoxDetailPage() {
             <span className="text-xs text-slate-500">at {warehouseName}</span>
           </div>
         </div>
-        <dl className="grid gap-3 text-sm sm:grid-cols-3">
+        <dl className="grid gap-3 text-sm sm:grid-cols-2">
           <Field label="Received">
             {box.received_at ? new Date(box.received_at).toLocaleString() : "—"}
-          </Field>
-          <Field label="Processing complete">
-            {box.processing_completed_at
-              ? new Date(box.processing_completed_at).toLocaleString()
-              : "—"}
           </Field>
           <Field label="Returned">
             {box.returned_at ? new Date(box.returned_at).toLocaleString() : "—"}
