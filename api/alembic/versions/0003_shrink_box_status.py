@@ -59,9 +59,17 @@ def upgrade() -> None:
         "CREATE TYPE box_status AS ENUM ("
         "'received', 'ready_to_return', 'returned')"
     )
+    # boxes.status carries a server_default of 'received'::box_status_old that
+    # Postgres can't auto-cast across the type swap; drop it before the ALTER
+    # and reattach a default bound to the new type afterwards.
+    op.execute("ALTER TABLE boxes ALTER COLUMN status DROP DEFAULT")
     op.execute(
         "ALTER TABLE boxes ALTER COLUMN status "
         "TYPE box_status USING status::text::box_status"
+    )
+    op.execute(
+        "ALTER TABLE boxes ALTER COLUMN status "
+        "SET DEFAULT 'received'::box_status"
     )
     op.execute(
         "ALTER TABLE box_events ALTER COLUMN from_status "
@@ -84,9 +92,14 @@ def downgrade() -> None:
         "'received', 'in_progress', 'processing_complete', "
         "'ready_to_return', 'returned')"
     )
+    op.execute("ALTER TABLE boxes ALTER COLUMN status DROP DEFAULT")
     op.execute(
         "ALTER TABLE boxes ALTER COLUMN status "
         "TYPE box_status USING status::text::box_status"
+    )
+    op.execute(
+        "ALTER TABLE boxes ALTER COLUMN status "
+        "SET DEFAULT 'received'::box_status"
     )
     op.execute(
         "ALTER TABLE box_events ALTER COLUMN from_status "
