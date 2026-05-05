@@ -10,6 +10,7 @@ from __future__ import annotations
 from io import BytesIO
 
 from openpyxl import load_workbook
+from sqlalchemy import select
 
 
 def _box_count(client) -> int:
@@ -107,6 +108,40 @@ def test_filters_search_and_exports(client):
     data_rows = [r for r in rows[1:] if r and r[0] in ("B-200", "B-201")]
     assert len(data_rows) == 2
     assert all(r[warehouse_col] == "Building 2" for r in data_rows)
+
+
+def test_xlsx_export_with_timezone_aware_timestamps():
+    """Postgres TIMESTAMPTZ columns return tz-aware datetimes; openpyxl
+    refuses to write those (raises TypeError) so the response would 500 and
+    leave the user with an empty / truncated file. Exercise the service
+    directly with tz-aware datetimes -- SQLite normalises them on round-trip
+    so an HTTP-level test wouldn't catch the regression."""
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from app.models.boxes import BoxStatus
+    from app.services.exports import boxes_to_xlsx
+
+    box = SimpleNamespace(
+        box_number="TZ-1",
+        owner="Acme",
+        current_warehouse_id=1,
+        status=BoxStatus.processing_complete,
+        received_at=datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
+        processing_completed_at=datetime(2026, 1, 2, 4, 0, 0, tzinfo=UTC),
+        returned_at=None,
+        created_at=datetime(2026, 1, 2, 3, 0, 0, tzinfo=UTC),
+        updated_at=datetime(2026, 1, 2, 4, 0, 0, tzinfo=UTC),
+    )
+
+    payload = boxes_to_xlsx([box], {1: "Building 1"})
+    wb = load_workbook(BytesIO(payload))
+    rows = list(wb.active.iter_rows(values_only=True))
+    assert len(rows) == 2, f"expected header + 1 data row, got {len(rows)}"
+    received_idx = rows[0].index("Received At")
+    assert isinstance(rows[1][received_idx], datetime)
+    assert rows[1][received_idx].tzinfo is None
+    assert rows[1][received_idx] == datetime(2026, 1, 2, 3, 4, 5)
 
 
 def test_alerts_max_capacity(client, session):

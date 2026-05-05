@@ -4,7 +4,7 @@ from __future__ import annotations
 import csv
 import io
 from collections.abc import Iterable, Mapping
-from datetime import datetime
+from datetime import UTC, datetime
 
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
@@ -38,19 +38,34 @@ STATUS_LABELS: dict[BoxStatus, str] = {
 }
 
 
+def _to_naive_utc(value: datetime | None) -> datetime | None:
+    """Normalise a datetime for openpyxl.
+
+    Postgres ``TIMESTAMPTZ`` columns yield tz-aware datetimes, but openpyxl
+    refuses to write those (it raises ``TypeError``). Convert to UTC and drop
+    the tzinfo so XLSX gets a real date cell and CSV strftime stays
+    consistent.
+    """
+    if value is None:
+        return None
+    if value.tzinfo is not None:
+        value = value.astimezone(UTC).replace(tzinfo=None)
+    return value
+
+
 def _row_for(box: Box, warehouses: Mapping[int, str]) -> list:
-    """Return a row of native Python values (datetimes left as-is for XLSX)."""
+    """Return a row of native Python values (datetimes naive UTC for XLSX)."""
     return [
         box.box_number,
         box.owner,
         box.current_warehouse_id,
         warehouses.get(box.current_warehouse_id, ""),
         STATUS_LABELS.get(box.status, box.status.value),
-        box.received_at,
-        box.processing_completed_at,
-        box.returned_at,
-        box.created_at,
-        box.updated_at,
+        _to_naive_utc(box.received_at),
+        _to_naive_utc(box.processing_completed_at),
+        _to_naive_utc(box.returned_at),
+        _to_naive_utc(box.created_at),
+        _to_naive_utc(box.updated_at),
     ]
 
 
