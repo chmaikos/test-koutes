@@ -1,17 +1,13 @@
 import { useState } from "react";
 import { Download } from "lucide-react";
-import { useMsal } from "@azure/msal-react";
-import { acquireApiToken } from "@/auth/msal";
+import { api } from "@/api/client";
 import { useWarehouses } from "@/api/hooks";
 import type { BoxStatus } from "@/api/types";
 import { ALL_BOX_STATUSES } from "@/api/types";
 import { STATUS_LABEL } from "@/components/StatusBadge";
 
-const baseURL = (import.meta.env.VITE_API_BASE_URL as string) || "/api";
-
 export function ExportsPage() {
   const warehouses = useWarehouses();
-  const { instance } = useMsal();
   const [warehouseId, setWarehouseId] = useState<number | "">("");
   const [status, setStatus] = useState<BoxStatus | "">("");
   const [receivedFrom, setReceivedFrom] = useState("");
@@ -20,23 +16,23 @@ export function ExportsPage() {
 
   async function download(format: "csv" | "xlsx") {
     setDownloading(format);
+    let objectUrl: string | null = null;
     try {
-      const account = instance.getActiveAccount() ?? instance.getAllAccounts()[0];
-      if (!account) throw new Error("not signed in");
-      const token = await acquireApiToken(account);
-      const params = new URLSearchParams();
-      if (warehouseId) params.set("warehouse_id", String(warehouseId));
-      if (status) params.set("status", status);
-      if (receivedFrom) params.set("received_from", new Date(receivedFrom).toISOString());
-      if (receivedTo) params.set("received_to", new Date(receivedTo).toISOString());
-      const url = `${baseURL}/exports/boxes.${format}?${params.toString()}`;
-      const resp = await fetch(url, {
-        headers: { Authorization: `Bearer ${token}` },
+      // Re-uses the shared axios client, so the request interceptor adds the
+      // local-admin HS256 token or the Entra access token transparently —
+      // whichever the user is currently signed in with.
+      const params: Record<string, string> = {};
+      if (warehouseId) params.warehouse_id = String(warehouseId);
+      if (status) params.status = status;
+      if (receivedFrom) params.received_from = new Date(receivedFrom).toISOString();
+      if (receivedTo) params.received_to = new Date(receivedTo).toISOString();
+      const resp = await api.get<Blob>(`/exports/boxes.${format}`, {
+        params,
+        responseType: "blob",
       });
-      if (!resp.ok) throw new Error(`status ${resp.status}`);
-      const blob = await resp.blob();
+      objectUrl = URL.createObjectURL(resp.data);
       const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
+      a.href = objectUrl;
       const stamp = new Date().toISOString().replace(/[:.]/g, "-");
       a.download = `boxes-${stamp}.${format}`;
       document.body.appendChild(a);
@@ -44,8 +40,11 @@ export function ExportsPage() {
       a.remove();
     } catch (err) {
       console.error("[exports] failed", err);
-      alert(`Export failed: ${(err as Error).message}`);
+      const status = (err as { response?: { status?: number } }).response?.status;
+      const detail = status ? `status ${status}` : (err as Error).message;
+      alert(`Export failed: ${detail}`);
     } finally {
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
       setDownloading(null);
     }
   }
