@@ -9,6 +9,7 @@ from sqlalchemy import select
 from app.deps import CurrentUser, DbSession, require_operator
 from app.models.alerts import Alert
 from app.schemas.alerts import AlertOut
+from app.services.acl import apply_warehouse_filter, can_access
 
 router = APIRouter(prefix="/alerts", tags=["alerts"])
 
@@ -19,7 +20,9 @@ def list_alerts(
     user: CurrentUser,
     only_open: bool = Query(default=True),
 ) -> list[AlertOut]:
-    stmt = select(Alert).order_by(Alert.triggered_at.desc())
+    stmt = apply_warehouse_filter(select(Alert), user, Alert.warehouse_id).order_by(
+        Alert.triggered_at.desc()
+    )
     if only_open:
         stmt = stmt.where(Alert.resolved_at.is_(None))
     rows = db.scalars(stmt.limit(200)).all()
@@ -33,7 +36,9 @@ def acknowledge(
     user: Annotated[CurrentUser, Depends(require_operator)],
 ) -> AlertOut:
     alert = db.get(Alert, alert_id)
-    if alert is None:
+    # 404 (not 403) if the alert is in a warehouse outside the caller's ACL,
+    # so we don't leak existence.
+    if alert is None or not can_access(user, alert.warehouse_id):
         raise HTTPException(status_code=404, detail="alert not found")
     alert.acknowledged_at = datetime.now(UTC)
     alert.acknowledged_by_user_id = user.id

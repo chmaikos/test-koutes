@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -74,6 +74,13 @@ def make_user(session: Session):
             must_change_credentials=False,
             last_login_at=datetime.now(UTC),
         )
+        # Mirror the production migration's CROSS JOIN backfill: every
+        # operator/viewer fixture starts with access to all currently
+        # seeded warehouses, so existing tests (which assume non-admins
+        # can act on any of buildings 1/2/3) keep working untouched.
+        # Admins ignore the table entirely, so we leave them empty.
+        if role != UserRole.admin:
+            u.warehouses = list(session.scalars(select(Warehouse)).all())
         session.add(u)
         session.commit()
         session.refresh(u)

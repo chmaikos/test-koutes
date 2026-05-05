@@ -10,6 +10,7 @@ from app.deps import CurrentUser, DbSession
 from app.models.boxes import Box
 from app.models.warehouses import Warehouse
 from app.routers._filters import BoxFilters, apply_box_filters, parse_box_filters
+from app.services.acl import apply_warehouse_filter
 from app.services.exports import boxes_to_csv, boxes_to_xlsx
 
 router = APIRouter(prefix="/exports", tags=["exports"])
@@ -30,7 +31,10 @@ def export_csv(
     user: CurrentUser,
     filters: Annotated[BoxFilters, Depends(parse_box_filters)],
 ) -> Response:
-    stmt = apply_box_filters(select(Box), filters).order_by(Box.updated_at.desc())
+    stmt = apply_box_filters(select(Box), filters)
+    stmt = apply_warehouse_filter(stmt, user, Box.current_warehouse_id).order_by(
+        Box.updated_at.desc()
+    )
     rows = db.scalars(stmt).all()
     payload = boxes_to_csv(rows, _warehouse_names(db))
     return Response(
@@ -48,7 +52,10 @@ def export_xlsx(
     user: CurrentUser,
     filters: Annotated[BoxFilters, Depends(parse_box_filters)],
 ) -> Response:
-    stmt = apply_box_filters(select(Box), filters).order_by(Box.updated_at.desc())
+    stmt = apply_box_filters(select(Box), filters)
+    stmt = apply_warehouse_filter(stmt, user, Box.current_warehouse_id).order_by(
+        Box.updated_at.desc()
+    )
     rows = db.scalars(stmt).all()
     payload = boxes_to_xlsx(rows, _warehouse_names(db))
     return Response(

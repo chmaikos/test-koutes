@@ -28,6 +28,7 @@ export interface User {
   username: string | null;
   is_local: boolean;
   must_change_credentials: boolean;
+  warehouse_ids: number[];
 }
 
 export interface LocalLoginResponse {

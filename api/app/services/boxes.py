@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.models.boxes import Box, BoxEvent, BoxEventType, BoxStatus
 from app.models.users import User
 from app.models.warehouses import Warehouse
+from app.services.acl import can_access
 
 # Valid forward transitions; "returned" is terminal.
 _ALLOWED_TRANSITIONS: dict[BoxStatus, set[BoxStatus]] = {
@@ -35,6 +36,10 @@ class BoxConflictError(BoxRuleError):
     """A unique-constraint violation (duplicate box_number)."""
 
 
+class BoxAccessError(BoxRuleError):
+    """The caller does not have ACL access to the warehouse involved."""
+
+
 def _ensure_warehouse(db: Session, warehouse_id: int) -> Warehouse:
     wh = db.get(Warehouse, warehouse_id)
     if wh is None:
@@ -52,6 +57,10 @@ def create_box(
     note: str | None = None,
 ) -> Box:
     _ensure_warehouse(db, warehouse_id)
+    if not can_access(user, warehouse_id):
+        raise BoxAccessError(
+            f"no access to warehouse {warehouse_id}"
+        )
     cleaned_number = box_number.strip()
     if not cleaned_number:
         raise BoxRuleError("box_number is required")
@@ -113,11 +122,23 @@ def update_box(
     events: list[BoxEvent] = []
     audit_note = _audit_note(note, force=force)
 
+    # ACL: the caller must have access to the box's *current* warehouse to
+    # touch it at all, and to the *target* warehouse if they're moving it.
+    # Admins bypass via can_access.
+    if not can_access(user, box.current_warehouse_id):
+        raise BoxAccessError(
+            f"no access to warehouse {box.current_warehouse_id}"
+        )
+
     if new_owner is not None and new_owner != box.owner:
         box.owner = new_owner.strip()
 
     if new_warehouse_id is not None and new_warehouse_id != box.current_warehouse_id:
         _ensure_warehouse(db, new_warehouse_id)
+        if not can_access(user, new_warehouse_id):
+            raise BoxAccessError(
+                f"no access to warehouse {new_warehouse_id}"
+            )
         if box.status == BoxStatus.returned and not force:
             raise BoxRuleError("cannot move a returned box")
         events.append(

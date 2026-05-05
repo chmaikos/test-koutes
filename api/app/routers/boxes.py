@@ -30,8 +30,10 @@ from app.schemas.boxes import (
     BulkSkip,
 )
 from app.schemas.common import Page
+from app.services.acl import apply_warehouse_filter, can_access
 from app.services.alerts import evaluate_safe
 from app.services.boxes import (
+    BoxAccessError,
     BoxConflictError,
     BoxRuleError,
     bulk_delete_boxes,
@@ -45,11 +47,12 @@ router = APIRouter(prefix="/boxes", tags=["boxes"])
 
 
 def _rule_error_to_http(exc: BoxRuleError) -> HTTPException:
-    code = (
-        status.HTTP_409_CONFLICT
-        if isinstance(exc, BoxConflictError)
-        else status.HTTP_400_BAD_REQUEST
-    )
+    if isinstance(exc, BoxAccessError):
+        code = status.HTTP_403_FORBIDDEN
+    elif isinstance(exc, BoxConflictError):
+        code = status.HTTP_409_CONFLICT
+    else:
+        code = status.HTTP_400_BAD_REQUEST
     return HTTPException(status_code=code, detail=str(exc))
 
 
@@ -71,7 +74,10 @@ def list_boxes(
     page_size: int = Query(default=50, ge=1, le=200),
 ) -> Page[BoxOut]:
     stmt = select(Box)
-    stmt = apply_box_filters(stmt, filters).order_by(Box.updated_at.desc())
+    stmt = apply_box_filters(stmt, filters)
+    stmt = apply_warehouse_filter(stmt, user, Box.current_warehouse_id).order_by(
+        Box.updated_at.desc()
+    )
     total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     items = db.scalars(stmt.offset((page - 1) * page_size).limit(page_size)).all()
     return Page[BoxOut](
@@ -154,7 +160,9 @@ async def bulk_update(
 @router.get("/{box_id}", response_model=BoxOut)
 def get_box(box_id: int, db: DbSession, user: CurrentUser) -> BoxOut:
     box = db.get(Box, box_id)
-    if box is None:
+    # 404 (not 403) when the caller can't see this warehouse, so we don't
+    # leak the existence of boxes outside their ACL.
+    if box is None or not can_access(user, box.current_warehouse_id):
         raise HTTPException(status_code=404, detail="not found")
     return BoxOut.model_validate(box)
 
@@ -168,7 +176,7 @@ async def patch_box(
     user: Annotated[CurrentUser, Depends(require_operator)],
 ) -> BoxOut:
     box = db.get(Box, box_id)
-    if box is None:
+    if box is None or not can_access(user, box.current_warehouse_id):
         raise HTTPException(status_code=404, detail="not found")
     _check_force(payload.force, user)
     try:
@@ -204,7 +212,9 @@ async def delete_single_box(
     user: Annotated[CurrentUser, Depends(require_admin)],
 ) -> Response:
     box = db.get(Box, box_id)
-    if box is None:
+    # require_admin already gates this, but keep ACL consistent in case
+    # the dependency is ever loosened.
+    if box is None or not can_access(user, box.current_warehouse_id):
         raise HTTPException(status_code=404, detail="not found")
     warehouse_id = delete_box(db, box=box)
     await bus.publish("box.deleted", {"id": box_id, "warehouse_id": warehouse_id})
@@ -237,7 +247,8 @@ async def bulk_delete(
 def list_box_events(
     box_id: int, db: DbSession, user: CurrentUser
 ) -> list[BoxEventOut]:
-    if db.get(Box, box_id) is None:
+    box = db.get(Box, box_id)
+    if box is None or not can_access(user, box.current_warehouse_id):
         raise HTTPException(status_code=404, detail="not found")
     events = db.scalars(
         select(BoxEvent)

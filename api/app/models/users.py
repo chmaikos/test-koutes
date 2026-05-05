@@ -3,16 +3,50 @@ from __future__ import annotations
 import enum
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Enum, String, func
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy import (
+    Boolean,
+    Column,
+    DateTime,
+    Enum,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Table,
+    func,
+)
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
+from app.models.warehouses import Warehouse
 
 
 class UserRole(str, enum.Enum):
     admin = "admin"
     operator = "operator"
     viewer = "viewer"
+
+
+# Per-warehouse ACL. A row in this table grants its user access to that
+# warehouse. Admins ignore the table entirely (they always have access to
+# everything); for operators/viewers, an empty set means no access.
+user_warehouse_access = Table(
+    "user_warehouse_access",
+    Base.metadata,
+    Column(
+        "user_id",
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column(
+        "warehouse_id",
+        Integer,
+        ForeignKey("warehouses.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Index("ix_user_warehouse_access_user_id", "user_id"),
+)
 
 
 class User(Base):
@@ -43,4 +77,8 @@ class User(Base):
     is_local: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     must_change_credentials: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False
+    )
+
+    warehouses: Mapped[list[Warehouse]] = relationship(
+        secondary=user_warehouse_access, lazy="selectin"
     )

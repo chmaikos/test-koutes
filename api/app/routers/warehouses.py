@@ -8,13 +8,17 @@ from sqlalchemy import select
 from app.deps import CurrentUser, DbSession, require_admin
 from app.models.warehouses import Warehouse
 from app.schemas.warehouses import WarehouseCreate, WarehouseOut, WarehouseUpdate
+from app.services.acl import apply_warehouse_filter
 
 router = APIRouter(prefix="/warehouses", tags=["warehouses"])
 
 
 @router.get("", response_model=list[WarehouseOut])
 def list_warehouses(db: DbSession, user: CurrentUser) -> list[WarehouseOut]:
-    rows = db.scalars(select(Warehouse).order_by(Warehouse.id)).all()
+    stmt = apply_warehouse_filter(select(Warehouse), user, Warehouse.id).order_by(
+        Warehouse.id
+    )
+    rows = db.scalars(stmt).all()
     return [WarehouseOut.model_validate(w) for w in rows]
 
 

@@ -10,6 +10,7 @@ from app.models.alerts import Alert
 from app.models.boxes import ACTIVE_STATUSES, Box, BoxEvent, BoxEventType, BoxStatus
 from app.models.warehouses import Warehouse
 from app.schemas.dashboard import DashboardSummary, WarehouseSummary
+from app.services.acl import apply_warehouse_filter
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
@@ -20,18 +21,29 @@ def summary(db: DbSession, user: CurrentUser) -> DashboardSummary:
     midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
     tomorrow = midnight + timedelta(days=1)
 
-    warehouses = db.scalars(select(Warehouse).order_by(Warehouse.id)).all()
+    warehouses = db.scalars(
+        apply_warehouse_filter(select(Warehouse), user, Warehouse.id).order_by(
+            Warehouse.id
+        )
+    ).all()
 
     status_rows = db.execute(
-        select(Box.current_warehouse_id, Box.status, func.count(Box.id))
-        .group_by(Box.current_warehouse_id, Box.status)
+        apply_warehouse_filter(
+            select(Box.current_warehouse_id, Box.status, func.count(Box.id)),
+            user,
+            Box.current_warehouse_id,
+        ).group_by(Box.current_warehouse_id, Box.status)
     ).all()
     by_warehouse_status: dict[int, dict[BoxStatus, int]] = {}
     for wid, st, c in status_rows:
         by_warehouse_status.setdefault(wid, {})[st] = int(c)
 
     received_today_rows = db.execute(
-        select(BoxEvent.warehouse_id, func.count(BoxEvent.id))
+        apply_warehouse_filter(
+            select(BoxEvent.warehouse_id, func.count(BoxEvent.id)),
+            user,
+            BoxEvent.warehouse_id,
+        )
         .where(
             BoxEvent.event_type == BoxEventType.created,
             BoxEvent.occurred_at >= midnight,
@@ -42,7 +54,11 @@ def summary(db: DbSession, user: CurrentUser) -> DashboardSummary:
     received_today = {wid: int(c) for wid, c in received_today_rows}
 
     returned_today_rows = db.execute(
-        select(BoxEvent.warehouse_id, func.count(BoxEvent.id))
+        apply_warehouse_filter(
+            select(BoxEvent.warehouse_id, func.count(BoxEvent.id)),
+            user,
+            BoxEvent.warehouse_id,
+        )
         .where(
             BoxEvent.event_type == BoxEventType.returned,
             BoxEvent.occurred_at >= midnight,
@@ -53,7 +69,11 @@ def summary(db: DbSession, user: CurrentUser) -> DashboardSummary:
     returned_today = {wid: int(c) for wid, c in returned_today_rows}
 
     open_alert_rows = db.execute(
-        select(Alert.warehouse_id, func.count(Alert.id))
+        apply_warehouse_filter(
+            select(Alert.warehouse_id, func.count(Alert.id)),
+            user,
+            Alert.warehouse_id,
+        )
         .where(Alert.resolved_at.is_(None))
         .group_by(Alert.warehouse_id)
     ).all()

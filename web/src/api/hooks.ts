@@ -91,9 +91,20 @@ export function useUpdateUser() {
   return useMutation({
     mutationFn: async (input: {
       id: number;
-      patch: { role?: User["role"]; is_active?: boolean; role_override?: boolean };
+      patch: {
+        role?: User["role"];
+        is_active?: boolean;
+        role_override?: boolean;
+        warehouse_ids?: number[];
+      };
     }) => (await api.patch<User>(`/users/${input.id}`, input.patch)).data,
-    onSuccess: () => qc.invalidateQueries({ queryKey: queryKeys.users }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.users });
+      // ACL changes can flip what the affected user (or the admin themselves
+      // when adjusting their own row) sees; refresh warehouse-scoped views.
+      qc.invalidateQueries({ queryKey: queryKeys.warehouses });
+      qc.invalidateQueries({ queryKey: queryKeys.dashboard });
+    },
   });
 }
 

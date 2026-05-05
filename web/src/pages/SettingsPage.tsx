@@ -7,7 +7,7 @@ import {
   useUsers,
   useWarehouses,
 } from "@/api/hooks";
-import type { Role } from "@/api/types";
+import type { Role, User, Warehouse } from "@/api/types";
 
 export function SettingsPage() {
   return (
@@ -252,6 +252,7 @@ function WarehouseRow({
 
 function UsersSection() {
   const { data } = useUsers();
+  const { data: warehouses } = useWarehouses();
   const update = useUpdateUser();
 
   return (
@@ -260,7 +261,9 @@ function UsersSection() {
         <h2 className="font-semibold">Users</h2>
         <p className="text-xs text-slate-500">
           Roles default to those granted via Entra App Roles. Pinning a role
-          here will override Entra until you clear it.
+          here will override Entra until you clear it. New users start with no
+          warehouse access — toggle the checkboxes to grant per-warehouse
+          permissions.
         </p>
       </header>
       <table className="w-full text-sm">
@@ -270,6 +273,7 @@ function UsersSection() {
             <th className="px-4 py-2.5 text-left">Role</th>
             <th className="px-4 py-2.5 text-left">Override</th>
             <th className="px-4 py-2.5 text-left">Active</th>
+            <th className="px-4 py-2.5 text-left">Warehouses</th>
             <th className="px-4 py-2.5 text-left">Last login</th>
           </tr>
         </thead>
@@ -320,6 +324,15 @@ function UsersSection() {
                   }
                 />
               </td>
+              <td className="px-4 py-2.5">
+                <WarehouseAccessCell
+                  user={u}
+                  warehouses={warehouses ?? []}
+                  onChange={(warehouse_ids) =>
+                    update.mutate({ id: u.id, patch: { warehouse_ids } })
+                  }
+                />
+              </td>
               <td className="px-4 py-2.5 text-slate-500">
                 {u.last_login_at
                   ? new Date(u.last_login_at).toLocaleString()
@@ -330,5 +343,59 @@ function UsersSection() {
         </tbody>
       </table>
     </section>
+  );
+}
+
+function WarehouseAccessCell({
+  user,
+  warehouses,
+  onChange,
+}: {
+  user: User;
+  warehouses: Warehouse[];
+  onChange: (warehouse_ids: number[]) => void;
+}) {
+  // Admins always have unrestricted access -- the ACL doesn't apply to them
+  // regardless of what's stored in user_warehouse_access. Surface that as a
+  // read-only badge so it's clear to the operator.
+  if (user.role === "admin") {
+    return (
+      <span className="inline-flex items-center rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700 ring-1 ring-inset ring-emerald-200">
+        All warehouses
+      </span>
+    );
+  }
+  const granted = new Set(user.warehouse_ids);
+  return (
+    <div className="flex flex-wrap gap-2">
+      {warehouses.length === 0 ? (
+        <span className="text-xs text-slate-400">No warehouses</span>
+      ) : (
+        warehouses.map((w) => {
+          const checked = granted.has(w.id);
+          return (
+            <label
+              key={w.id}
+              className="inline-flex items-center gap-1.5 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs hover:bg-slate-50"
+            >
+              <input
+                type="checkbox"
+                checked={checked}
+                onChange={(e) => {
+                  const next = new Set(granted);
+                  if (e.target.checked) {
+                    next.add(w.id);
+                  } else {
+                    next.delete(w.id);
+                  }
+                  onChange(Array.from(next).sort((a, b) => a - b));
+                }}
+              />
+              <span>{w.name}</span>
+            </label>
+          );
+        })
+      )}
+    </div>
   );
 }
