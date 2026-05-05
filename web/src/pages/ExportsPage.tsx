@@ -16,7 +16,6 @@ export function ExportsPage() {
 
   async function download(format: "csv" | "xlsx") {
     setDownloading(format);
-    let objectUrl: string | null = null;
     try {
       // Re-uses the shared axios client, so the request interceptor adds the
       // local-admin HS256 token or the Entra access token transparently —
@@ -30,21 +29,24 @@ export function ExportsPage() {
         params,
         responseType: "blob",
       });
-      objectUrl = URL.createObjectURL(resp.data);
+      const url = URL.createObjectURL(resp.data);
       const a = document.createElement("a");
-      a.href = objectUrl;
+      a.href = url;
       const stamp = new Date().toISOString().replace(/[:.]/g, "-");
       a.download = `boxes-${stamp}.${format}`;
       document.body.appendChild(a);
       a.click();
       a.remove();
+      // Defer revocation: a.click() only schedules the download; the browser
+      // fetches the blob asynchronously, so revoking synchronously would
+      // invalidate the URL before the download starts.
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
     } catch (err) {
       console.error("[exports] failed", err);
       const status = (err as { response?: { status?: number } }).response?.status;
       const detail = status ? `status ${status}` : (err as Error).message;
       alert(`Export failed: ${detail}`);
     } finally {
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
       setDownloading(null);
     }
   }

@@ -88,8 +88,11 @@ def test_filters_search_and_exports(client):
     csv = client.get("/api/exports/boxes.csv", params={"warehouse_id": 2})
     assert csv.status_code == 200
     assert csv.headers["content-type"].startswith("text/csv")
-    text = csv.content.decode()
-    assert "box_number" in text
+    # The CSV is encoded with a UTF-8 BOM so Excel on Windows opens it cleanly.
+    text = csv.content.decode("utf-8-sig")
+    assert "Box Number" in text
+    assert "Warehouse" in text
+    assert "Building 2" in text
     assert "B-200" in text and "B-201" in text and "B-100" not in text
 
     xlsx = client.get("/api/exports/boxes.xlsx", params={"warehouse_id": 2})
@@ -98,8 +101,12 @@ def test_filters_search_and_exports(client):
     ws = wb.active
     rows = list(ws.iter_rows(values_only=True))
     headers = rows[0]
-    assert "box_number" in headers
-    assert any(r and r[0] in ("B-200", "B-201") for r in rows[1:])
+    assert "Box Number" in headers
+    assert "Warehouse" in headers
+    warehouse_col = headers.index("Warehouse")
+    data_rows = [r for r in rows[1:] if r and r[0] in ("B-200", "B-201")]
+    assert len(data_rows) == 2
+    assert all(r[warehouse_col] == "Building 2" for r in data_rows)
 
 
 def test_alerts_max_capacity(client, session):

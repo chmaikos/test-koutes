@@ -8,6 +8,7 @@ from sqlalchemy import select
 
 from app.deps import CurrentUser, DbSession
 from app.models.boxes import Box
+from app.models.warehouses import Warehouse
 from app.routers._filters import BoxFilters, apply_box_filters, parse_box_filters
 from app.services.exports import boxes_to_csv, boxes_to_xlsx
 
@@ -19,6 +20,10 @@ def _filename(prefix: str, ext: str) -> str:
     return f"{prefix}-{stamp}.{ext}"
 
 
+def _warehouse_names(db) -> dict[int, str]:
+    return dict(db.execute(select(Warehouse.id, Warehouse.name)).all())
+
+
 @router.get("/boxes.csv")
 def export_csv(
     db: DbSession,
@@ -27,7 +32,7 @@ def export_csv(
 ) -> Response:
     stmt = apply_box_filters(select(Box), filters).order_by(Box.updated_at.desc())
     rows = db.scalars(stmt).all()
-    payload = boxes_to_csv(rows)
+    payload = boxes_to_csv(rows, _warehouse_names(db))
     return Response(
         content=payload,
         media_type="text/csv",
@@ -45,7 +50,7 @@ def export_xlsx(
 ) -> Response:
     stmt = apply_box_filters(select(Box), filters).order_by(Box.updated_at.desc())
     rows = db.scalars(stmt).all()
-    payload = boxes_to_xlsx(rows)
+    payload = boxes_to_xlsx(rows, _warehouse_names(db))
     return Response(
         content=payload,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
