@@ -7,7 +7,7 @@ from sqlalchemy import select
 
 from app.deps import CurrentUser, DbSession, require_admin
 from app.models.warehouses import Warehouse
-from app.schemas.warehouses import WarehouseOut, WarehouseUpdate
+from app.schemas.warehouses import WarehouseCreate, WarehouseOut, WarehouseUpdate
 
 router = APIRouter(prefix="/warehouses", tags=["warehouses"])
 
@@ -16,6 +16,28 @@ router = APIRouter(prefix="/warehouses", tags=["warehouses"])
 def list_warehouses(db: DbSession, user: CurrentUser) -> list[WarehouseOut]:
     rows = db.scalars(select(Warehouse).order_by(Warehouse.id)).all()
     return [WarehouseOut.model_validate(w) for w in rows]
+
+
+@router.post("", response_model=WarehouseOut, status_code=201)
+def create_warehouse(
+    payload: WarehouseCreate,
+    db: DbSession,
+    user: Annotated[CurrentUser, Depends(require_admin)],
+) -> WarehouseOut:
+    if payload.min_inventory >= payload.max_capacity:
+        raise HTTPException(
+            status_code=400,
+            detail="min_inventory must be less than max_capacity",
+        )
+    wh = Warehouse(
+        name=payload.name.strip(),
+        min_inventory=payload.min_inventory,
+        max_capacity=payload.max_capacity,
+    )
+    db.add(wh)
+    db.commit()
+    db.refresh(wh)
+    return WarehouseOut.model_validate(wh)
 
 
 @router.patch("/{warehouse_id}", response_model=WarehouseOut)

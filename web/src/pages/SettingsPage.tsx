@@ -1,5 +1,7 @@
 import { useState } from "react";
+import { Plus } from "lucide-react";
 import {
+  useCreateWarehouse,
   useUpdateUser,
   useUpdateWarehouse,
   useUsers,
@@ -26,16 +28,37 @@ export function SettingsPage() {
 function WarehousesSection() {
   const { data } = useWarehouses();
   const update = useUpdateWarehouse();
+  const create = useCreateWarehouse();
+  const [showAdd, setShowAdd] = useState(false);
 
   return (
     <section className="card overflow-hidden">
-      <header className="border-b border-slate-100 px-5 py-3">
-        <h2 className="font-semibold">Warehouses & thresholds</h2>
-        <p className="text-xs text-slate-500">
-          Inventory below the minimum or at/above the maximum will trigger an
-          alert.
-        </p>
+      <header className="flex items-start justify-between gap-3 border-b border-slate-100 px-5 py-3">
+        <div>
+          <h2 className="font-semibold">Warehouses & thresholds</h2>
+          <p className="text-xs text-slate-500">
+            Inventory below the minimum or at/above the maximum will trigger an
+            alert.
+          </p>
+        </div>
+        <button
+          type="button"
+          className="btn-secondary"
+          onClick={() => setShowAdd((v) => !v)}
+        >
+          <Plus className="h-4 w-4" />
+          {showAdd ? "Cancel" : "Add warehouse"}
+        </button>
       </header>
+      {showAdd && (
+        <NewWarehouseForm
+          onCreate={async (input) => {
+            await create.mutateAsync(input);
+            setShowAdd(false);
+          }}
+          onCancel={() => setShowAdd(false)}
+        />
+      )}
       <table className="w-full text-sm">
         <thead className="bg-slate-50 text-xs uppercase tracking-wider text-slate-500">
           <tr>
@@ -56,6 +79,97 @@ function WarehousesSection() {
         </tbody>
       </table>
     </section>
+  );
+}
+
+function NewWarehouseForm({
+  onCreate,
+  onCancel,
+}: {
+  onCreate: (input: {
+    name: string;
+    min_inventory: number;
+    max_capacity: number;
+  }) => Promise<unknown>;
+  onCancel: () => void;
+}) {
+  const [name, setName] = useState("");
+  const [minInv, setMinInv] = useState(0);
+  const [maxCap, setMaxCap] = useState(1000);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  return (
+    <div className="grid gap-3 border-b border-slate-100 bg-slate-50/60 px-5 py-4 sm:grid-cols-[2fr_1fr_1fr_auto] sm:items-end">
+      <label className="block">
+        <span className="text-xs text-slate-500">Name</span>
+        <input
+          className="input"
+          autoFocus
+          value={name}
+          placeholder="Building 4"
+          onChange={(e) => setName(e.target.value)}
+        />
+      </label>
+      <label className="block">
+        <span className="text-xs text-slate-500">Min inventory</span>
+        <input
+          type="number"
+          className="input"
+          min={0}
+          value={minInv}
+          onChange={(e) => setMinInv(Number(e.target.value))}
+        />
+      </label>
+      <label className="block">
+        <span className="text-xs text-slate-500">Max capacity</span>
+        <input
+          type="number"
+          className="input"
+          min={1}
+          value={maxCap}
+          onChange={(e) => setMaxCap(Number(e.target.value))}
+        />
+      </label>
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          className="btn-primary"
+          disabled={pending || !name.trim()}
+          onClick={async () => {
+            setPending(true);
+            setError(null);
+            try {
+              await onCreate({
+                name: name.trim(),
+                min_inventory: minInv,
+                max_capacity: maxCap,
+              });
+            } catch (err: unknown) {
+              const detail =
+                (err as { response?: { data?: { detail?: string } } })?.response
+                  ?.data?.detail ?? "Failed to create warehouse";
+              setError(typeof detail === "string" ? detail : "Failed to create warehouse");
+            } finally {
+              setPending(false);
+            }
+          }}
+        >
+          {pending ? "Creating..." : "Create"}
+        </button>
+        <button
+          type="button"
+          className="btn-secondary"
+          disabled={pending}
+          onClick={onCancel}
+        >
+          Cancel
+        </button>
+      </div>
+      {error && (
+        <p className="text-xs text-rose-600 sm:col-span-4">{error}</p>
+      )}
+    </div>
   );
 }
 

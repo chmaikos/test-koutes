@@ -64,6 +64,21 @@ export function useUpdateWarehouse() {
   });
 }
 
+export function useCreateWarehouse() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: {
+      name: string;
+      min_inventory?: number;
+      max_capacity?: number;
+    }) => (await api.post<Warehouse>("/warehouses", input)).data,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.warehouses });
+      qc.invalidateQueries({ queryKey: queryKeys.dashboard });
+    },
+  });
+}
+
 export function useUsers() {
   return useQuery({
     queryKey: queryKeys.users,

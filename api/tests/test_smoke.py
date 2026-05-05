@@ -211,6 +211,50 @@ def test_warehouse_thresholds_admin_only(client):
     assert bad.status_code == 400
 
 
+def test_admin_can_create_warehouse(client):
+    resp = client.post(
+        "/api/warehouses",
+        json={"name": "Building 4", "min_inventory": 0, "max_capacity": 100},
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["name"] == "Building 4"
+    assert body["min_inventory"] == 0
+    assert body["max_capacity"] == 100
+    # Auto-allocated id should land past the seeded 1/2/3.
+    assert body["id"] > 3
+
+    listing = client.get("/api/warehouses").json()
+    assert any(w["id"] == body["id"] and w["name"] == "Building 4" for w in listing)
+    assert len(listing) == 4
+
+
+def test_create_warehouse_rejects_min_ge_max(client):
+    resp = client.post(
+        "/api/warehouses",
+        json={"name": "Bad", "min_inventory": 100, "max_capacity": 100},
+    )
+    assert resp.status_code == 400
+    assert "min_inventory" in resp.json()["detail"]
+
+
+def test_create_warehouse_requires_admin(client, make_user):
+    from app.deps import get_current_user
+    from app.main import app
+    from app.models.users import UserRole
+
+    operator = make_user(UserRole.operator)
+    app.dependency_overrides[get_current_user] = lambda: operator
+    try:
+        resp = client.post(
+            "/api/warehouses",
+            json={"name": "Building X", "min_inventory": 0, "max_capacity": 50},
+        )
+        assert resp.status_code == 403
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+
+
 def test_role_gating_operator_cannot_manage_users(client, session, make_user):
     from app.deps import get_current_user
     from app.main import app
