@@ -23,8 +23,16 @@ export function ExportsPage() {
       const params: Record<string, string> = {};
       if (warehouseId) params.warehouse_id = String(warehouseId);
       if (status) params.status = status;
-      if (receivedFrom) params.received_from = new Date(receivedFrom).toISOString();
-      if (receivedTo) params.received_to = new Date(receivedTo).toISOString();
+      // The <input type="date"> gives us "YYYY-MM-DD" which the user picked
+      // on their local calendar. Build a half-open range [start-of-day,
+      // end-of-day] in the user's timezone so picking "today" actually
+      // covers boxes received today regardless of TZ offset.
+      if (receivedFrom) {
+        params.received_from = new Date(`${receivedFrom}T00:00:00`).toISOString();
+      }
+      if (receivedTo) {
+        params.received_to = new Date(`${receivedTo}T23:59:59.999`).toISOString();
+      }
       const resp = await api.get<Blob>(`/exports/boxes.${format}`, {
         params,
         responseType: "blob",
