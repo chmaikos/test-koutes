@@ -3,6 +3,7 @@ import { useIsAuthenticated, useMsal } from "@azure/msal-react";
 import { AlertTriangle, Boxes, KeyRound, Lock, LogIn } from "lucide-react";
 import clsx from "clsx";
 import {
+  clearCachedAccounts,
   getSsoError,
   loginRequest,
   setSsoError,
@@ -110,11 +111,24 @@ export function AuthGate({ children }: { children: ReactNode }) {
             <button
               type="button"
               className="btn-primary mt-5 w-full"
-              onClick={() => {
+              onClick={async () => {
                 setSsoError(null);
-                instance.loginRedirect(loginRequest).catch((err) => {
-                  console.warn("[auth] loginRedirect failed", err);
-                });
+                // Wipe any account MSAL has cached from a previous attempt
+                // (e.g. an Exclaimer-style service mailbox) before we kick
+                // off the redirect, otherwise MSAL silently appends
+                // login_hint/X-AnchorMailbox for that stale account and
+                // Microsoft renders the generic "We couldn't sign you in"
+                // page with no AADSTS code.
+                await clearCachedAccounts();
+                instance
+                  .loginRedirect({
+                    ...loginRequest,
+                    account: undefined,
+                    loginHint: undefined,
+                  })
+                  .catch((err) => {
+                    console.warn("[auth] loginRedirect failed", err);
+                  });
               }}
             >
               <LogIn className="h-4 w-4" /> Sign in with Microsoft
@@ -193,6 +207,13 @@ function LocalLoginForm({ onSuccess }: { onSuccess: () => void }) {
 }
 
 function SsoErrorBanner({ err }: { err: SsoErrorDetails }) {
+  // AADSTS90014 ("required field 'request' is missing") is what Microsoft
+  // returns when the user presses the browser Back button after a sign-in
+  // attempt - the back navigation re-submits the authorize URL without a
+  // fresh PKCE state. It's never a real config bug, so we soften the
+  // message and tell the user to just click Sign in again.
+  const isBackButtonArtifact = err.code === "AADSTS90014";
+
   return (
     <div
       role="alert"
@@ -202,19 +223,31 @@ function SsoErrorBanner({ err }: { err: SsoErrorDetails }) {
         <AlertTriangle className="mt-0.5 h-3.5 w-3.5 flex-none text-rose-500" />
         <div className="space-y-1">
           <p className="font-semibold">
-            Microsoft sign-in failed
+            {isBackButtonArtifact
+              ? "Sign-in interrupted"
+              : "Microsoft sign-in failed"}
             {err.code ? <span className="font-mono"> ({err.code})</span> : null}
           </p>
-          <p className="break-words">{err.message}</p>
+          {isBackButtonArtifact ? (
+            <p>
+              This usually means you pressed the browser Back button during
+              sign-in. Click <span className="font-semibold">Sign in with
+              Microsoft</span> below to start a fresh attempt.
+            </p>
+          ) : (
+            <p className="break-words">{err.message}</p>
+          )}
           {err.correlationId && (
             <p className="text-rose-700">
               Correlation ID: <span className="font-mono">{err.correlationId}</span>
             </p>
           )}
-          <p className="text-rose-700">
-            Check the README "Troubleshooting SSO" table, or use the Local
-            admin tab as a fallback.
-          </p>
+          {!isBackButtonArtifact && (
+            <p className="text-rose-700">
+              Check the README "Troubleshooting SSO" table, or use the Local
+              admin tab as a fallback.
+            </p>
+          )}
         </div>
       </div>
     </div>

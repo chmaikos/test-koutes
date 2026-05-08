@@ -106,6 +106,34 @@ export function subscribeSsoError(
   };
 }
 
+// Wipe every account MSAL has persisted in localStorage, plus any active
+// account pointer. We call this immediately before `loginRedirect()` so that
+// MSAL doesn't silently append `login_hint=<stale-account>` and
+// `X-AnchorMailbox=Oid:<stale-oid>@<tenant>` to the authorize URL based on a
+// previously cached account (e.g. a service mailbox like `exclaimer@...` that
+// once succeeded then stopped being valid for interactive sign-in). When that
+// happens, Microsoft's pretty page renders a generic "We couldn't sign you
+// in. Please try again." with no AADSTS code, and the user is stuck in a
+// loop because the stale account survives every page reload.
+export async function clearCachedAccounts(): Promise<void> {
+  try {
+    msalInstance.setActiveAccount(null);
+    const accounts = msalInstance.getAllAccounts();
+    for (const account of accounts) {
+      try {
+        await msalInstance.clearCache({ account });
+      } catch (err) {
+        console.warn(
+          `[auth] clearCache failed for ${account.username ?? account.homeAccountId}`,
+          err,
+        );
+      }
+    }
+  } catch (err) {
+    console.warn("[auth] clearCachedAccounts failed", err);
+  }
+}
+
 export async function acquireApiToken(account: AccountInfo): Promise<string> {
   if (!ssoAvailableFlag) {
     throw new Error("Microsoft SSO is not available in this context");
