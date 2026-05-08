@@ -108,24 +108,32 @@ async def validate_access_token(token: str) -> TokenClaims:
             status_code=status.HTTP_401_UNAUTHORIZED, detail="signing key not found"
         )
 
-    audience_candidates = {settings.entra_api_audience, settings.entra_client_id}
-    audience_candidates.discard("")
+    # python-jose 3.3.0's jwt.decode() raises JWTError("audience must be a
+    # string or None") if you pass a list. Entra issues v2 access tokens with
+    # `aud` = the API URI (api://<client-id>) and v1 tokens with `aud` = the
+    # client GUID, so we have to try each candidate audience separately
+    # against each candidate issuer (v1 vs v2) and accept the first
+    # combination that decodes cleanly.
+    audience_candidates: list[str | None] = [
+        a for a in (settings.entra_api_audience, settings.entra_client_id) if a
+    ] or [None]
 
     last_error: Exception | None = None
     for issuer in (settings.issuer, settings.issuer_v1):
-        try:
-            payload = jwt.decode(
-                token,
-                key,
-                algorithms=[unverified_header.get("alg") or "RS256"],
-                audience=list(audience_candidates) if audience_candidates else None,
-                issuer=issuer,
-                options={"verify_at_hash": False},
-            )
-            return TokenClaims(payload)
-        except JWTError as exc:
-            last_error = exc
-            continue
+        for audience in audience_candidates:
+            try:
+                payload = jwt.decode(
+                    token,
+                    key,
+                    algorithms=[unverified_header.get("alg") or "RS256"],
+                    audience=audience,
+                    issuer=issuer,
+                    options={"verify_at_hash": False},
+                )
+                return TokenClaims(payload)
+            except JWTError as exc:
+                last_error = exc
+                continue
 
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
