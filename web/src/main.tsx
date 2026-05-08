@@ -3,9 +3,18 @@ import ReactDOM from "react-dom/client";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MsalProvider } from "@azure/msal-react";
-import { EventType } from "@azure/msal-browser";
+import {
+  AuthError,
+  EventType,
+  type EventMessage,
+} from "@azure/msal-browser";
 import "./index.css";
-import { disableSso, msalInstance, ssoAvailable } from "@/auth/msal";
+import {
+  disableSso,
+  msalInstance,
+  setSsoError,
+  ssoAvailable,
+} from "@/auth/msal";
 import { AuthGate } from "@/auth/AuthGate";
 import { AppShell } from "@/components/AppShell";
 import { CredentialsGate } from "@/components/CredentialsGate";
@@ -26,6 +35,42 @@ const queryClient = new QueryClient({
   },
 });
 
+// Microsoft errors come back as either an `AuthError` (typed, with errorCode
+// and correlationId), a generic Error, or a bare string. Normalize them into
+// the SsoError shape the AuthGate renders, and try to extract the underlying
+// `AADSTS#####` code from the message so the UI can show it verbatim - that
+// code is what makes Entra issues actually diagnosable.
+function captureMsalError(raw: unknown) {
+  if (!raw) return;
+  let message = "";
+  let code: string | null = null;
+  let correlationId: string | null = null;
+
+  if (raw instanceof AuthError) {
+    message = raw.errorMessage || raw.message || raw.errorCode;
+    code = raw.errorCode || null;
+    const maybeCid = (raw as { correlationId?: string }).correlationId;
+    correlationId = maybeCid ?? null;
+  } else if (raw instanceof Error) {
+    message = raw.message;
+  } else {
+    message = String(raw);
+  }
+
+  const aadstsMatch = /AADSTS\d+/.exec(message);
+  if (aadstsMatch) {
+    code = aadstsMatch[0];
+  }
+
+  setSsoError({
+    code,
+    message: message || "Microsoft sign-in failed",
+    correlationId,
+    timestamp: Date.now(),
+  });
+  console.warn("[auth] MSAL error", { code, message, correlationId });
+}
+
 async function bootstrap() {
   // MSAL needs window.crypto.subtle (HTTPS or localhost). When the SPA is
   // served from a plain-HTTP WAN IP the browser hides that API and
@@ -39,7 +84,7 @@ async function bootstrap() {
       if (accounts.length > 0) {
         msalInstance.setActiveAccount(accounts[0]);
       }
-      msalInstance.addEventCallback((event) => {
+      msalInstance.addEventCallback((event: EventMessage) => {
         if (
           event.eventType === EventType.LOGIN_SUCCESS &&
           event.payload &&
@@ -47,8 +92,27 @@ async function bootstrap() {
           event.payload.account
         ) {
           msalInstance.setActiveAccount(event.payload.account);
+          setSsoError(null);
+          return;
+        }
+        if (
+          event.eventType === EventType.LOGIN_FAILURE ||
+          event.eventType === EventType.ACQUIRE_TOKEN_FAILURE
+        ) {
+          captureMsalError(event.error);
         }
       });
+
+      // The redirect leg of `loginRedirect()` resolves here when the user
+      // comes back from login.microsoftonline.com. If Microsoft passed back
+      // an error in the URL hash, `handleRedirectPromise` rejects with it.
+      // Without surfacing this, the user just lands on a blank login screen
+      // again with no clue what went wrong.
+      try {
+        await msalInstance.handleRedirectPromise();
+      } catch (err) {
+        captureMsalError(err);
+      }
     } catch (err) {
       disableSso((err as Error)?.message ?? "msal init failed");
     }

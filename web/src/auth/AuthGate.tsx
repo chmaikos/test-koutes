@@ -2,7 +2,14 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useIsAuthenticated, useMsal } from "@azure/msal-react";
 import { AlertTriangle, Boxes, KeyRound, Lock, LogIn } from "lucide-react";
 import clsx from "clsx";
-import { loginRequest, ssoAvailable } from "@/auth/msal";
+import {
+  getSsoError,
+  loginRequest,
+  setSsoError,
+  ssoAvailable,
+  subscribeSsoError,
+  type SsoErrorDetails,
+} from "@/auth/msal";
 import {
   getLocalToken,
   localLogin,
@@ -17,9 +24,16 @@ export function AuthGate({ children }: { children: ReactNode }) {
   const [hasLocal, setHasLocal] = useState<boolean>(getLocalToken() !== null);
   const ssoOn = useMemo(() => ssoAvailable(), []);
   const [tab, setTab] = useState<Tab>(ssoOn ? "sso" : "local");
+  const [ssoError, setSsoErrorState] = useState<SsoErrorDetails | null>(
+    getSsoError(),
+  );
 
   useEffect(() => {
     return subscribeLocalAuth(() => setHasLocal(getLocalToken() !== null));
+  }, []);
+
+  useEffect(() => {
+    return subscribeSsoError((err) => setSsoErrorState(err));
   }, []);
 
   // Only show the "Authenticating..." spinner if MSAL is genuinely doing work.
@@ -91,13 +105,21 @@ export function AuthGate({ children }: { children: ReactNode }) {
         )}
 
         {ssoOn && tab === "sso" ? (
-          <button
-            type="button"
-            className="btn-primary mt-5 w-full"
-            onClick={() => instance.loginRedirect(loginRequest)}
-          >
-            <LogIn className="h-4 w-4" /> Sign in with Microsoft
-          </button>
+          <>
+            {ssoError && <SsoErrorBanner err={ssoError} />}
+            <button
+              type="button"
+              className="btn-primary mt-5 w-full"
+              onClick={() => {
+                setSsoError(null);
+                instance.loginRedirect(loginRequest).catch((err) => {
+                  console.warn("[auth] loginRedirect failed", err);
+                });
+              }}
+            >
+              <LogIn className="h-4 w-4" /> Sign in with Microsoft
+            </button>
+          </>
         ) : (
           <LocalLoginForm onSuccess={() => setHasLocal(true)} />
         )}
@@ -167,5 +189,34 @@ function LocalLoginForm({ onSuccess }: { onSuccess: () => void }) {
         {submitting ? "Signing in..." : "Sign in"}
       </button>
     </form>
+  );
+}
+
+function SsoErrorBanner({ err }: { err: SsoErrorDetails }) {
+  return (
+    <div
+      role="alert"
+      className="mt-5 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-900"
+    >
+      <div className="flex items-start gap-2">
+        <AlertTriangle className="mt-0.5 h-3.5 w-3.5 flex-none text-rose-500" />
+        <div className="space-y-1">
+          <p className="font-semibold">
+            Microsoft sign-in failed
+            {err.code ? <span className="font-mono"> ({err.code})</span> : null}
+          </p>
+          <p className="break-words">{err.message}</p>
+          {err.correlationId && (
+            <p className="text-rose-700">
+              Correlation ID: <span className="font-mono">{err.correlationId}</span>
+            </p>
+          )}
+          <p className="text-rose-700">
+            Check the README "Troubleshooting SSO" table, or use the Local
+            admin tab as a fallback.
+          </p>
+        </div>
+      </div>
+    </div>
   );
 }

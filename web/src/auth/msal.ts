@@ -2,6 +2,7 @@ import {
   PublicClientApplication,
   type Configuration,
   type AccountInfo,
+  type RedirectRequest,
   type SilentRequest,
 } from "@azure/msal-browser";
 
@@ -61,9 +62,49 @@ const msalConfig: Configuration = {
 };
 
 export const msalInstance = new PublicClientApplication(msalConfig);
-export const loginRequest = {
+// `prompt: "select_account"` forces Microsoft to show the account picker every
+// time, instead of silently re-using whatever account is cached in the
+// browser's Microsoft session cookie. Without this, a stale account (e.g. a
+// service account like `exclaimer@<tenant>` that the user once typed into the
+// page) auto-fills the email field and the user gets a confusing "couldn't
+// sign you in" error before they realise it's the wrong identity.
+export const loginRequest: RedirectRequest = {
   scopes: ["openid", "profile", "email", apiScope].filter(Boolean) as string[],
+  prompt: "select_account",
 };
+
+// Small in-process pub/sub for MSAL sign-in errors. main.tsx populates it from
+// `handleRedirectPromise()` and `EventType.LOGIN_FAILURE`; AuthGate subscribes
+// so we can surface the error inline above the "Sign in with Microsoft"
+// button. Without this, a failed redirect just dumps the user back at the
+// login screen with no explanation.
+export interface SsoErrorDetails {
+  code: string | null;
+  message: string;
+  correlationId: string | null;
+  timestamp: number;
+}
+
+let currentSsoError: SsoErrorDetails | null = null;
+let ssoErrorListeners: Array<(err: SsoErrorDetails | null) => void> = [];
+
+export function getSsoError(): SsoErrorDetails | null {
+  return currentSsoError;
+}
+
+export function setSsoError(err: SsoErrorDetails | null) {
+  currentSsoError = err;
+  for (const fn of ssoErrorListeners) fn(currentSsoError);
+}
+
+export function subscribeSsoError(
+  fn: (err: SsoErrorDetails | null) => void,
+): () => void {
+  ssoErrorListeners.push(fn);
+  return () => {
+    ssoErrorListeners = ssoErrorListeners.filter((l) => l !== fn);
+  };
+}
 
 export async function acquireApiToken(account: AccountInfo): Promise<string> {
   if (!ssoAvailableFlag) {
