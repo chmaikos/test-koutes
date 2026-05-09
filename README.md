@@ -14,6 +14,8 @@ and threshold alerts (in-app + email via Microsoft Graph).
 - CSV and XLSX exports honouring the current filters.
 - Low-inventory and max-capacity alerts in-app and via Graph email.
 - Microsoft 365 SSO with three roles: **Admin**, **Operator**, **Viewer**.
+- Mobile-friendly responsive UI; installable as a PWA on iOS and Android
+  (see [Install on iOS / Android](#install-on-ios--android)).
 
 ## Stack
 
@@ -42,6 +44,39 @@ Open <http://localhost:8080>.
 > **emergency-access fallback** — Microsoft 365 SSO is the recommended path.
 
 The API exposes its OpenAPI docs at <http://localhost:8000/api/docs>.
+
+## Install on iOS / Android
+
+The web app is a Progressive Web App: warehouse staff can pin it to their home
+screen, run it full-screen without browser chrome, and read the last-loaded
+boxes/alerts list even when their Wi-Fi drops momentarily (writes still need
+the network — there's no offline mutation queue). Installation is a one-time
+action per device.
+
+### iOS / iPadOS (Safari)
+
+1. Open the app's URL in **Safari** (Chrome/Firefox on iOS won't show
+   *Add to Home Screen*).
+2. Tap the **Share** button (the square-with-arrow icon at the bottom of the
+   screen on iPhone, top-right on iPad).
+3. Scroll down and tap **Add to Home Screen**.
+4. Confirm the title (defaults to *Boxes*) and tap **Add**.
+
+### Android (Chrome / Edge)
+
+1. Open the app's URL in **Chrome** (or any Chromium-based browser).
+2. Chrome usually offers an **Install app** banner after a few seconds; tap
+   it. If it doesn't appear, open the **⋮** menu and choose
+   **Install app** / **Add to Home screen**.
+3. Confirm the prompt — the icon appears in the launcher and behaves like a
+   regular app.
+
+After installation:
+
+- Launching from the home-screen icon hides the browser address bar and the
+  app fills the full safe-area on notched devices.
+- An auto-updating service worker fetches new builds in the background; the
+  next time the app is opened the latest version is loaded automatically.
 
 ## Setting up Microsoft 365 SSO
 

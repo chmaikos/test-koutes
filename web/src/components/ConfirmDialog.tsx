@@ -21,8 +21,8 @@ export function ConfirmDialog({
   onCancel: () => void;
 }) {
   return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-900/40 p-4">
-      <div className="card card-pad w-full max-w-md">
+    <div className="modal-backdrop">
+      <div className="modal-sheet max-w-md">
         <div className="flex items-start gap-3">
           {destructive && (
             <div className="rounded-full bg-rose-100 p-2 text-rose-600">
@@ -34,7 +34,7 @@ export function ConfirmDialog({
             <div className="mt-1 text-sm text-slate-600">{message}</div>
           </div>
         </div>
-        <div className="mt-5 flex justify-end gap-2">
+        <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
           <button
             type="button"
             className="btn-secondary"
@@ -45,11 +45,7 @@ export function ConfirmDialog({
           </button>
           <button
             type="button"
-            className={
-              destructive
-                ? "inline-flex items-center gap-1 rounded-md bg-rose-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-rose-700 disabled:opacity-50"
-                : "btn-primary"
-            }
+            className={destructive ? "btn-danger" : "btn-primary"}
             onClick={() => {
               void onConfirm();
             }}

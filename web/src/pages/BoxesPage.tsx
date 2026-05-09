@@ -236,7 +236,7 @@ export function BoxesPage() {
       )}
 
       <div className="card overflow-hidden">
-        <div className="overflow-x-auto">
+        <div className="hidden overflow-x-auto md:block">
           <table className="w-full text-sm">
             <thead className="bg-slate-50 text-xs uppercase tracking-wider text-slate-500">
               <tr>
@@ -297,6 +297,31 @@ export function BoxesPage() {
               ))}
             </tbody>
           </table>
+        </div>
+        <div className="divide-y divide-slate-100 md:hidden">
+          {isLoading && (
+            <div className="px-4 py-8 text-center text-slate-400">
+              Loading...
+            </div>
+          )}
+          {!isLoading && data?.items.length === 0 && (
+            <div className="px-4 py-8 text-center text-slate-400">
+              No boxes match your filters.
+            </div>
+          )}
+          {data?.items.map((box) => (
+            <BoxCard
+              key={box.id}
+              box={box}
+              warehouseName={
+                warehouses.data?.find((w) => w.id === box.current_warehouse_id)
+                  ?.name ?? `#${box.current_warehouse_id}`
+              }
+              canWrite={canWrite}
+              selected={selectedIds.has(box.id)}
+              onToggle={() => toggleId(box.id)}
+            />
+          ))}
         </div>
         <div className="flex items-center justify-between border-t border-slate-100 px-4 py-2 text-xs text-slate-500">
           <div>
@@ -431,13 +456,32 @@ function BulkActionBar({
   const [override, setOverride] = useState(false);
 
   return (
-    <div className="sticky top-0 z-10 card card-pad flex flex-wrap items-center gap-3 border-brand-200 bg-brand-50/70">
-      <div className="text-sm font-medium text-brand-800">
-        {count} box{count === 1 ? "" : "es"} selected
+    <div
+      className={
+        // Mobile: a true bottom sheet that hovers above the bottom-nav
+        // tab bar (which itself respects the safe-area inset). Desktop:
+        // the original sticky bar that pins to the top of the page.
+        "fixed inset-x-0 bottom-16 z-30 flex flex-col gap-3 border-t border-brand-200 bg-brand-50/95 px-4 py-3 shadow-[0_-2px_12px_rgba(15,23,42,0.08)] backdrop-blur " +
+        "pb-[max(0.75rem,env(safe-area-inset-bottom))] " +
+        "md:static md:z-10 md:flex-row md:flex-wrap md:items-center md:gap-3 md:rounded-xl md:border md:border-brand-200 md:bg-brand-50/70 md:p-5 md:pb-5 md:shadow-sm md:backdrop-blur-0"
+      }
+    >
+      <div className="flex items-center justify-between gap-3 md:contents">
+        <div className="text-sm font-medium text-brand-800">
+          {count} box{count === 1 ? "" : "es"} selected
+        </div>
+        <button
+          type="button"
+          className="btn-ghost md:order-last md:ml-auto"
+          onClick={onClear}
+          disabled={isPending}
+        >
+          <X className="h-4 w-4" /> Clear
+        </button>
       </div>
-      <div className="flex items-center gap-2">
+      <div className="flex flex-col gap-2 md:flex-row md:items-center">
         <select
-          className="input w-auto"
+          className="input md:w-auto"
           value={warehouseId}
           onChange={(e) =>
             setWarehouseId(e.target.value ? Number(e.target.value) : "")
@@ -467,9 +511,9 @@ function BulkActionBar({
           Move {count}
         </button>
       </div>
-      <div className="flex items-center gap-2">
+      <div className="flex flex-col gap-2 md:flex-row md:items-center">
         <select
-          className="input w-auto"
+          className="input md:w-auto"
           value={statusValue}
           onChange={(e) => setStatusValue(e.target.value as BoxStatus | "")}
           disabled={isPending}
@@ -514,21 +558,13 @@ function BulkActionBar({
       {isAdmin && (
         <button
           type="button"
-          className="inline-flex items-center gap-1 rounded-md border border-rose-200 bg-rose-50 px-3 py-1.5 text-sm font-medium text-rose-700 hover:bg-rose-100 disabled:opacity-50"
+          className="inline-flex items-center justify-center gap-1 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-medium text-rose-700 hover:bg-rose-100 disabled:opacity-50"
           disabled={isPending}
           onClick={onRequestDelete}
         >
           <Trash2 className="h-4 w-4" /> Delete selected
         </button>
       )}
-      <button
-        type="button"
-        className="btn-ghost ml-auto"
-        onClick={onClear}
-        disabled={isPending}
-      >
-        <X className="h-4 w-4" /> Clear
-      </button>
     </div>
   );
 }
@@ -610,6 +646,88 @@ function BoxRow({
   );
 }
 
+function BoxCard({
+  box,
+  warehouseName,
+  canWrite,
+  selected,
+  onToggle,
+}: {
+  box: import("@/api/types").Box;
+  warehouseName: string;
+  canWrite: boolean;
+  selected: boolean;
+  onToggle: () => void;
+}) {
+  const update = useUpdateBox();
+  const transitions = NEXT_STATUS[box.status] ?? [];
+  return (
+    <div className="px-4 py-3">
+      <div className="flex items-start gap-3">
+        {canWrite && (
+          <input
+            type="checkbox"
+            aria-label={`Select box ${box.box_number}`}
+            checked={selected}
+            onChange={onToggle}
+            className="mt-1 h-4 w-4"
+          />
+        )}
+        <div className="min-w-0 flex-1">
+          <div className="flex items-start justify-between gap-2">
+            <Link
+              to={`/boxes/${box.id}`}
+              className="truncate font-mono text-base font-semibold text-brand-700 hover:underline"
+            >
+              {box.box_number}
+            </Link>
+            <StatusBadge status={box.status} />
+          </div>
+          <dl className="mt-2 grid grid-cols-[5.5rem_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
+            <dt className="text-slate-500">Lot</dt>
+            <dd className="truncate text-slate-800">{box.lot}</dd>
+            <dt className="text-slate-500">Warehouse</dt>
+            <dd className="truncate text-slate-800">{warehouseName}</dd>
+            {box.contents && (
+              <>
+                <dt className="text-slate-500">Contents</dt>
+                <dd className="line-clamp-2 break-words text-slate-700">
+                  {box.contents}
+                </dd>
+              </>
+            )}
+            <dt className="text-slate-500">Updated</dt>
+            <dd className="truncate text-slate-500">
+              {new Date(box.updated_at).toLocaleString()}
+            </dd>
+          </dl>
+          {canWrite && transitions.length > 0 && (
+            <div className="mt-3">
+              <select
+                className="input w-full text-sm"
+                disabled={update.isPending}
+                value=""
+                onChange={(e) => {
+                  const status = e.target.value as BoxStatus;
+                  if (!status) return;
+                  update.mutate({ id: box.id, patch: { status } });
+                }}
+              >
+                <option value="">Move to...</option>
+                {transitions.map((s) => (
+                  <option key={s} value={s}>
+                    {STATUS_LABEL[s]}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function CreateBoxModal({ onClose }: { onClose: () => void }) {
   const warehouses = useWarehouses();
   const create = useCreateBox();
@@ -620,8 +738,8 @@ function CreateBoxModal({ onClose }: { onClose: () => void }) {
   const [error, setError] = useState<string | null>(null);
 
   return (
-    <div className="fixed inset-0 z-30 flex items-center justify-center bg-slate-900/40 p-4">
-      <div className="card card-pad w-full max-w-md">
+    <div className="modal-backdrop z-30">
+      <div className="modal-sheet max-w-md">
         <h2 className="text-lg font-semibold">Receive a new box</h2>
         <form
           className="mt-4 space-y-3"
@@ -698,7 +816,7 @@ function CreateBoxModal({ onClose }: { onClose: () => void }) {
             </select>
           </label>
           {error && <p className="text-sm text-rose-600">{error}</p>}
-          <div className="flex justify-end gap-2 pt-2">
+          <div className="flex flex-col-reverse gap-2 pt-2 sm:flex-row sm:justify-end">
             <button
               type="button"
               className="btn-secondary"

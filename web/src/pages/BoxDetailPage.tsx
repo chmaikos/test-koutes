@@ -190,7 +190,7 @@ export function BoxDetailPage() {
           <div className="mt-3">
             <button
               type="button"
-              className="inline-flex items-center gap-1 rounded-md border border-rose-200 bg-white px-3 py-1.5 text-sm font-medium text-rose-700 hover:bg-rose-100 disabled:opacity-50"
+              className="btn-secondary border-rose-200 !ring-rose-200 text-rose-700 hover:bg-rose-100"
               onClick={() => setConfirmDelete(true)}
               disabled={deleteBox.isPending}
             >

@@ -61,25 +61,36 @@ function WarehousesSection() {
           onCancel={() => setShowAdd(false)}
         />
       )}
-      <table className="w-full text-sm">
-        <thead className="bg-slate-50 text-xs uppercase tracking-wider text-slate-500">
-          <tr>
-            <th className="px-4 py-2.5 text-left">Name</th>
-            <th className="px-4 py-2.5 text-left">Min inventory</th>
-            <th className="px-4 py-2.5 text-left">Max capacity</th>
-            <th className="px-4 py-2.5"></th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-slate-100">
-          {data?.map((w) => (
-            <WarehouseRow
-              key={w.id}
-              warehouse={w}
-              onSave={(patch) => update.mutateAsync({ id: w.id, patch })}
-            />
-          ))}
-        </tbody>
-      </table>
+      <div className="hidden overflow-x-auto md:block">
+        <table className="w-full text-sm">
+          <thead className="bg-slate-50 text-xs uppercase tracking-wider text-slate-500">
+            <tr>
+              <th className="px-4 py-2.5 text-left">Name</th>
+              <th className="px-4 py-2.5 text-left">Min inventory</th>
+              <th className="px-4 py-2.5 text-left">Max capacity</th>
+              <th className="px-4 py-2.5"></th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100">
+            {data?.map((w) => (
+              <WarehouseRow
+                key={w.id}
+                warehouse={w}
+                onSave={(patch) => update.mutateAsync({ id: w.id, patch })}
+              />
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="divide-y divide-slate-100 md:hidden">
+        {data?.map((w) => (
+          <WarehouseCard
+            key={w.id}
+            warehouse={w}
+            onSave={(patch) => update.mutateAsync({ id: w.id, patch })}
+          />
+        ))}
+      </div>
     </section>
   );
 }
@@ -175,17 +186,21 @@ function NewWarehouseForm({
   );
 }
 
-function WarehouseRow({
-  warehouse,
-  onSave,
-}: {
-  warehouse: import("@/api/types").Warehouse;
-  onSave: (patch: {
-    name?: string;
-    min_inventory?: number;
-    max_capacity?: number;
-  }) => Promise<unknown>;
-}) {
+type WarehousePatch = {
+  name?: string;
+  min_inventory?: number;
+  max_capacity?: number;
+};
+
+/**
+ * Shared edit state for the desktop row and the mobile card so a save
+ * pending in one layout reflects in the other. Returning JSX-ready
+ * inputs keeps the markup intentionally similar.
+ */
+function useWarehouseEditor(
+  warehouse: Warehouse,
+  onSave: (patch: WarehousePatch) => Promise<unknown>,
+) {
   const [name, setName] = useState(warehouse.name);
   const [minInv, setMinInv] = useState(warehouse.min_inventory);
   const [maxCap, setMaxCap] = useState(warehouse.max_capacity);
@@ -197,13 +212,50 @@ function WarehouseRow({
     minInv !== warehouse.min_inventory ||
     maxCap !== warehouse.max_capacity;
 
+  async function save() {
+    setPending(true);
+    setError(null);
+    try {
+      await onSave({ name, min_inventory: minInv, max_capacity: maxCap });
+    } catch (err: unknown) {
+      const detail =
+        (err as { response?: { data?: { detail?: string } } })?.response?.data
+          ?.detail ?? "Failed to save";
+      setError(typeof detail === "string" ? detail : "Failed to save");
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return {
+    name,
+    setName,
+    minInv,
+    setMinInv,
+    maxCap,
+    setMaxCap,
+    pending,
+    error,
+    dirty,
+    save,
+  };
+}
+
+function WarehouseRow({
+  warehouse,
+  onSave,
+}: {
+  warehouse: Warehouse;
+  onSave: (patch: WarehousePatch) => Promise<unknown>;
+}) {
+  const ed = useWarehouseEditor(warehouse, onSave);
   return (
     <tr>
       <td className="px-4 py-2.5">
         <input
           className="input"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
+          value={ed.name}
+          onChange={(e) => ed.setName(e.target.value)}
         />
       </td>
       <td className="px-4 py-2.5">
@@ -211,8 +263,8 @@ function WarehouseRow({
           type="number"
           className="input"
           min={0}
-          value={minInv}
-          onChange={(e) => setMinInv(Number(e.target.value))}
+          value={ed.minInv}
+          onChange={(e) => ed.setMinInv(Number(e.target.value))}
         />
       </td>
       <td className="px-4 py-2.5">
@@ -220,35 +272,77 @@ function WarehouseRow({
           type="number"
           className="input"
           min={1}
-          value={maxCap}
-          onChange={(e) => setMaxCap(Number(e.target.value))}
+          value={ed.maxCap}
+          onChange={(e) => ed.setMaxCap(Number(e.target.value))}
         />
       </td>
       <td className="px-4 py-2.5 text-right">
-        {error && <span className="mr-2 text-xs text-rose-600">{error}</span>}
+        {ed.error && (
+          <span className="mr-2 text-xs text-rose-600">{ed.error}</span>
+        )}
         <button
           type="button"
           className="btn-primary"
-          disabled={!dirty || pending}
-          onClick={async () => {
-            setPending(true);
-            setError(null);
-            try {
-              await onSave({ name, min_inventory: minInv, max_capacity: maxCap });
-            } catch (err: unknown) {
-              const detail =
-                (err as { response?: { data?: { detail?: string } } })?.response
-                  ?.data?.detail ?? "Failed to save";
-              setError(detail);
-            } finally {
-              setPending(false);
-            }
-          }}
+          disabled={!ed.dirty || ed.pending}
+          onClick={() => void ed.save()}
         >
-          {pending ? "Saving..." : "Save"}
+          {ed.pending ? "Saving..." : "Save"}
         </button>
       </td>
     </tr>
+  );
+}
+
+function WarehouseCard({
+  warehouse,
+  onSave,
+}: {
+  warehouse: Warehouse;
+  onSave: (patch: WarehousePatch) => Promise<unknown>;
+}) {
+  const ed = useWarehouseEditor(warehouse, onSave);
+  return (
+    <div className="space-y-3 px-4 py-3">
+      <label className="block">
+        <span className="text-xs text-slate-500">Name</span>
+        <input
+          className="input"
+          value={ed.name}
+          onChange={(e) => ed.setName(e.target.value)}
+        />
+      </label>
+      <div className="grid grid-cols-2 gap-2">
+        <label className="block">
+          <span className="text-xs text-slate-500">Min inventory</span>
+          <input
+            type="number"
+            className="input"
+            min={0}
+            value={ed.minInv}
+            onChange={(e) => ed.setMinInv(Number(e.target.value))}
+          />
+        </label>
+        <label className="block">
+          <span className="text-xs text-slate-500">Max capacity</span>
+          <input
+            type="number"
+            className="input"
+            min={1}
+            value={ed.maxCap}
+            onChange={(e) => ed.setMaxCap(Number(e.target.value))}
+          />
+        </label>
+      </div>
+      {ed.error && <p className="text-xs text-rose-600">{ed.error}</p>}
+      <button
+        type="button"
+        className="btn-primary w-full"
+        disabled={!ed.dirty || ed.pending}
+        onClick={() => void ed.save()}
+      >
+        {ed.pending ? "Saving..." : "Save"}
+      </button>
+    </div>
   );
 }
 
@@ -268,101 +362,201 @@ function UsersSection() {
           permissions.
         </p>
       </header>
-      <table className="w-full text-sm">
-        <thead className="bg-slate-50 text-xs uppercase tracking-wider text-slate-500">
-          <tr>
-            <th className="px-4 py-2.5 text-left">User</th>
-            <th className="px-4 py-2.5 text-left">Role</th>
-            <th className="px-4 py-2.5 text-left">Override</th>
-            <th className="px-4 py-2.5 text-left">Active</th>
-            <th className="px-4 py-2.5 text-left">Email alerts</th>
-            <th className="px-4 py-2.5 text-left">Warehouses</th>
-            <th className="px-4 py-2.5 text-left">Last login</th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-slate-100">
-          {data?.map((u) => (
-            <tr key={u.id} className="hover:bg-slate-50">
-              <td className="px-4 py-2.5">
-                <div className="font-medium">{u.display_name || u.email}</div>
-                <div className="text-xs text-slate-500">{u.email}</div>
-              </td>
-              <td className="px-4 py-2.5">
-                <select
-                  className="input inline-block w-auto"
-                  value={u.role}
-                  onChange={(e) =>
-                    update.mutate({
-                      id: u.id,
-                      patch: { role: e.target.value as Role, role_override: true },
-                    })
-                  }
-                >
-                  <option value="viewer">Viewer</option>
-                  <option value="operator">Operator</option>
-                  <option value="admin">Admin</option>
-                </select>
-              </td>
-              <td className="px-4 py-2.5">
-                <input
-                  type="checkbox"
-                  checked={u.role_override}
-                  onChange={(e) =>
-                    update.mutate({
-                      id: u.id,
-                      patch: { role_override: e.target.checked },
-                    })
-                  }
-                />
-              </td>
-              <td className="px-4 py-2.5">
-                <input
-                  type="checkbox"
-                  checked={u.is_active}
-                  onChange={(e) =>
-                    update.mutate({
-                      id: u.id,
-                      patch: { is_active: e.target.checked },
-                    })
-                  }
-                />
-              </td>
-              <td className="px-4 py-2.5">
-                <input
-                  type="checkbox"
-                  checked={u.email_alerts_enabled}
-                  onChange={(e) =>
-                    update.mutate({
-                      id: u.id,
-                      patch: { email_alerts_enabled: e.target.checked },
-                    })
-                  }
-                  title={
-                    u.email_alerts_enabled
-                      ? "Receives alert emails for accessible warehouses"
-                      : "Opted out of alert emails"
-                  }
-                />
-              </td>
-              <td className="px-4 py-2.5">
-                <WarehouseAccessCell
-                  user={u}
-                  warehouses={warehouses ?? []}
-                  onChange={(warehouse_ids) =>
-                    update.mutate({ id: u.id, patch: { warehouse_ids } })
-                  }
-                />
-              </td>
-              <td className="px-4 py-2.5 text-slate-500">
-                {u.last_login_at
-                  ? new Date(u.last_login_at).toLocaleString()
-                  : "—"}
-              </td>
+      <div className="hidden overflow-x-auto md:block">
+        <table className="w-full text-sm">
+          <thead className="bg-slate-50 text-xs uppercase tracking-wider text-slate-500">
+            <tr>
+              <th className="px-4 py-2.5 text-left">User</th>
+              <th className="px-4 py-2.5 text-left">Role</th>
+              <th className="px-4 py-2.5 text-left">Override</th>
+              <th className="px-4 py-2.5 text-left">Active</th>
+              <th className="px-4 py-2.5 text-left">Email alerts</th>
+              <th className="px-4 py-2.5 text-left">Warehouses</th>
+              <th className="px-4 py-2.5 text-left">Last login</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody className="divide-y divide-slate-100">
+            {data?.map((u) => (
+              <tr key={u.id} className="hover:bg-slate-50">
+                <td className="px-4 py-2.5">
+                  <div className="font-medium">
+                    {u.display_name || u.email}
+                  </div>
+                  <div className="text-xs text-slate-500">{u.email}</div>
+                </td>
+                <td className="px-4 py-2.5">
+                  <select
+                    className="input inline-block w-auto"
+                    value={u.role}
+                    onChange={(e) =>
+                      update.mutate({
+                        id: u.id,
+                        patch: {
+                          role: e.target.value as Role,
+                          role_override: true,
+                        },
+                      })
+                    }
+                  >
+                    <option value="viewer">Viewer</option>
+                    <option value="operator">Operator</option>
+                    <option value="admin">Admin</option>
+                  </select>
+                </td>
+                <td className="px-4 py-2.5">
+                  <input
+                    type="checkbox"
+                    checked={u.role_override}
+                    onChange={(e) =>
+                      update.mutate({
+                        id: u.id,
+                        patch: { role_override: e.target.checked },
+                      })
+                    }
+                  />
+                </td>
+                <td className="px-4 py-2.5">
+                  <input
+                    type="checkbox"
+                    checked={u.is_active}
+                    onChange={(e) =>
+                      update.mutate({
+                        id: u.id,
+                        patch: { is_active: e.target.checked },
+                      })
+                    }
+                  />
+                </td>
+                <td className="px-4 py-2.5">
+                  <input
+                    type="checkbox"
+                    checked={u.email_alerts_enabled}
+                    onChange={(e) =>
+                      update.mutate({
+                        id: u.id,
+                        patch: { email_alerts_enabled: e.target.checked },
+                      })
+                    }
+                    title={
+                      u.email_alerts_enabled
+                        ? "Receives alert emails for accessible warehouses"
+                        : "Opted out of alert emails"
+                    }
+                  />
+                </td>
+                <td className="px-4 py-2.5">
+                  <WarehouseAccessCell
+                    user={u}
+                    warehouses={warehouses ?? []}
+                    onChange={(warehouse_ids) =>
+                      update.mutate({ id: u.id, patch: { warehouse_ids } })
+                    }
+                  />
+                </td>
+                <td className="px-4 py-2.5 text-slate-500">
+                  {u.last_login_at
+                    ? new Date(u.last_login_at).toLocaleString()
+                    : "—"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="divide-y divide-slate-100 md:hidden">
+        {data?.map((u) => (
+          <UserCard
+            key={u.id}
+            user={u}
+            warehouses={warehouses ?? []}
+            onPatch={(patch) => update.mutate({ id: u.id, patch })}
+          />
+        ))}
+      </div>
     </section>
+  );
+}
+
+function UserCard({
+  user,
+  warehouses,
+  onPatch,
+}: {
+  user: User;
+  warehouses: Warehouse[];
+  onPatch: (patch: {
+    role?: Role;
+    role_override?: boolean;
+    is_active?: boolean;
+    email_alerts_enabled?: boolean;
+    warehouse_ids?: number[];
+  }) => void;
+}) {
+  return (
+    <div className="space-y-3 px-4 py-3">
+      <div>
+        <div className="text-sm font-medium">
+          {user.display_name || user.email}
+        </div>
+        <div className="text-xs text-slate-500">{user.email}</div>
+      </div>
+      <label className="block">
+        <span className="text-xs text-slate-500">Role</span>
+        <select
+          className="input"
+          value={user.role}
+          onChange={(e) =>
+            onPatch({ role: e.target.value as Role, role_override: true })
+          }
+        >
+          <option value="viewer">Viewer</option>
+          <option value="operator">Operator</option>
+          <option value="admin">Admin</option>
+        </select>
+      </label>
+      <div className="grid grid-cols-1 gap-2 text-sm">
+        <label className="flex items-center gap-2">
+          <input
+            type="checkbox"
+            checked={user.role_override}
+            onChange={(e) => onPatch({ role_override: e.target.checked })}
+          />
+          <span>Override Entra role</span>
+        </label>
+        <label className="flex items-center gap-2">
+          <input
+            type="checkbox"
+            checked={user.is_active}
+            onChange={(e) => onPatch({ is_active: e.target.checked })}
+          />
+          <span>Active</span>
+        </label>
+        <label className="flex items-center gap-2">
+          <input
+            type="checkbox"
+            checked={user.email_alerts_enabled}
+            onChange={(e) =>
+              onPatch({ email_alerts_enabled: e.target.checked })
+            }
+          />
+          <span>Email alerts</span>
+        </label>
+      </div>
+      <div>
+        <div className="mb-1 text-xs text-slate-500">Warehouses</div>
+        <WarehouseAccessCell
+          user={user}
+          warehouses={warehouses}
+          onChange={(warehouse_ids) => onPatch({ warehouse_ids })}
+        />
+      </div>
+      <div className="text-xs text-slate-500">
+        Last login{" "}
+        {user.last_login_at
+          ? new Date(user.last_login_at).toLocaleString()
+          : "—"}
+      </div>
+    </div>
   );
 }
 

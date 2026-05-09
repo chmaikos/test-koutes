@@ -17,8 +17,8 @@ export function ImportBoxesDialog({
   const [error, setError] = useState<string | null>(null);
 
   return (
-    <div className="fixed inset-0 z-30 flex items-center justify-center bg-slate-900/40 p-4">
-      <div className="card card-pad w-full max-w-md">
+    <div className="modal-backdrop z-30">
+      <div className="modal-sheet max-w-md">
         <h2 className="text-lg font-semibold">Import boxes from XLSX</h2>
         <p className="mt-1 text-sm text-slate-500">
           Each row creates a new box in the <strong>received</strong> state.
@@ -95,7 +95,7 @@ export function ImportBoxesDialog({
 
           {error && <p className="text-sm text-rose-600">{error}</p>}
 
-          <div className="flex justify-end gap-2 pt-2">
+          <div className="flex flex-col-reverse gap-2 pt-2 sm:flex-row sm:justify-end">
             <button
               type="button"
               className="btn-secondary"
