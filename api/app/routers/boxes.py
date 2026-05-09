@@ -100,7 +100,8 @@ async def create_new_box(
             db,
             user=user,
             box_number=payload.box_number,
-            owner=payload.owner,
+            lot=payload.lot,
+            contents=payload.contents,
             warehouse_id=payload.warehouse_id,
             note=payload.note,
         )
@@ -186,7 +187,8 @@ async def patch_box(
             box=box,
             new_status=payload.status,
             new_warehouse_id=payload.warehouse_id,
-            new_owner=payload.owner,
+            new_lot=payload.lot,
+            new_contents=payload.contents,
             note=payload.note,
             force=payload.force,
         )

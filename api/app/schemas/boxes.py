@@ -12,7 +12,8 @@ class BoxOut(BaseModel):
 
     id: int
     box_number: str
-    owner: str
+    lot: str
+    contents: str | None
     current_warehouse_id: int
     status: BoxStatus
     received_at: datetime | None
@@ -24,7 +25,8 @@ class BoxOut(BaseModel):
 
 class BoxCreate(BaseModel):
     box_number: str = Field(min_length=1, max_length=64)
-    owner: str = Field(default="", max_length=200)
+    lot: str = Field(min_length=1, max_length=64)
+    contents: str | None = Field(default=None, max_length=200)
     warehouse_id: int = Field(ge=1)
     note: str | None = Field(default=None, max_length=2000)
 
@@ -32,7 +34,8 @@ class BoxCreate(BaseModel):
 class BoxUpdate(BaseModel):
     status: BoxStatus | None = None
     warehouse_id: int | None = Field(default=None, ge=1)
-    owner: str | None = Field(default=None, max_length=200)
+    lot: str | None = Field(default=None, min_length=1, max_length=64)
+    contents: str | None = Field(default=None, max_length=200)
     note: str | None = Field(default=None, max_length=2000)
     force: bool = False
 

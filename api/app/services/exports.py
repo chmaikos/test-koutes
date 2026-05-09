@@ -14,7 +14,8 @@ from app.models.boxes import Box, BoxStatus
 
 EXPORT_COLUMNS = [
     "Box Number",
-    "Owner",
+    "Lot",
+    "Contents",
     "Warehouse ID",
     "Warehouse",
     "Status",
@@ -26,7 +27,7 @@ EXPORT_COLUMNS = [
 
 # Indices of columns whose values are datetimes. Used by the XLSX writer to
 # apply a date number_format and by the CSV writer to format them as text.
-_DATETIME_COLUMN_INDICES = (5, 6, 7, 8)
+_DATETIME_COLUMN_INDICES = (6, 7, 8, 9)
 
 STATUS_LABELS: dict[BoxStatus, str] = {
     BoxStatus.received: "Received",
@@ -54,7 +55,8 @@ def _row_for(box: Box, warehouses: Mapping[int, str]) -> list:
     """Return a row of native Python values (datetimes naive UTC for XLSX)."""
     return [
         box.box_number,
-        box.owner,
+        box.lot,
+        box.contents or "",
         box.current_warehouse_id,
         warehouses.get(box.current_warehouse_id, ""),
         STATUS_LABELS.get(box.status, box.status.value),
@@ -79,7 +81,7 @@ def boxes_to_csv(boxes: Iterable[Box], warehouses: Mapping[int, str]) -> bytes:
     writer.writerow(EXPORT_COLUMNS)
     for box in boxes:
         writer.writerow([_format_csv_value(v) for v in _row_for(box, warehouses)])
-    # Prepend a UTF-8 BOM so Excel on Windows opens non-ASCII owner names
+    # Prepend a UTF-8 BOM so Excel on Windows opens non-ASCII lot names
     # correctly instead of mojibake.
     return ("\ufeff" + buf.getvalue()).encode("utf-8")
 

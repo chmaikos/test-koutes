@@ -44,7 +44,8 @@ class Box(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     box_number: Mapped[str] = mapped_column(String(64), unique=True, index=True)
-    owner: Mapped[str] = mapped_column(String(200), default="", nullable=False)
+    lot: Mapped[str] = mapped_column(String(64), nullable=False)
+    contents: Mapped[str | None] = mapped_column(String(200))
     current_warehouse_id: Mapped[int] = mapped_column(
         ForeignKey("warehouses.id", ondelete="RESTRICT"), nullable=False, index=True
     )

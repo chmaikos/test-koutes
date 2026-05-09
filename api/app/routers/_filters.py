@@ -14,7 +14,7 @@ from app.models.boxes import Box, BoxStatus
 class BoxFilters(BaseModel):
     warehouse_id: int | None = None
     status: BoxStatus | None = None
-    owner: str | None = None
+    lot: str | None = None
     search: str | None = None
     received_from: datetime | None = None
     received_to: datetime | None = None
@@ -25,8 +25,8 @@ class BoxFilters(BaseModel):
 def parse_box_filters(
     warehouse_id: Annotated[int | None, Query()] = None,
     status: Annotated[BoxStatus | None, Query()] = None,
-    owner: Annotated[str | None, Query()] = None,
-    search: Annotated[str | None, Query(description="matches box_number or owner")] = None,
+    lot: Annotated[str | None, Query()] = None,
+    search: Annotated[str | None, Query(description="matches box_number or lot")] = None,
     received_from: Annotated[datetime | None, Query()] = None,
     received_to: Annotated[datetime | None, Query()] = None,
     updated_from: Annotated[datetime | None, Query()] = None,
@@ -35,7 +35,7 @@ def parse_box_filters(
     return BoxFilters(
         warehouse_id=warehouse_id,
         status=status,
-        owner=owner,
+        lot=lot,
         search=search,
         received_from=received_from,
         received_to=received_to,
@@ -49,11 +49,11 @@ def apply_box_filters(stmt: Select, filters: BoxFilters) -> Select:
         stmt = stmt.where(Box.current_warehouse_id == filters.warehouse_id)
     if filters.status is not None:
         stmt = stmt.where(Box.status == filters.status)
-    if filters.owner:
-        stmt = stmt.where(Box.owner.ilike(f"%{filters.owner}%"))
+    if filters.lot:
+        stmt = stmt.where(Box.lot.ilike(f"%{filters.lot}%"))
     if filters.search:
         like = f"%{filters.search}%"
-        stmt = stmt.where(or_(Box.box_number.ilike(like), Box.owner.ilike(like)))
+        stmt = stmt.where(or_(Box.box_number.ilike(like), Box.lot.ilike(like)))
     if filters.received_from is not None:
         stmt = stmt.where(Box.received_at >= filters.received_from)
     if filters.received_to is not None:

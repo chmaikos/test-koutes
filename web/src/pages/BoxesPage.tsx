@@ -60,8 +60,8 @@ export function BoxesPage() {
     if (wid) out.warehouse_id = Number(wid);
     const st = params.get("status");
     if (st) out.status = st as BoxStatus;
-    const owner = params.get("owner");
-    if (owner) out.owner = owner;
+    const lot = params.get("lot");
+    if (lot) out.lot = lot;
     const search = params.get("q");
     if (search) out.search = search;
     return out;
@@ -168,7 +168,7 @@ export function BoxesPage() {
             <Search className="pointer-events-none absolute left-2 top-2.5 h-4 w-4 text-slate-400" />
             <input
               className="input pl-8"
-              placeholder="Box # or owner"
+              placeholder="Box # or lot"
               value={filters.search ?? ""}
               onChange={(e) => setParam("q", e.target.value || undefined)}
             />
@@ -207,11 +207,11 @@ export function BoxesPage() {
           </select>
         </label>
         <label className="block">
-          <span className="text-xs text-slate-500">Owner</span>
+          <span className="text-xs text-slate-500">Lot</span>
           <input
             className="input"
-            value={filters.owner ?? ""}
-            onChange={(e) => setParam("owner", e.target.value || undefined)}
+            value={filters.lot ?? ""}
+            onChange={(e) => setParam("lot", e.target.value || undefined)}
           />
         </label>
       </div>
@@ -253,7 +253,7 @@ export function BoxesPage() {
                   </th>
                 )}
                 <th className="px-4 py-2.5 text-left">Box #</th>
-                <th className="px-4 py-2.5 text-left">Owner</th>
+                <th className="px-4 py-2.5 text-left">Lot</th>
                 <th className="px-4 py-2.5 text-left">Warehouse</th>
                 <th className="px-4 py-2.5 text-left">Status</th>
                 <th className="px-4 py-2.5 text-left">Updated</th>
@@ -564,7 +564,7 @@ function BoxRow({
           {box.box_number}
         </Link>
       </td>
-      <td className="px-4 py-2.5">{box.owner || <span className="text-slate-400">—</span>}</td>
+      <td className="px-4 py-2.5">{box.lot}</td>
       <td className="px-4 py-2.5">{warehouseName}</td>
       <td className="px-4 py-2.5">
         <StatusBadge status={box.status} />
@@ -601,7 +601,8 @@ function CreateBoxModal({ onClose }: { onClose: () => void }) {
   const warehouses = useWarehouses();
   const create = useCreateBox();
   const [boxNumber, setBoxNumber] = useState("");
-  const [owner, setOwner] = useState("");
+  const [lot, setLot] = useState("");
+  const [contents, setContents] = useState("");
   const [warehouseId, setWarehouseId] = useState<number | "">("");
   const [error, setError] = useState<string | null>(null);
 
@@ -619,9 +620,11 @@ function CreateBoxModal({ onClose }: { onClose: () => void }) {
               return;
             }
             try {
+              const trimmedContents = contents.trim();
               await create.mutateAsync({
                 box_number: boxNumber.trim(),
-                owner: owner.trim(),
+                lot: lot.trim(),
+                contents: trimmedContents || undefined,
                 warehouse_id: Number(warehouseId),
               });
               onClose();
@@ -637,17 +640,30 @@ function CreateBoxModal({ onClose }: { onClose: () => void }) {
             <span className="text-xs text-slate-500">Box number</span>
             <input
               required
+              maxLength={64}
               className="input"
               value={boxNumber}
               onChange={(e) => setBoxNumber(e.target.value)}
             />
           </label>
           <label className="block">
-            <span className="text-xs text-slate-500">Owner / customer</span>
+            <span className="text-xs text-slate-500">Lot</span>
             <input
+              required
+              maxLength={64}
               className="input"
-              value={owner}
-              onChange={(e) => setOwner(e.target.value)}
+              value={lot}
+              onChange={(e) => setLot(e.target.value)}
+            />
+          </label>
+          <label className="block">
+            <span className="text-xs text-slate-500">Contents (optional)</span>
+            <textarea
+              maxLength={200}
+              rows={2}
+              className="input"
+              value={contents}
+              onChange={(e) => setContents(e.target.value)}
             />
           </label>
           <label className="block">

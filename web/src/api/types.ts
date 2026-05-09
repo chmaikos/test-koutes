@@ -49,7 +49,8 @@ export interface Warehouse {
 export interface Box {
   id: number;
   box_number: string;
-  owner: string;
+  lot: string;
+  contents: string | null;
   current_warehouse_id: number;
   status: BoxStatus;
   received_at: string | null;
@@ -113,7 +114,7 @@ export interface DashboardSummary {
 export interface BoxFilters {
   warehouse_id?: number;
   status?: BoxStatus;
-  owner?: string;
+  lot?: string;
   search?: string;
   received_from?: string;
   received_to?: string;

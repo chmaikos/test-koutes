@@ -25,8 +25,11 @@ _HEADER_ALIASES = {
     "box_number": "box_number",
     "box number": "box_number",
     "box": "box_number",
-    "owner": "owner",
-    "customer": "owner",
+    "lot": "lot",
+    "lot number": "lot",
+    "lot_number": "lot",
+    "contents": "contents",
+    "description": "contents",
     "warehouse_id": "warehouse_id",
     "warehouse id": "warehouse_id",
     "warehouse": "warehouse",
@@ -97,7 +100,14 @@ def import_boxes_xlsx(
     if "box_number" not in headers:
         raise BoxRuleError(
             "missing required column 'box_number' "
-            "(recognised headers: box_number, owner, warehouse_id, warehouse)"
+            "(recognised headers: box_number, lot, contents, "
+            "warehouse_id, warehouse)"
+        )
+    if "lot" not in headers:
+        raise BoxRuleError(
+            "missing required column 'lot' "
+            "(recognised headers: box_number, lot, contents, "
+            "warehouse_id, warehouse)"
         )
 
     # Pre-resolve warehouses so we don't hit the DB once per row.
@@ -138,7 +148,9 @@ def import_boxes_xlsx(
             return _cell_str(cells[idx])
 
         box_number = get("box_number")
-        owner = get("owner")
+        lot = get("lot")
+        contents_raw = get("contents")
+        contents = contents_raw or None
         wh_id_raw = get("warehouse_id")
         wh_name_raw = get("warehouse")
 
@@ -146,6 +158,13 @@ def import_boxes_xlsx(
             outcome.skipped.append(
                 ImportSkipEntry(
                     row=offset, box_number=None, reason="box_number is empty"
+                )
+            )
+            continue
+        if not lot:
+            outcome.skipped.append(
+                ImportSkipEntry(
+                    row=offset, box_number=box_number, reason="lot is empty"
                 )
             )
             continue
@@ -214,7 +233,8 @@ def import_boxes_xlsx(
                 db,
                 user=user,
                 box_number=box_number,
-                owner=owner,
+                lot=lot,
+                contents=contents,
                 warehouse_id=warehouse_id,
             )
         except BoxRuleError as exc:

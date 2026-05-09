@@ -163,7 +163,8 @@ export function useCreateBox() {
   return useMutation({
     mutationFn: async (input: {
       box_number: string;
-      owner: string;
+      lot: string;
+      contents?: string;
       warehouse_id: number;
       note?: string;
     }) => (await api.post<Box>("/boxes", input)).data,
@@ -183,7 +184,8 @@ export function useUpdateBox() {
       patch: Partial<{
         status: Box["status"];
         warehouse_id: number;
-        owner: string;
+        lot: string;
+        contents: string;
         note: string;
         force: boolean;
       }>;

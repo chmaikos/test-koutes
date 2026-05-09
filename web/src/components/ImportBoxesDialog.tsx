@@ -22,12 +22,14 @@ export function ImportBoxesDialog({
         <h2 className="text-lg font-semibold">Import boxes from XLSX</h2>
         <p className="mt-1 text-sm text-slate-500">
           Each row creates a new box in the <strong>received</strong> state.
-          Recognised columns (case-insensitive):{" "}
+          Required columns (case-insensitive):{" "}
           <code className="rounded bg-slate-100 px-1">box_number</code>,{" "}
-          <code className="rounded bg-slate-100 px-1">owner</code>,{" "}
+          <code className="rounded bg-slate-100 px-1">lot</code>. Optional:{" "}
+          <code className="rounded bg-slate-100 px-1">contents</code>,{" "}
           <code className="rounded bg-slate-100 px-1">warehouse_id</code> or{" "}
           <code className="rounded bg-slate-100 px-1">warehouse</code>{" "}
-          (by name). Duplicate <code>box_number</code> values are reported as errors.
+          (by name). Duplicate <code>box_number</code> values and rows missing{" "}
+          <code>lot</code> are reported as errors.
         </p>
 
         <form

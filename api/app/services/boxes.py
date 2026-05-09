@@ -52,8 +52,9 @@ def create_box(
     *,
     user: User,
     box_number: str,
-    owner: str,
+    lot: str,
     warehouse_id: int,
+    contents: str | None = None,
     note: str | None = None,
 ) -> Box:
     _ensure_warehouse(db, warehouse_id)
@@ -64,6 +65,13 @@ def create_box(
     cleaned_number = box_number.strip()
     if not cleaned_number:
         raise BoxRuleError("box_number is required")
+    cleaned_lot = lot.strip()
+    if not cleaned_lot:
+        raise BoxRuleError("lot is required")
+    cleaned_contents: str | None = None
+    if contents is not None:
+        stripped = contents.strip()
+        cleaned_contents = stripped or None
     from sqlalchemy import select
 
     existing = db.scalar(select(Box).where(Box.box_number == cleaned_number))
@@ -72,7 +80,8 @@ def create_box(
     now = datetime.now(UTC)
     box = Box(
         box_number=cleaned_number,
-        owner=owner.strip(),
+        lot=cleaned_lot,
+        contents=cleaned_contents,
         current_warehouse_id=warehouse_id,
         status=BoxStatus.received,
         received_at=now,
@@ -114,13 +123,15 @@ def update_box(
     box: Box,
     new_status: BoxStatus | None = None,
     new_warehouse_id: int | None = None,
-    new_owner: str | None = None,
+    new_lot: str | None = None,
+    new_contents: str | None = None,
     note: str | None = None,
     force: bool = False,
 ) -> Box:
     now = datetime.now(UTC)
     events: list[BoxEvent] = []
     audit_note = _audit_note(note, force=force)
+    metadata_changed = False
 
     # ACL: the caller must have access to the box's *current* warehouse to
     # touch it at all, and to the *target* warehouse if they're moving it.
@@ -130,8 +141,21 @@ def update_box(
             f"no access to warehouse {box.current_warehouse_id}"
         )
 
-    if new_owner is not None and new_owner != box.owner:
-        box.owner = new_owner.strip()
+    if new_lot is not None:
+        cleaned_lot = new_lot.strip()
+        if not cleaned_lot:
+            raise BoxRuleError("lot is required")
+        if cleaned_lot != box.lot:
+            box.lot = cleaned_lot
+            metadata_changed = True
+
+    if new_contents is not None:
+        # Empty string clears the optional descriptor.
+        stripped = new_contents.strip()
+        next_contents = stripped or None
+        if next_contents != box.contents:
+            box.contents = next_contents
+            metadata_changed = True
 
     if new_warehouse_id is not None and new_warehouse_id != box.current_warehouse_id:
         _ensure_warehouse(db, new_warehouse_id)
@@ -186,7 +210,7 @@ def update_box(
             )
         )
 
-    if not events and new_owner is None:
+    if not events and not metadata_changed:
         return box
 
     box.updated_by_user_id = user.id

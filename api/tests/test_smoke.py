@@ -27,7 +27,7 @@ def test_full_box_lifecycle_and_dashboard(client):
 
     create = client.post(
         "/api/boxes",
-        json={"box_number": "B-001", "owner": "Acme", "warehouse_id": 1},
+        json={"box_number": "B-001", "lot": "Acme", "warehouse_id": 1},
     )
     assert create.status_code == 201, create.text
     box_id = create.json()["id"]
@@ -35,7 +35,7 @@ def test_full_box_lifecycle_and_dashboard(client):
 
     dup = client.post(
         "/api/boxes",
-        json={"box_number": "B-001", "owner": "Acme", "warehouse_id": 1},
+        json={"box_number": "B-001", "lot": "Acme", "warehouse_id": 1},
     )
     assert dup.status_code == 409
 
@@ -65,19 +65,19 @@ def test_full_box_lifecycle_and_dashboard(client):
 
 def test_filters_search_and_exports(client):
     payloads = [
-        {"box_number": "B-100", "owner": "Acme", "warehouse_id": 1},
-        {"box_number": "B-200", "owner": "Globex", "warehouse_id": 2},
-        {"box_number": "B-201", "owner": "Globex", "warehouse_id": 2},
+        {"box_number": "B-100", "lot": "Acme", "warehouse_id": 1},
+        {"box_number": "B-200", "lot": "Globex", "warehouse_id": 2},
+        {"box_number": "B-201", "lot": "Globex", "warehouse_id": 2},
     ]
     for p in payloads:
         assert client.post("/api/boxes", json=p).status_code == 201
 
-    # owner filter
-    resp = client.get("/api/boxes", params={"owner": "globex"})
+    # lot filter
+    resp = client.get("/api/boxes", params={"lot": "globex"})
     assert resp.status_code == 200
     body = resp.json()
     assert body["total"] == 2
-    assert all(b["owner"] == "Globex" for b in body["items"])
+    assert all(b["lot"] == "Globex" for b in body["items"])
 
     # search across box_number
     resp = client.get("/api/boxes", params={"search": "B-201"})
@@ -107,6 +107,49 @@ def test_filters_search_and_exports(client):
     assert all(r[warehouse_col] == "Building 2" for r in data_rows)
 
 
+def test_box_lot_contents_round_trip_and_required(client):
+    # Round-trip: lot + optional contents are preserved on the resource and
+    # surfaced via filters.
+    create = client.post(
+        "/api/boxes",
+        json={
+            "box_number": "LC-1",
+            "lot": "LOT-42",
+            "contents": "10x calibration kits",
+            "warehouse_id": 1,
+        },
+    )
+    assert create.status_code == 201, create.text
+    body = create.json()
+    assert body["lot"] == "LOT-42"
+    assert body["contents"] == "10x calibration kits"
+
+    fetched = client.get(f"/api/boxes/{body['id']}").json()
+    assert fetched["lot"] == "LOT-42"
+    assert fetched["contents"] == "10x calibration kits"
+
+    # Empty payload contents on update clears the field.
+    cleared = client.patch(
+        f"/api/boxes/{body['id']}", json={"contents": ""}
+    )
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["contents"] is None
+
+    # Lot is required: empty string is rejected by Pydantic with 422.
+    bad_create = client.post(
+        "/api/boxes",
+        json={"box_number": "LC-2", "lot": "", "warehouse_id": 1},
+    )
+    assert bad_create.status_code == 422
+
+    # Missing entirely is also a 422 (lot has no default).
+    missing = client.post(
+        "/api/boxes",
+        json={"box_number": "LC-3", "warehouse_id": 1},
+    )
+    assert missing.status_code == 422
+
+
 def test_xlsx_export_with_timezone_aware_timestamps():
     """Postgres TIMESTAMPTZ columns return tz-aware datetimes; openpyxl
     refuses to write those (raises TypeError) so the response would 500 and
@@ -121,7 +164,8 @@ def test_xlsx_export_with_timezone_aware_timestamps():
 
     box = SimpleNamespace(
         box_number="TZ-1",
-        owner="Acme",
+        lot="Acme",
+        contents=None,
         current_warehouse_id=1,
         status=BoxStatus.ready_to_return,
         received_at=datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
@@ -151,7 +195,7 @@ def test_alerts_max_capacity(client, session):
         assert (
             client.post(
                 "/api/boxes",
-                json={"box_number": f"M-{i}", "owner": "x", "warehouse_id": 3},
+                json={"box_number": f"M-{i}", "lot": "x", "warehouse_id": 3},
             ).status_code
             == 201
         )
@@ -190,7 +234,7 @@ def test_alerts_low_inventory_resolves(client, session):
     assert (
         client.post(
             "/api/boxes",
-            json={"box_number": "L-1", "owner": "x", "warehouse_id": 2},
+            json={"box_number": "L-1", "lot": "x", "warehouse_id": 2},
         ).status_code
         == 201
     )

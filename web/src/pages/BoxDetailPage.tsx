@@ -64,9 +64,7 @@ export function BoxDetailPage() {
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <h1 className="font-mono text-2xl font-semibold">{box.box_number}</h1>
-            <p className="text-sm text-slate-500">
-              {box.owner ? `Owner: ${box.owner}` : "Owner unspecified"}
-            </p>
+            <p className="text-sm text-slate-500">Lot: {box.lot}</p>
           </div>
           <div className="flex flex-col items-end gap-1">
             <StatusBadge status={box.status} />
@@ -79,6 +77,9 @@ export function BoxDetailPage() {
           </Field>
           <Field label="Returned">
             {box.returned_at ? new Date(box.returned_at).toLocaleString() : "—"}
+          </Field>
+          <Field label="Contents">
+            {box.contents ?? "—"}
           </Field>
         </dl>
 

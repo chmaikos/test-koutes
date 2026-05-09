@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 
-def _create_box(client, *, box_number: str, warehouse_id: int = 1, owner: str = "x") -> int:
+def _create_box(client, *, box_number: str, warehouse_id: int = 1, lot: str = "x") -> int:
     resp = client.post(
         "/api/boxes",
-        json={"box_number": box_number, "owner": owner, "warehouse_id": warehouse_id},
+        json={"box_number": box_number, "lot": lot, "warehouse_id": warehouse_id},
     )
     assert resp.status_code == 201, resp.text
     return resp.json()["id"]
