@@ -254,6 +254,7 @@ export function BoxesPage() {
                 )}
                 <th className="px-4 py-2.5 text-left">Box #</th>
                 <th className="px-4 py-2.5 text-left">Lot</th>
+                <th className="px-4 py-2.5 text-left">Contents</th>
                 <th className="px-4 py-2.5 text-left">Warehouse</th>
                 <th className="px-4 py-2.5 text-left">Status</th>
                 <th className="px-4 py-2.5 text-left">Updated</th>
@@ -265,7 +266,7 @@ export function BoxesPage() {
                 <tr>
                   <td
                     className="px-4 py-8 text-center text-slate-400"
-                    colSpan={canWrite ? 7 : 6}
+                    colSpan={canWrite ? 8 : 7}
                   >
                     Loading...
                   </td>
@@ -275,7 +276,7 @@ export function BoxesPage() {
                 <tr>
                   <td
                     className="px-4 py-8 text-center text-slate-400"
-                    colSpan={canWrite ? 7 : 6}
+                    colSpan={canWrite ? 8 : 7}
                   >
                     No boxes match your filters.
                   </td>
@@ -565,6 +566,18 @@ function BoxRow({
         </Link>
       </td>
       <td className="px-4 py-2.5">{box.lot}</td>
+      <td className="px-4 py-2.5">
+        {box.contents ? (
+          <span
+            className="block max-w-[18rem] truncate text-slate-700"
+            title={box.contents}
+          >
+            {box.contents}
+          </span>
+        ) : (
+          <span className="text-slate-400">—</span>
+        )}
+      </td>
       <td className="px-4 py-2.5">{warehouseName}</td>
       <td className="px-4 py-2.5">
         <StatusBadge status={box.status} />
