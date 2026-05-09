@@ -1,0 +1,12 @@
+{% extends "_base.txt.j2" %}
+
+{% block notice %}
+RESOLVED
+The condition cleared at {{ alert.resolved_at | shortdt }}. No further action
+is required; this email is the final word on this alert.
+
+{% endblock %}
+
+{% block action_text %}
+The alert has resolved. You can close any tickets you opened against it.
+{% endblock %}

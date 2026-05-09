@@ -1,0 +1,13 @@
+{% extends "_base.txt.j2" %}
+
+{% block notice %}
+TEST EMAIL
+This is a test email. No action is required; it was triggered manually from
+the alert detail page so the recipient list, template, and Microsoft Graph
+configuration could be exercised end-to-end.
+
+{% endblock %}
+
+{% block action_text %}
+No action is required. This is a sample of what a real alert email looks like.
+{% endblock %}

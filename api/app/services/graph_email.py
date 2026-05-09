@@ -41,22 +41,37 @@ def _acquire_token() -> str | None:
     return result["access_token"]
 
 
-def send_alert_email(*, subject: str, html_body: str) -> bool:
+def send_alert_email(
+    *,
+    subject: str,
+    html_body: str,
+    to: list[str] | None = None,
+) -> tuple[bool, str | None]:
+    """Send a single alert email through Graph.
+
+    ``to`` is the explicit recipient list; if omitted we fall back to the
+    static ``ALERT_EMAIL_TO`` for backwards compatibility with any caller
+    that hasn't been updated to use :mod:`app.services.alert_recipients`.
+
+    Returns ``(ok, error)`` so the caller can log a structured reason in
+    the alert_notifications audit table; ``error`` is ``None`` on success.
+    """
     settings = get_settings()
     if not settings.graph_configured:
-        logger.info("graph not configured; skipping alert email")
-        return False
+        return False, "graph not configured"
+    recipients = to if to is not None else settings.alert_email_to_list
+    if not recipients:
+        return False, "no recipients"
     token = _acquire_token()
     if token is None:
-        return False
+        return False, "token acquisition failed"
     url = f"{_GRAPH_BASE}/users/{settings.alert_email_from}/sendMail"
     payload = {
         "message": {
             "subject": subject,
             "body": {"contentType": "HTML", "content": html_body},
             "toRecipients": [
-                {"emailAddress": {"address": addr}}
-                for addr in settings.alert_email_to_list
+                {"emailAddress": {"address": addr}} for addr in recipients
             ],
         },
         "saveToSentItems": False,
@@ -69,9 +84,11 @@ def send_alert_email(*, subject: str, html_body: str) -> bool:
                 headers={"Authorization": f"Bearer {token}"},
             )
         if resp.status_code >= 300:
-            logger.warning("graph sendMail failed: %s %s", resp.status_code, resp.text)
-            return False
-        return True
+            error = f"http {resp.status_code}: {resp.text[:200]}"
+            logger.warning("graph sendMail failed: %s", error)
+            return False, error
+        return True, None
     except httpx.HTTPError as exc:
+        error = f"http error: {exc}"
         logger.warning("graph sendMail error: %s", exc)
-        return False
+        return False, error

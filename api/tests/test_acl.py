@@ -221,6 +221,162 @@ def test_alerts_filtered_and_ack_blocked(
 
 
 # ---------------------------------------------------------------------------
+# Alert detail + test-email endpoints
+# ---------------------------------------------------------------------------
+
+
+def test_alert_detail_acl_gated(
+    client, session, operator_with_access_to_two, restore_user_override
+):
+    """GET /alerts/{id} returns 404 (not 403) for cross-warehouse alerts."""
+    from datetime import UTC, datetime
+
+    from app.models.alerts import (
+        Alert,
+        AlertNotification,
+        AlertNotificationKind,
+        AlertType,
+    )
+
+    mine = Alert(
+        warehouse_id=2,
+        type=AlertType.low_inventory,
+        threshold=5,
+        value=0,
+        triggered_at=datetime.now(UTC),
+    )
+    elsewhere = Alert(
+        warehouse_id=1,
+        type=AlertType.low_inventory,
+        threshold=5,
+        value=0,
+        triggered_at=datetime.now(UTC),
+    )
+    session.add_all([mine, elsewhere])
+    session.commit()
+    session.refresh(mine)
+    session.refresh(elsewhere)
+    # Add a couple of notification rows so we exercise the embed too.
+    session.add_all(
+        [
+            AlertNotification(
+                alert_id=mine.id,
+                kind=AlertNotificationKind.triggered,
+                recipients="ops@example.com",
+                ok=True,
+            ),
+        ]
+    )
+    session.commit()
+
+    _impersonate(operator_with_access_to_two)
+
+    ok = client.get(f"/api/alerts/{mine.id}")
+    assert ok.status_code == 200
+    body = ok.json()
+    assert body["alert"]["id"] == mine.id
+    assert len(body["notifications"]) == 1
+    assert body["notifications"][0]["kind"] == "triggered"
+
+    blocked = client.get(f"/api/alerts/{elsewhere.id}")
+    assert blocked.status_code == 404
+
+
+def test_test_email_endpoint_is_admin_only(
+    client, session, operator_with_access_to_two, restore_user_override, monkeypatch
+):
+    from datetime import UTC, datetime
+
+    from app.models.alerts import Alert, AlertType
+    from app.services import alerts as alerts_service
+
+    # Stub the Graph send so admins running this test don't try to call out.
+    monkeypatch.setattr(
+        alerts_service,
+        "send_alert_email",
+        lambda *, subject, html_body, to=None: (True, None),
+    )
+
+    a = Alert(
+        warehouse_id=2,
+        type=AlertType.low_inventory,
+        threshold=5,
+        value=0,
+        triggered_at=datetime.now(UTC),
+    )
+    session.add(a)
+    session.commit()
+    session.refresh(a)
+
+    _impersonate(operator_with_access_to_two)
+    forbidden = client.post(f"/api/alerts/{a.id}/test-email")
+    assert forbidden.status_code == 403
+
+
+def test_admin_test_email_records_test_kind_audit_row(client, session, monkeypatch):
+    """Admins can hit the test-email path; the audit row uses ``kind=test``
+    so the reminder/escalation cadence is unaffected."""
+    from datetime import UTC, datetime
+
+    from sqlalchemy import select
+
+    from app.models.alerts import Alert, AlertNotification, AlertType
+    from app.services import alerts as alerts_service
+
+    monkeypatch.setattr(
+        alerts_service,
+        "send_alert_email",
+        lambda *, subject, html_body, to=None: (True, None),
+    )
+
+    a = Alert(
+        warehouse_id=1,
+        type=AlertType.low_inventory,
+        threshold=5,
+        value=0,
+        triggered_at=datetime.now(UTC),
+    )
+    session.add(a)
+    session.commit()
+    session.refresh(a)
+
+    resp = client.post(f"/api/alerts/{a.id}/test-email")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["recipients"]
+    assert body["subject"].startswith("[TEST]")
+
+    rows = session.scalars(
+        select(AlertNotification).where(AlertNotification.alert_id == a.id)
+    ).all()
+    assert len(rows) == 1
+    assert rows[0].kind.value == "test"
+
+
+# ---------------------------------------------------------------------------
+# Alert recipients endpoint (admin-only)
+# ---------------------------------------------------------------------------
+
+
+def test_alerts_recipients_endpoint_admin_only(
+    client, operator_with_access_to_two, restore_user_override
+):
+    _impersonate(operator_with_access_to_two)
+    resp = client.get("/api/alerts/recipients")
+    assert resp.status_code == 403
+
+
+def test_alerts_recipients_endpoint_returns_per_warehouse_lists(client):
+    resp = client.get("/api/alerts/recipients")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "warehouses" in body
+    assert "escalation" in body
+    assert {w["warehouse_id"] for w in body["warehouses"]} == {1, 2, 3}
+
+
+# ---------------------------------------------------------------------------
 # Admin grant flow via PATCH /users/{id}
 # ---------------------------------------------------------------------------
 

@@ -1,0 +1,10 @@
+{% extends "_base.txt.j2" %}
+
+{% block notice %}
+ESCALATED
+This alert has been open for an extended period without
+{% if acknowledged_by %}being resolved{% else %}being acknowledged{% endif %}.
+You are receiving it because the primary recipients did not act in time.
+Please follow up directly.
+
+{% endblock %}

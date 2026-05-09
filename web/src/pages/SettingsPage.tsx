@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { Plus } from "lucide-react";
+import { Mail, Plus } from "lucide-react";
 import {
+  useAlertRecipients,
   useCreateWarehouse,
   useUpdateUser,
   useUpdateWarehouse,
@@ -21,6 +22,7 @@ export function SettingsPage() {
 
       <WarehousesSection />
       <UsersSection />
+      <RecipientsPreview />
     </div>
   );
 }
@@ -273,6 +275,7 @@ function UsersSection() {
             <th className="px-4 py-2.5 text-left">Role</th>
             <th className="px-4 py-2.5 text-left">Override</th>
             <th className="px-4 py-2.5 text-left">Active</th>
+            <th className="px-4 py-2.5 text-left">Email alerts</th>
             <th className="px-4 py-2.5 text-left">Warehouses</th>
             <th className="px-4 py-2.5 text-left">Last login</th>
           </tr>
@@ -325,6 +328,23 @@ function UsersSection() {
                 />
               </td>
               <td className="px-4 py-2.5">
+                <input
+                  type="checkbox"
+                  checked={u.email_alerts_enabled}
+                  onChange={(e) =>
+                    update.mutate({
+                      id: u.id,
+                      patch: { email_alerts_enabled: e.target.checked },
+                    })
+                  }
+                  title={
+                    u.email_alerts_enabled
+                      ? "Receives alert emails for accessible warehouses"
+                      : "Opted out of alert emails"
+                  }
+                />
+              </td>
+              <td className="px-4 py-2.5">
                 <WarehouseAccessCell
                   user={u}
                   warehouses={warehouses ?? []}
@@ -343,6 +363,83 @@ function UsersSection() {
         </tbody>
       </table>
     </section>
+  );
+}
+
+function RecipientsPreview() {
+  const { data, isLoading, error } = useAlertRecipients();
+
+  return (
+    <section className="card overflow-hidden">
+      <header className="border-b border-slate-100 px-5 py-3">
+        <div className="flex items-center gap-2">
+          <Mail className="h-4 w-4 text-slate-500" />
+          <h2 className="font-semibold">Alert email routing</h2>
+        </div>
+        <p className="text-xs text-slate-500">
+          Who would receive an alert email if one fired right now. Active
+          users with the warehouse ACL granted (plus all admins) get the
+          primary mail; admins always cover escalation. Toggle "Email
+          alerts" off above to opt a user out without removing their access.
+        </p>
+      </header>
+      {isLoading && (
+        <div className="px-5 py-6 text-sm text-slate-400">Loading…</div>
+      )}
+      {error && (
+        <div className="px-5 py-6 text-sm text-rose-600">
+          Failed to load recipient preview.
+        </div>
+      )}
+      {data && (
+        <div className="divide-y divide-slate-100">
+          {data.warehouses.map((w) => (
+            <div
+              key={w.warehouse_id}
+              className="grid gap-3 px-5 py-3 sm:grid-cols-[14rem_1fr]"
+            >
+              <div className="text-sm font-medium text-slate-700">
+                {w.warehouse_name}
+              </div>
+              <RecipientChips emails={w.primary} emptyHint="No recipients (alerts will fall back to ALERT_EMAIL_TO)" />
+            </div>
+          ))}
+          <div className="grid gap-3 bg-slate-50/60 px-5 py-3 sm:grid-cols-[14rem_1fr]">
+            <div className="text-sm font-medium text-slate-700">
+              Escalation (admins)
+            </div>
+            <RecipientChips
+              emails={data.escalation}
+              emptyHint="No active admins with email alerts enabled"
+            />
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function RecipientChips({
+  emails,
+  emptyHint,
+}: {
+  emails: string[];
+  emptyHint: string;
+}) {
+  if (emails.length === 0) {
+    return <span className="text-xs italic text-slate-400">{emptyHint}</span>;
+  }
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {emails.map((email) => (
+        <span
+          key={email}
+          className="inline-flex items-center rounded-full bg-slate-100 px-2.5 py-0.5 text-xs text-slate-700"
+        >
+          {email}
+        </span>
+      ))}
+    </div>
   );
 }
 

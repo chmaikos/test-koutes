@@ -1,27 +1,58 @@
-"""Threshold evaluation and alert lifecycle management.
+"""Alert lifecycle: detect, then dispatch.
 
-Hooked into every box mutation (so we react instantly) and also driven by
-APScheduler every 60 seconds (defence in depth in case a mutation path skips
-us). Sends Microsoft Graph email on transition into the "triggered" state and
-publishes SSE events for the SPA banner.
+The lifecycle is intentionally split in two:
+
+1. :func:`evaluate_alerts` is *detect-only*. It opens new alert rows when
+   a threshold is crossed, refreshes ``value`` on rows that are still open,
+   and stamps ``resolved_at`` on rows whose underlying condition has
+   cleared. It runs on every box mutation and on a 60-second timer, so it
+   has to be cheap and side-effect free beyond DB writes.
+
+2. :func:`dispatch_pending_notifications` runs on a separate, slower timer
+   (5 min by default) and is responsible for everything email related:
+   first ``triggered`` send, ``reminder`` cadence, one-shot ``escalated``,
+   and the ``resolved`` close-out. Every attempt -- success or failure --
+   writes an :class:`AlertNotification` row, which is what gates idempotency
+   and powers the audit timeline on the alert detail page.
+
+We keep both halves in this module because they share the SSE publishing
+helper and the ``_open_alert``/``_inventory_per_warehouse`` queries.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import math
+from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.events import bus
-from app.models.alerts import Alert, AlertType
-from app.models.boxes import ACTIVE_STATUSES, Box
+from app.models.alerts import (
+    Alert,
+    AlertNotification,
+    AlertNotificationKind,
+    AlertType,
+)
+from app.models.boxes import ACTIVE_STATUSES, Box, BoxStatus
 from app.models.warehouses import Warehouse
+from app.services.alert_email import EmailKind, render_for_alert
+from app.services.alert_recipients import (
+    escalation_recipients,
+    primary_recipients,
+)
 from app.services.graph_email import send_alert_email
 
 logger = logging.getLogger("warehouse.alerts")
+
+
+# ---------------------------------------------------------------------------
+# Detection
+# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -63,90 +94,194 @@ def _publish(event_type: str, payload: dict) -> None:
     loop.create_task(bus.publish(event_type, payload))
 
 
-def _format_email_body(
-    warehouse: Warehouse, alert_type: AlertType, value: int, threshold: int
-) -> tuple[str, str]:
-    if alert_type == AlertType.low_inventory:
-        subject = f"[Warehouse] LOW inventory at {warehouse.name}"
-        body = (
-            f"<p>Warehouse <b>{warehouse.name}</b> inventory is "
-            f"<b>{value}</b> (minimum: {threshold}).</p>"
+def _stuck_boxes_per_warehouse(
+    db: Session, *, older_than: datetime
+) -> dict[int, int]:
+    """Count boxes that have been in ``received`` for too long, by warehouse.
+
+    A box counts as stuck if its ``received_at`` is older than
+    ``older_than`` (or if it has no ``received_at`` but was created before
+    that, as a defensive fallback for legacy rows). Boxes that have moved
+    past ``received`` are skipped regardless of how long they've been there.
+    """
+    rows = db.execute(
+        select(Box.current_warehouse_id, func.count(Box.id))
+        .where(
+            Box.status == BoxStatus.received,
+            and_(
+                # received_at is the canonical "started waiting" timestamp;
+                # when missing fall back to created_at so we don't lose
+                # rows imported from a system that didn't fill it in.
+                func.coalesce(Box.received_at, Box.created_at) <= older_than,
+            ),
         )
+        .group_by(Box.current_warehouse_id)
+    ).all()
+    return {int(wid): int(count) for wid, count in rows}
+
+
+def _reconcile_alert(
+    db: Session,
+    *,
+    warehouse_id: int,
+    alert_type: AlertType,
+    triggered_now: bool,
+    value: int,
+    threshold: int,
+    now: datetime,
+    triggered_out: list[Alert],
+    resolved_out: list[Alert],
+) -> None:
+    """Open / refresh / close a single (warehouse, alert_type) pair.
+
+    Centralises the open/close bookkeeping so each trigger family can be
+    expressed as just "is the condition true right now, and at what
+    value?". Pushes new alerts onto ``triggered_out`` and stamps closed
+    alerts onto ``resolved_out`` for the caller to publish over SSE.
+    """
+    open_row = _open_alert(db, warehouse_id, alert_type)
+    if triggered_now:
+        if open_row is None:
+            alert = Alert(
+                warehouse_id=warehouse_id,
+                type=alert_type,
+                threshold=threshold,
+                value=value,
+                triggered_at=now,
+            )
+            db.add(alert)
+            db.flush()
+            triggered_out.append(alert)
+        else:
+            open_row.value = value
+            # Refresh threshold so a subsequent warehouse-config change
+            # is reflected on the existing open alert.
+            open_row.threshold = threshold
     else:
-        subject = f"[Warehouse] MAX capacity reached at {warehouse.name}"
-        body = (
-            f"<p>Warehouse <b>{warehouse.name}</b> is at <b>{value}</b> boxes "
-            f"(capacity: {threshold}).</p>"
-        )
-    return subject, body
+        if open_row is not None:
+            open_row.resolved_at = now
+            resolved_out.append(open_row)
 
 
 def evaluate_alerts(db: Session) -> list[Alert]:
-    """Reconcile the alert table against current inventory. Returns alerts that
-    were *newly triggered* in this evaluation."""
+    """Reconcile the alert table against current inventory.
+
+    Detect-only -- this function never sends email. It returns the alerts
+    that were *newly opened* in this evaluation so callers that want
+    immediate feedback (e.g. tests) can introspect them, but the
+    background dispatcher is what actually delivers the email.
+
+    SSE events are still published here so the SPA's banner reacts in
+    real time (the SPA never had to wait for the email path anyway).
+    """
+    settings = get_settings()
     now = datetime.now(UTC)
     triggered: list[Alert] = []
+    resolved: list[Alert] = []
+
+    # Box-stuck counts are a per-warehouse aggregate; pull them once so
+    # the per-warehouse loop below can look them up in O(1).
+    stuck_counts: dict[int, int] = {}
+    if settings.box_stuck_threshold_days > 0:
+        cutoff = now - timedelta(days=settings.box_stuck_threshold_days)
+        stuck_counts = _stuck_boxes_per_warehouse(db, older_than=cutoff)
 
     for ev in _inventory_per_warehouse(db):
         wh = ev.warehouse
-        # --- low inventory ------------------------------------------------
-        low_open = _open_alert(db, wh.id, AlertType.low_inventory)
-        if ev.inventory < wh.min_inventory:
-            if low_open is None:
-                alert = Alert(
-                    warehouse_id=wh.id,
-                    type=AlertType.low_inventory,
-                    threshold=wh.min_inventory,
-                    value=ev.inventory,
-                    triggered_at=now,
-                )
-                db.add(alert)
-                db.flush()
-                triggered.append(alert)
-            else:
-                low_open.value = ev.inventory
-        else:
-            if low_open is not None:
-                low_open.resolved_at = now
-                _publish(
-                    "alert.resolved",
-                    {"id": low_open.id, "warehouse_id": wh.id, "type": low_open.type.value},
-                )
 
-        # --- max capacity -------------------------------------------------
-        max_open = _open_alert(db, wh.id, AlertType.max_capacity)
-        if ev.inventory >= wh.max_capacity:
-            if max_open is None:
-                alert = Alert(
-                    warehouse_id=wh.id,
-                    type=AlertType.max_capacity,
-                    threshold=wh.max_capacity,
-                    value=ev.inventory,
-                    triggered_at=now,
-                )
-                db.add(alert)
-                db.flush()
-                triggered.append(alert)
-            else:
-                max_open.value = ev.inventory
-        else:
-            if max_open is not None:
-                max_open.resolved_at = now
-                _publish(
-                    "alert.resolved",
-                    {"id": max_open.id, "warehouse_id": wh.id, "type": max_open.type.value},
-                )
+        low = ev.inventory < wh.min_inventory
+        _reconcile_alert(
+            db,
+            warehouse_id=wh.id,
+            alert_type=AlertType.low_inventory,
+            triggered_now=low,
+            value=ev.inventory,
+            threshold=wh.min_inventory,
+            now=now,
+            triggered_out=triggered,
+            resolved_out=resolved,
+        )
+
+        over = ev.inventory >= wh.max_capacity
+        _reconcile_alert(
+            db,
+            warehouse_id=wh.id,
+            alert_type=AlertType.max_capacity,
+            triggered_now=over,
+            value=ev.inventory,
+            threshold=wh.max_capacity,
+            now=now,
+            triggered_out=triggered,
+            resolved_out=resolved,
+        )
+
+        # --- near capacity (heads-up) --------------------------------------
+        # Only meaningful when the percentage is in (0, 100]; >= 100 is
+        # functionally identical to max_capacity, so we skip the leading
+        # indicator in that case to avoid stacking duplicate alerts.
+        pct = settings.near_capacity_percent
+        if 0 < pct < 100 and wh.max_capacity > 0:
+            near_threshold = max(
+                1, int(math.ceil(wh.max_capacity * pct / 100))
+            )
+            near_cap = (
+                ev.inventory >= near_threshold
+                and ev.inventory < wh.max_capacity
+            )
+            _reconcile_alert(
+                db,
+                warehouse_id=wh.id,
+                alert_type=AlertType.near_capacity,
+                triggered_now=near_cap,
+                value=ev.inventory,
+                threshold=near_threshold,
+                now=now,
+                triggered_out=triggered,
+                resolved_out=resolved,
+            )
+
+        # --- near low inventory (heads-up) ---------------------------------
+        # Fires when inventory is within ``buffer`` of the minimum but
+        # still above it; once we drop below min the low_inventory alert
+        # takes over. We use min_inventory itself as the stored threshold
+        # so the email body can talk in concrete numbers.
+        buffer_n = settings.near_low_inventory_buffer
+        if buffer_n > 0 and wh.min_inventory > 0:
+            warning_floor = wh.min_inventory + buffer_n
+            near_low = (
+                ev.inventory >= wh.min_inventory
+                and ev.inventory <= warning_floor
+            )
+            _reconcile_alert(
+                db,
+                warehouse_id=wh.id,
+                alert_type=AlertType.near_low_inventory,
+                triggered_now=near_low,
+                value=ev.inventory,
+                threshold=wh.min_inventory,
+                now=now,
+                triggered_out=triggered,
+                resolved_out=resolved,
+            )
+
+        # --- box stuck -----------------------------------------------------
+        if settings.box_stuck_threshold_days > 0:
+            stuck_count = stuck_counts.get(wh.id, 0)
+            _reconcile_alert(
+                db,
+                warehouse_id=wh.id,
+                alert_type=AlertType.box_stuck,
+                triggered_now=stuck_count > 0,
+                value=stuck_count,
+                threshold=settings.box_stuck_threshold_days,
+                now=now,
+                triggered_out=triggered,
+                resolved_out=resolved,
+            )
 
     db.commit()
 
     for alert in triggered:
-        wh = db.get(Warehouse, alert.warehouse_id)
-        if wh is None:
-            continue
-        subject, html = _format_email_body(wh, alert.type, alert.value, alert.threshold)
-        if send_alert_email(subject=subject, html_body=html):
-            alert.notified_at = datetime.now(UTC)
-            db.commit()
         _publish(
             "alert.triggered",
             {
@@ -155,6 +290,15 @@ def evaluate_alerts(db: Session) -> list[Alert]:
                 "type": alert.type.value,
                 "value": alert.value,
                 "threshold": alert.threshold,
+            },
+        )
+    for alert in resolved:
+        _publish(
+            "alert.resolved",
+            {
+                "id": alert.id,
+                "warehouse_id": alert.warehouse_id,
+                "type": alert.type.value,
             },
         )
     return triggered
@@ -166,3 +310,280 @@ def evaluate_safe(db: Session) -> None:
         evaluate_alerts(db)
     except Exception:  # pragma: no cover - defensive
         logger.exception("alert evaluation failed")
+
+
+# ---------------------------------------------------------------------------
+# Dispatch
+# ---------------------------------------------------------------------------
+
+
+_KIND_MAP: dict[AlertNotificationKind, EmailKind] = {
+    AlertNotificationKind.triggered: EmailKind.triggered,
+    AlertNotificationKind.reminder: EmailKind.reminder,
+    AlertNotificationKind.escalated: EmailKind.escalated,
+    AlertNotificationKind.resolved: EmailKind.resolved,
+    AlertNotificationKind.test: EmailKind.test,
+}
+
+
+def _aware(value: datetime | None) -> datetime | None:
+    """Ensure a DB-loaded datetime is timezone-aware.
+
+    Our ``DateTime(timezone=True)`` columns round-trip through Postgres
+    with tzinfo intact, but SQLite (used by the test suite) drops it on
+    read. We normalise here so the dispatcher can compare against
+    ``datetime.now(UTC)`` without a ``can't compare offset-naive`` error.
+    """
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value
+
+
+def _last_notification_for(
+    db: Session,
+    alert_id: int,
+    kinds: Iterable[AlertNotificationKind] | None = None,
+) -> AlertNotification | None:
+    """Return the most recent notification row for the alert.
+
+    If ``kinds`` is provided, only those kinds are considered. Failed
+    sends count: the dispatcher already retries triggered messages via
+    ``alert.notified_at``, but for reminder/escalation idempotency we
+    don't want to keep retrying a known-bad recipient list every tick.
+    """
+    stmt = (
+        select(AlertNotification)
+        .where(AlertNotification.alert_id == alert_id)
+        .order_by(AlertNotification.sent_at.desc())
+        .limit(1)
+    )
+    if kinds is not None:
+        stmt = stmt.where(AlertNotification.kind.in_(list(kinds)))
+    return db.scalar(stmt)
+
+
+def dispatch_notification(
+    db: Session,
+    *,
+    alert: Alert,
+    kind: AlertNotificationKind,
+    recipients: list[str],
+) -> AlertNotification:
+    """Render + send + audit a single notification.
+
+    Always commits an :class:`AlertNotification` row -- with ``ok=False``
+    and an ``error`` message when the send fails -- so the operator can
+    tell the difference between "we never tried" and "we tried and failed".
+    Returns the row for the caller's convenience.
+    """
+    email = render_for_alert(db, kind=_KIND_MAP[kind], alert=alert)
+    if email is None:
+        # Warehouse vanished mid-flight; record an audit row but don't try
+        # to dispatch -- the alert is effectively orphaned and a human
+        # will have to clean it up manually.
+        record = AlertNotification(
+            alert_id=alert.id,
+            kind=kind,
+            recipients=", ".join(recipients),
+            ok=False,
+            error="warehouse missing",
+        )
+        db.add(record)
+        db.commit()
+        return record
+
+    if not recipients:
+        record = AlertNotification(
+            alert_id=alert.id,
+            kind=kind,
+            recipients="",
+            ok=False,
+            error="no recipients",
+        )
+        db.add(record)
+        db.commit()
+        return record
+
+    # Plain-text body is rendered for the future audit log + as a fallback
+    # for clients that strip HTML; Graph's sendMail is HTML-only today so
+    # we only forward the html body.
+    logger.debug("alert %s text body (%s):\n%s", alert.id, kind.value, email.text)
+    ok, error = send_alert_email(
+        subject=email.subject,
+        html_body=email.html,
+        to=recipients,
+    )
+    record = AlertNotification(
+        alert_id=alert.id,
+        kind=kind,
+        recipients=", ".join(recipients),
+        ok=ok,
+        error=error,
+    )
+    db.add(record)
+    db.commit()
+    return record
+
+
+def _send_triggered(db: Session, alert: Alert, now: datetime) -> None:
+    recipients = primary_recipients(db, alert.warehouse_id)
+    record = dispatch_notification(
+        db,
+        alert=alert,
+        kind=AlertNotificationKind.triggered,
+        recipients=recipients,
+    )
+    if record.ok:
+        alert.notified_at = now
+        db.commit()
+
+
+def _send_reminder(db: Session, alert: Alert) -> None:
+    recipients = primary_recipients(db, alert.warehouse_id)
+    dispatch_notification(
+        db,
+        alert=alert,
+        kind=AlertNotificationKind.reminder,
+        recipients=recipients,
+    )
+
+
+def _send_escalation(db: Session, alert: Alert, now: datetime) -> None:
+    recipients = escalation_recipients(db)
+    record = dispatch_notification(
+        db,
+        alert=alert,
+        kind=AlertNotificationKind.escalated,
+        recipients=recipients,
+    )
+    if record.ok:
+        # Stamp escalated_at even when send succeeded so we never re-send.
+        # If the send failed we leave it null so the next tick retries.
+        alert.escalated_at = now
+        db.commit()
+
+
+def _send_resolved(db: Session, alert: Alert) -> None:
+    recipients = primary_recipients(db, alert.warehouse_id)
+    dispatch_notification(
+        db,
+        alert=alert,
+        kind=AlertNotificationKind.resolved,
+        recipients=recipients,
+    )
+
+
+def dispatch_pending_notifications(db: Session) -> int:
+    """Send any triggered/reminder/escalated/resolved emails that are due.
+
+    Idempotent: each kind is gated either by a column on the alert
+    (``notified_at`` for triggered, ``escalated_at`` for escalated) or by
+    the ``alert_notifications`` audit table (reminder cadence, resolved
+    one-shot). Returns the number of notifications actually attempted.
+    """
+    settings = get_settings()
+    now = datetime.now(UTC)
+    sent = 0
+
+    # 1. First-touch triggered email for any open alert that hasn't been
+    #    successfully notified yet. We retry on every tick until it goes
+    #    through; each attempt writes its own audit row.
+    pending_triggered = db.scalars(
+        select(Alert).where(
+            Alert.notified_at.is_(None),
+            Alert.resolved_at.is_(None),
+        )
+    ).all()
+    for alert in pending_triggered:
+        _send_triggered(db, alert, now)
+        sent += 1
+
+    # 2. Reminder cadence: open alerts whose last notification (any kind
+    #    except 'test') is older than the configured window get a
+    #    reminder. 0 hours disables.
+    if settings.alert_reminder_hours > 0:
+        cutoff = now - timedelta(hours=settings.alert_reminder_hours)
+        open_alerts = db.scalars(
+            select(Alert).where(
+                Alert.resolved_at.is_(None),
+                Alert.notified_at.is_not(None),
+            )
+        ).all()
+        reminder_kinds = (
+            AlertNotificationKind.triggered,
+            AlertNotificationKind.reminder,
+            AlertNotificationKind.escalated,
+        )
+        for alert in open_alerts:
+            last = _last_notification_for(db, alert.id, kinds=reminder_kinds)
+            if last is None:
+                # Defensive: triggered email recorded notified_at but we
+                # somehow have no audit row. Treat as overdue.
+                notified = _aware(alert.notified_at)
+                if notified is not None and notified <= cutoff:
+                    _send_reminder(db, alert)
+                    sent += 1
+                continue
+            sent_at = _aware(last.sent_at)
+            if sent_at is not None and sent_at <= cutoff:
+                _send_reminder(db, alert)
+                sent += 1
+
+    # 3. Escalation: any open alert older than the escalation window that
+    #    we haven't escalated yet gets a single admin-only mail. The
+    #    one-shot guarantee is enforced by the escalated_at column.
+    if settings.alert_escalation_hours > 0:
+        cutoff = now - timedelta(hours=settings.alert_escalation_hours)
+        candidates = db.scalars(
+            select(Alert).where(
+                Alert.resolved_at.is_(None),
+                Alert.escalated_at.is_(None),
+                Alert.triggered_at <= cutoff,
+            )
+        ).all()
+        for alert in candidates:
+            # Defensive double-check on SQLite where the WHERE clause may
+            # apply to naive timestamps; the in-Python comparison normalises
+            # tzinfo before deciding.
+            triggered = _aware(alert.triggered_at)
+            if triggered is None or triggered > cutoff:
+                continue
+            _send_escalation(db, alert, now)
+            sent += 1
+
+    # 4. Resolved close-out: alerts that have been stamped resolved but
+    #    never had a 'resolved' email sent. This covers both the auto
+    #    close-out from evaluate_alerts and any manual resolutions. We
+    #    look for the absence of a successful 'resolved' row to keep
+    #    failed sends retriable; we cap retries by also bailing out if a
+    #    failed row exists newer than 1 hour, to avoid hammering Graph
+    #    on a permanent misconfiguration.
+    resolved_candidates = db.scalars(
+        select(Alert).where(Alert.resolved_at.is_not(None))
+    ).all()
+    retry_floor = now - timedelta(hours=1)
+    for alert in resolved_candidates:
+        latest_resolved = _last_notification_for(
+            db, alert.id, kinds=(AlertNotificationKind.resolved,)
+        )
+        if latest_resolved is not None and latest_resolved.ok:
+            continue
+        if latest_resolved is not None:
+            sent_at = _aware(latest_resolved.sent_at)
+            if sent_at is not None and sent_at >= retry_floor:
+                # We tried and failed recently; back off until next tick.
+                continue
+        _send_resolved(db, alert)
+        sent += 1
+
+    return sent
+
+
+def dispatch_safe(db: Session) -> None:
+    """Best-effort wrapper used by the scheduler tick."""
+    try:
+        dispatch_pending_notifications(db)
+    except Exception:  # pragma: no cover - defensive
+        logger.exception("alert dispatch failed")

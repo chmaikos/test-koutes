@@ -39,6 +39,8 @@ def update_user(
         target.role_override = payload.role_override
     if payload.is_active is not None:
         target.is_active = payload.is_active
+    if payload.email_alerts_enabled is not None:
+        target.email_alerts_enabled = payload.email_alerts_enabled
     if payload.warehouse_ids is not None:
         # Replace the user's per-warehouse ACL wholesale. We validate that
         # every requested id refers to a real warehouse so admins get a

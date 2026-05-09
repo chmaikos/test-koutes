@@ -1,11 +1,54 @@
 import { useState } from "react";
-import { AlertTriangle, CheckCircle2 } from "lucide-react";
+import { Link } from "react-router-dom";
+import { AlertTriangle, CheckCircle2, Clock } from "lucide-react";
 import {
   useAcknowledgeAlert,
   useAlerts,
   useWarehouses,
 } from "@/api/hooks";
+import type { AlertType } from "@/api/types";
 import { useHasRole } from "@/components/RoleGate";
+
+interface TypeStyle {
+  label: string;
+  icon: typeof AlertTriangle;
+  iconClass: string;
+}
+
+const ALERT_TYPE_STYLES: Record<AlertType, TypeStyle> = {
+  low_inventory: {
+    label: "Low inventory",
+    icon: AlertTriangle,
+    iconClass: "text-rose-500",
+  },
+  max_capacity: {
+    label: "Max capacity",
+    icon: AlertTriangle,
+    iconClass: "text-rose-500",
+  },
+  near_capacity: {
+    label: "Near capacity",
+    icon: AlertTriangle,
+    iconClass: "text-amber-500",
+  },
+  near_low_inventory: {
+    label: "Near low inventory",
+    icon: AlertTriangle,
+    iconClass: "text-amber-500",
+  },
+  box_stuck: {
+    label: "Boxes stuck",
+    icon: Clock,
+    iconClass: "text-sky-600",
+  },
+};
+
+function formatValueThreshold(type: AlertType, value: number, threshold: number): string {
+  if (type === "box_stuck") {
+    return `${value} stuck (>${threshold}d)`;
+  }
+  return `${value} / ${threshold}`;
+}
 
 export function AlertsPage() {
   const [onlyOpen, setOnlyOpen] = useState(true);
@@ -20,7 +63,7 @@ export function AlertsPage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Alerts</h1>
           <p className="text-sm text-slate-500">
-            Low-inventory and max-capacity events.
+            Inventory thresholds, leading indicators, and stuck-box checks.
           </p>
         </div>
         <label className="inline-flex items-center gap-2 text-sm">
@@ -62,21 +105,27 @@ export function AlertsPage() {
             )}
             {data?.map((a) => {
               const wh = warehouses.data?.find((w) => w.id === a.warehouse_id);
+              const style =
+                ALERT_TYPE_STYLES[a.type] ?? ALERT_TYPE_STYLES.low_inventory;
+              const Icon = style.icon;
               return (
                 <tr key={a.id} className="hover:bg-slate-50">
-                  <td className="px-4 py-2.5">{wh?.name ?? `#${a.warehouse_id}`}</td>
                   <td className="px-4 py-2.5">
-                    <span className="inline-flex items-center gap-1">
-                      {a.type === "low_inventory" ? (
-                        <AlertTriangle className="h-4 w-4 text-amber-500" />
-                      ) : (
-                        <AlertTriangle className="h-4 w-4 text-rose-500" />
-                      )}
-                      {a.type === "low_inventory" ? "Low inventory" : "Max capacity"}
+                    <Link
+                      to={`/alerts/${a.id}`}
+                      className="font-medium text-slate-700 hover:text-sky-600 hover:underline"
+                    >
+                      {wh?.name ?? `#${a.warehouse_id}`}
+                    </Link>
+                  </td>
+                  <td className="px-4 py-2.5">
+                    <span className="inline-flex items-center gap-1.5">
+                      <Icon className={`h-4 w-4 ${style.iconClass}`} />
+                      {style.label}
                     </span>
                   </td>
                   <td className="px-4 py-2.5">
-                    {a.value} / {a.threshold}
+                    {formatValueThreshold(a.type, a.value, a.threshold)}
                   </td>
                   <td className="px-4 py-2.5 text-slate-500">
                     {new Date(a.triggered_at).toLocaleString()}
@@ -85,6 +134,10 @@ export function AlertsPage() {
                     {a.resolved_at ? (
                       <span className="badge bg-emerald-100 text-emerald-700">
                         <CheckCircle2 className="h-3 w-3" /> Resolved
+                      </span>
+                    ) : a.escalated_at ? (
+                      <span className="badge bg-rose-100 text-rose-700">
+                        Escalated
                       </span>
                     ) : a.acknowledged_at ? (
                       <span className="badge bg-slate-200 text-slate-700">

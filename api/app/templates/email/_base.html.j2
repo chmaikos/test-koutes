@@ -1,0 +1,145 @@
+{# Shared HTML layout for alert emails.
+
+    Uses table-based layout with inline styles -- the only formatting that
+    survives Outlook, Gmail, Apple Mail, and the various mobile clients.
+    Children override the ``content`` block.
+#}
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>{{ subject }}</title>
+  </head>
+  <body style="margin:0;padding:0;background:#f1f5f9;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#0f172a;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+           style="background:#f1f5f9;padding:24px 12px;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="600" cellpadding="0" cellspacing="0"
+                 style="max-width:600px;width:100%;background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 1px 3px rgba(15,23,42,0.08);">
+            {# severity strip -- the very first thing the recipient sees #}
+            <tr>
+              <td style="background:{{ severity.bg }};color:{{ severity.fg }};padding:14px 24px;font-weight:700;font-size:13px;letter-spacing:0.08em;text-transform:uppercase;">
+                {{ severity.label }}
+              </td>
+            </tr>
+
+            {# headline + summary #}
+            <tr>
+              <td style="padding:24px 24px 0 24px;">
+                <h1 style="margin:0;font-size:20px;line-height:1.3;color:#0f172a;font-weight:600;">
+                  {{ headline }}
+                </h1>
+                <p style="margin:8px 0 0 0;font-size:14px;color:#475569;">
+                  Warehouse <strong style="color:#0f172a;">{{ warehouse.name }}</strong>
+                  &middot; {{ alert.summary }}
+                </p>
+              </td>
+            </tr>
+
+            {# inventory bar #}
+            {% block summary_card %}
+            <tr>
+              <td style="padding:16px 24px 0 24px;">
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+                       style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;">
+                  <tr>
+                    <td style="padding:16px;">
+                      <div style="font-size:12px;text-transform:uppercase;letter-spacing:0.06em;color:#64748b;">
+                        Inventory
+                      </div>
+                      <div style="font-size:24px;font-weight:600;color:#0f172a;margin-top:4px;">
+                        {{ alert.value }}
+                        <span style="font-size:14px;color:#94a3b8;font-weight:500;">
+                          / threshold {{ alert.threshold }}
+                          {% if alert.threshold > 0 %} &middot; {{ percent }}%{% endif %}
+                        </span>
+                      </div>
+                      <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+                             style="margin-top:12px;background:#e2e8f0;border-radius:6px;height:10px;">
+                        <tr>
+                          <td width="{{ bar_percent }}%"
+                              style="background:{{ severity.bar }};height:10px;border-radius:6px;line-height:0;font-size:0;">&nbsp;</td>
+                          <td style="line-height:0;font-size:0;">&nbsp;</td>
+                        </tr>
+                      </table>
+                      <div style="margin-top:10px;font-size:13px;color:#475569;">
+                        Capacity bounds: min {{ warehouse.min_inventory }} &middot;
+                        max {{ warehouse.max_capacity }}
+                      </div>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+            {% endblock %}
+
+            {# extra context (e.g. acknowledger info) #}
+            {% block notice %}{% endblock %}
+
+            {# what we expect from the recipient #}
+            <tr>
+              <td style="padding:20px 24px 0 24px;">
+                <div style="font-size:12px;text-transform:uppercase;letter-spacing:0.06em;color:#64748b;">
+                  What we expect
+                </div>
+                <p style="margin:6px 0 0 0;font-size:14px;line-height:1.5;color:#0f172a;">
+                  {% block action_text %}{{ action }}{% endblock %}
+                </p>
+              </td>
+            </tr>
+
+            {# CTA button (only when we know where to send the recipient) #}
+            {% if cta_url %}
+            <tr>
+              <td style="padding:20px 24px 0 24px;">
+                <a href="{{ cta_url }}"
+                   style="display:inline-block;background:#0f172a;color:#ffffff;text-decoration:none;padding:10px 18px;border-radius:8px;font-weight:600;font-size:14px;">
+                  Open this alert
+                </a>
+              </td>
+            </tr>
+            {% endif %}
+
+            {# recent activity table #}
+            {% if recent_events %}
+            <tr>
+              <td style="padding:20px 24px 0 24px;">
+                <div style="font-size:12px;text-transform:uppercase;letter-spacing:0.06em;color:#64748b;">
+                  Recent activity in {{ warehouse.name }}
+                </div>
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+                       style="margin-top:8px;border-collapse:collapse;font-size:13px;">
+                  {% for ev in recent_events %}
+                  <tr>
+                    <td style="padding:6px 8px;border-bottom:1px solid #f1f5f9;color:#475569;width:140px;white-space:nowrap;">
+                      {{ ev.occurred_at | shortdt }}
+                    </td>
+                    <td style="padding:6px 8px;border-bottom:1px solid #f1f5f9;font-family:'SF Mono',Menlo,Consolas,monospace;color:#0f172a;width:90px;">
+                      {{ ev.box_number }}
+                    </td>
+                    <td style="padding:6px 8px;border-bottom:1px solid #f1f5f9;color:#0f172a;">
+                      {{ ev.line }}
+                    </td>
+                  </tr>
+                  {% endfor %}
+                </table>
+              </td>
+            </tr>
+            {% endif %}
+
+            {# triggered-at footer line #}
+            <tr>
+              <td style="padding:24px;color:#94a3b8;font-size:12px;line-height:1.5;">
+                Alert #{{ alert.id }} &middot; first triggered {{ alert.triggered_at | shortdt }}.<br>
+                You are receiving this because you are subscribed to alerts for
+                {{ warehouse.name }}.
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>

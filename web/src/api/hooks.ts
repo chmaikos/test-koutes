@@ -2,6 +2,9 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, buildQueryString } from "@/api/client";
 import type {
   Alert,
+  AlertDetail,
+  AlertRecipients,
+  AlertTestEmailResult,
   Box,
   BoxEvent,
   BoxFilters,
@@ -21,6 +24,8 @@ export const queryKeys = {
   warehouses: ["warehouses"] as const,
   users: ["users"] as const,
   alerts: (open: boolean) => ["alerts", open] as const,
+  alert: (id: number) => ["alert", id] as const,
+  alertRecipients: ["alert-recipients"] as const,
   box: (id: number) => ["box", id] as const,
   boxEvents: (id: number) => ["box-events", id] as const,
   boxes: (filters: BoxFilters, page: number, pageSize: number) =>
@@ -95,11 +100,14 @@ export function useUpdateUser() {
         role?: User["role"];
         is_active?: boolean;
         role_override?: boolean;
+        email_alerts_enabled?: boolean;
         warehouse_ids?: number[];
       };
     }) => (await api.patch<User>(`/users/${input.id}`, input.patch)).data,
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: queryKeys.users });
+      // ACL or opt-out changes shift the alert recipient preview as well.
+      qc.invalidateQueries({ queryKey: queryKeys.alertRecipients });
       // ACL changes can flip what the affected user (or the admin themselves
       // when adjusting their own row) sees; refresh warehouse-scoped views.
       qc.invalidateQueries({ queryKey: queryKeys.warehouses });
@@ -122,9 +130,39 @@ export function useAcknowledgeAlert() {
   return useMutation({
     mutationFn: async (id: number) =>
       (await api.post<Alert>(`/alerts/${id}/ack`)).data,
-    onSuccess: () => {
+    onSuccess: (_data, id) => {
       qc.invalidateQueries({ queryKey: ["alerts"] });
+      qc.invalidateQueries({ queryKey: queryKeys.alert(id) });
       qc.invalidateQueries({ queryKey: queryKeys.dashboard });
+    },
+  });
+}
+
+export function useAlert(id: number | undefined) {
+  return useQuery({
+    queryKey: id ? queryKeys.alert(id) : ["alert", "noop"],
+    queryFn: async () =>
+      (await api.get<AlertDetail>(`/alerts/${id}`)).data,
+    enabled: !!id,
+    refetchInterval: 30_000,
+  });
+}
+
+export function useAlertRecipients() {
+  return useQuery({
+    queryKey: queryKeys.alertRecipients,
+    queryFn: async () =>
+      (await api.get<AlertRecipients>("/alerts/recipients")).data,
+  });
+}
+
+export function useSendTestAlertEmail() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (id: number) =>
+      (await api.post<AlertTestEmailResult>(`/alerts/${id}/test-email`)).data,
+    onSuccess: (_data, id) => {
+      qc.invalidateQueries({ queryKey: queryKeys.alert(id) });
     },
   });
 }

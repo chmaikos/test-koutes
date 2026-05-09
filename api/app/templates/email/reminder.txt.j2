@@ -1,0 +1,14 @@
+{% extends "_base.txt.j2" %}
+
+{% block notice %}
+NOTE
+This alert is still open.
+{% if acknowledged_by %}
+Acknowledged by {{ acknowledged_by.display_name }} ({{ acknowledged_by.email }})
+on {{ alert.acknowledged_at | shortdt }} but the underlying condition has not
+cleared yet.
+{% else %}
+No-one has acknowledged it yet.
+{% endif %}
+
+{% endblock %}

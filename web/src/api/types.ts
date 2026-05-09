@@ -8,7 +8,19 @@ export const ALL_BOX_STATUSES: BoxStatus[] = [
   "returned",
 ];
 
-export type AlertType = "low_inventory" | "max_capacity";
+export type AlertType =
+  | "low_inventory"
+  | "max_capacity"
+  | "near_capacity"
+  | "near_low_inventory"
+  | "box_stuck";
+
+export type AlertNotificationKind =
+  | "triggered"
+  | "reminder"
+  | "escalated"
+  | "resolved"
+  | "test";
 
 export type BoxEventType =
   | "created"
@@ -24,6 +36,7 @@ export interface User {
   role: Role;
   role_override: boolean;
   is_active: boolean;
+  email_alerts_enabled: boolean;
   last_login_at: string | null;
   username: string | null;
   is_local: boolean;
@@ -84,6 +97,40 @@ export interface Alert {
   notified_at: string | null;
   resolved_at: string | null;
   acknowledged_at: string | null;
+  escalated_at: string | null;
+}
+
+export interface AlertNotification {
+  id: number;
+  alert_id: number;
+  kind: AlertNotificationKind;
+  sent_at: string;
+  recipients: string;
+  ok: boolean;
+  error: string | null;
+}
+
+export interface AlertDetail {
+  alert: Alert;
+  notifications: AlertNotification[];
+}
+
+export interface AlertRecipientsRow {
+  warehouse_id: number;
+  warehouse_name: string;
+  primary: string[];
+}
+
+export interface AlertRecipients {
+  warehouses: AlertRecipientsRow[];
+  escalation: string[];
+}
+
+export interface AlertTestEmailResult {
+  ok: boolean;
+  error: string | null;
+  recipients: string[];
+  subject: string;
 }
 
 export interface Page<T> {

@@ -1,0 +1,36 @@
+{# Plain-text twin of _base.html.j2.
+
+    Lines wrap at ~72 chars in clients that respect format=flowed; otherwise
+    they wrap at the receiver's window. We avoid heavy box-drawing because a
+    fair share of corporate clients use a proportional font for plain text.
+#}
+{{ severity.label | upper }}
+{{ '=' * (severity.label | length) }}
+
+{{ headline }}
+Warehouse: {{ warehouse.name }}
+Status:    {{ alert.summary }}
+
+INVENTORY
+  {{ text_bar }} {{ alert.value }} / {{ alert.threshold }}{% if alert.threshold > 0 %} ({{ percent }}%){% endif %}
+  Capacity bounds: min {{ warehouse.min_inventory }}, max {{ warehouse.max_capacity }}
+
+{% block notice %}{% endblock %}
+WHAT WE EXPECT
+{% block action_text %}{{ action }}{% endblock %}
+
+{% if cta_url %}
+Open this alert:
+  {{ cta_url }}
+
+{% endif %}
+{% if recent_events %}
+RECENT ACTIVITY IN {{ warehouse.name | upper }}
+{% for ev in recent_events %}
+  {{ ev.occurred_at | shortdt }}  {{ ev.box_number }}  {{ ev.line }}
+{% endfor %}
+
+{% endif %}
+--
+Alert #{{ alert.id }} -- first triggered {{ alert.triggered_at | shortdt }}.
+You are receiving this because you are subscribed to alerts for {{ warehouse.name }}.
