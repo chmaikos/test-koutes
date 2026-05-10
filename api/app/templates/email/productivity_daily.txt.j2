@@ -1,0 +1,37 @@
+DAILY PRODUCTIVITY
+==================
+
+{{ warehouse.name }} -- {{ report_date }}
+{{ summary.entry_count }} entr{{ 'y' if summary.entry_count == 1 else 'ies' }} from {{ summary.active_employees }} active employee{{ '' if summary.active_employees == 1 else 's' }}.
+
+TOTALS
+  Pages:     {{ summary.total_pages }}
+  Hours:     {{ '%.2f' % summary.total_hours }}
+  Pages/hr:  {{ '%.2f' % summary.avg_pages_per_hour }}
+
+{% if summary.top %}
+TOP PERFORMERS
+{% for p in summary.top %}
+  {{ '%-30s' % p.employee_name }} {{ '%6d' % p.pages }} pages  {{ '%5.2f' % p.hours }}h  {{ '%6.2f' % p.pages_per_hour }} p/h
+{% endfor %}
+
+{% endif %}
+{% if summary.bottom %}
+BOTTOM PERFORMERS
+{% for p in summary.bottom %}
+  {{ '%-30s' % p.employee_name }} {{ '%6d' % p.pages }} pages  {{ '%5.2f' % p.hours }}h  {{ '%6.2f' % p.pages_per_hour }} p/h
+{% endfor %}
+
+{% endif %}
+{% if summary.entry_count == 0 %}
+No productivity entries were logged for this warehouse today.
+
+{% endif %}
+{% if cta_url %}
+Open productivity dashboard:
+  {{ cta_url }}
+
+{% endif %}
+--
+Daily productivity report for {{ warehouse.name }} on {{ report_date }}.
+You are receiving this because you are subscribed to alerts for this warehouse.

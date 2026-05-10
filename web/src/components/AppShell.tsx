@@ -34,6 +34,7 @@ interface NavItem {
 const NAV_ITEMS: NavItem[] = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard },
   { to: "/boxes", label: "Boxes", icon: BoxesIcon },
+  { to: "/productivity", label: "Productivity", icon: Activity },
   { to: "/alerts", label: "Alerts", icon: AlertTriangle, badgeKey: "alerts" },
   { to: "/exports", label: "Exports", icon: Download },
   { to: "/settings", label: "Settings", icon: SettingsIcon, adminOnly: true },
@@ -50,6 +51,7 @@ const NAV_ITEMS: NavItem[] = [
 function titleForPath(pathname: string): string {
   if (pathname === "/" || pathname === "") return "Dashboard";
   if (pathname.startsWith("/boxes")) return "Boxes";
+  if (pathname.startsWith("/productivity")) return "Productivity";
   if (pathname.startsWith("/alerts")) return "Alerts";
   if (pathname.startsWith("/exports")) return "Exports";
   if (pathname.startsWith("/settings")) return "Settings";

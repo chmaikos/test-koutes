@@ -1,0 +1,173 @@
+{# End-of-day productivity report -- one HTML email per warehouse.
+
+    Stands alone (does not extend the alert _base) because the alert
+    layout assumes an inventory bar and a single ``Alert`` row, neither
+    of which apply here. We keep the same visual conventions
+    (table-based layout, inline styles, severity strip) so a recipient
+    can tell the two emails belong to the same product.
+#}
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>{{ subject }}</title>
+  </head>
+  <body style="margin:0;padding:0;background:#f1f5f9;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#0f172a;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+           style="background:#f1f5f9;padding:24px 12px;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="600" cellpadding="0" cellspacing="0"
+                 style="max-width:600px;width:100%;background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 1px 3px rgba(15,23,42,0.08);">
+            <tr>
+              <td style="background:#0284c7;color:#ffffff;padding:14px 24px;font-weight:700;font-size:13px;letter-spacing:0.08em;text-transform:uppercase;">
+                Daily productivity
+              </td>
+            </tr>
+
+            <tr>
+              <td style="padding:24px 24px 0 24px;">
+                <h1 style="margin:0;font-size:20px;line-height:1.3;color:#0f172a;font-weight:600;">
+                  {{ warehouse.name }} &middot; {{ report_date }}
+                </h1>
+                <p style="margin:8px 0 0 0;font-size:14px;color:#475569;">
+                  {{ summary.entry_count }} entr{{ 'y' if summary.entry_count == 1 else 'ies' }} from
+                  {{ summary.active_employees }} active employee{{ '' if summary.active_employees == 1 else 's' }}.
+                </p>
+              </td>
+            </tr>
+
+            <tr>
+              <td style="padding:16px 24px 0 24px;">
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+                       style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;">
+                  <tr>
+                    <td style="padding:16px;">
+                      <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                        <tr>
+                          <td style="width:33%;vertical-align:top;">
+                            <div style="font-size:12px;text-transform:uppercase;letter-spacing:0.06em;color:#64748b;">
+                              Total pages
+                            </div>
+                            <div style="font-size:22px;font-weight:600;color:#0f172a;margin-top:4px;">
+                              {{ summary.total_pages }}
+                            </div>
+                          </td>
+                          <td style="width:33%;vertical-align:top;">
+                            <div style="font-size:12px;text-transform:uppercase;letter-spacing:0.06em;color:#64748b;">
+                              Total hours
+                            </div>
+                            <div style="font-size:22px;font-weight:600;color:#0f172a;margin-top:4px;">
+                              {{ '%.2f' % summary.total_hours }}
+                            </div>
+                          </td>
+                          <td style="width:33%;vertical-align:top;">
+                            <div style="font-size:12px;text-transform:uppercase;letter-spacing:0.06em;color:#64748b;">
+                              Pages / hour
+                            </div>
+                            <div style="font-size:22px;font-weight:600;color:#0f172a;margin-top:4px;">
+                              {{ '%.2f' % summary.avg_pages_per_hour }}
+                            </div>
+                          </td>
+                        </tr>
+                      </table>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+
+            {% if summary.top %}
+            <tr>
+              <td style="padding:20px 24px 0 24px;">
+                <div style="font-size:12px;text-transform:uppercase;letter-spacing:0.06em;color:#64748b;">
+                  Top performers
+                </div>
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+                       style="margin-top:8px;border-collapse:collapse;font-size:13px;">
+                  <thead>
+                    <tr>
+                      <th align="left" style="padding:6px 8px;color:#64748b;font-weight:600;border-bottom:1px solid #e2e8f0;">Employee</th>
+                      <th align="right" style="padding:6px 8px;color:#64748b;font-weight:600;border-bottom:1px solid #e2e8f0;">Pages</th>
+                      <th align="right" style="padding:6px 8px;color:#64748b;font-weight:600;border-bottom:1px solid #e2e8f0;">Hours</th>
+                      <th align="right" style="padding:6px 8px;color:#64748b;font-weight:600;border-bottom:1px solid #e2e8f0;">Pages / hr</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% for p in summary.top %}
+                    <tr>
+                      <td style="padding:6px 8px;border-bottom:1px solid #f1f5f9;color:#0f172a;">{{ p.employee_name }}</td>
+                      <td align="right" style="padding:6px 8px;border-bottom:1px solid #f1f5f9;color:#0f172a;">{{ p.pages }}</td>
+                      <td align="right" style="padding:6px 8px;border-bottom:1px solid #f1f5f9;color:#0f172a;">{{ '%.2f' % p.hours }}</td>
+                      <td align="right" style="padding:6px 8px;border-bottom:1px solid #f1f5f9;color:#0f172a;font-weight:600;">{{ '%.2f' % p.pages_per_hour }}</td>
+                    </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </td>
+            </tr>
+            {% endif %}
+
+            {% if summary.bottom %}
+            <tr>
+              <td style="padding:20px 24px 0 24px;">
+                <div style="font-size:12px;text-transform:uppercase;letter-spacing:0.06em;color:#64748b;">
+                  Bottom performers
+                </div>
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+                       style="margin-top:8px;border-collapse:collapse;font-size:13px;">
+                  <thead>
+                    <tr>
+                      <th align="left" style="padding:6px 8px;color:#64748b;font-weight:600;border-bottom:1px solid #e2e8f0;">Employee</th>
+                      <th align="right" style="padding:6px 8px;color:#64748b;font-weight:600;border-bottom:1px solid #e2e8f0;">Pages</th>
+                      <th align="right" style="padding:6px 8px;color:#64748b;font-weight:600;border-bottom:1px solid #e2e8f0;">Hours</th>
+                      <th align="right" style="padding:6px 8px;color:#64748b;font-weight:600;border-bottom:1px solid #e2e8f0;">Pages / hr</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% for p in summary.bottom %}
+                    <tr>
+                      <td style="padding:6px 8px;border-bottom:1px solid #f1f5f9;color:#0f172a;">{{ p.employee_name }}</td>
+                      <td align="right" style="padding:6px 8px;border-bottom:1px solid #f1f5f9;color:#0f172a;">{{ p.pages }}</td>
+                      <td align="right" style="padding:6px 8px;border-bottom:1px solid #f1f5f9;color:#0f172a;">{{ '%.2f' % p.hours }}</td>
+                      <td align="right" style="padding:6px 8px;border-bottom:1px solid #f1f5f9;color:#0f172a;font-weight:600;">{{ '%.2f' % p.pages_per_hour }}</td>
+                    </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </td>
+            </tr>
+            {% endif %}
+
+            {% if summary.entry_count == 0 %}
+            <tr>
+              <td style="padding:20px 24px 0 24px;font-size:14px;color:#475569;">
+                No productivity entries were logged for this warehouse today.
+              </td>
+            </tr>
+            {% endif %}
+
+            {% if cta_url %}
+            <tr>
+              <td style="padding:20px 24px 0 24px;">
+                <a href="{{ cta_url }}"
+                   style="display:inline-block;background:#0f172a;color:#ffffff;text-decoration:none;padding:10px 18px;border-radius:8px;font-weight:600;font-size:14px;">
+                  Open productivity dashboard
+                </a>
+              </td>
+            </tr>
+            {% endif %}
+
+            <tr>
+              <td style="padding:24px;color:#94a3b8;font-size:12px;line-height:1.5;">
+                Daily productivity report for {{ warehouse.name }} on {{ report_date }}.<br>
+                You are receiving this because you are subscribed to alerts for this warehouse.
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>

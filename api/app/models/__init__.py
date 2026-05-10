@@ -5,6 +5,11 @@ from app.models.alerts import (
     AlertType,
 )
 from app.models.boxes import Box, BoxEvent, BoxEventType, BoxStatus
+from app.models.employees import (
+    Employee,
+    ProductivityEntry,
+    ProductivityReportRun,
+)
 from app.models.users import User, UserRole
 from app.models.warehouses import Warehouse
 
@@ -17,6 +22,9 @@ __all__ = [
     "BoxEvent",
     "BoxEventType",
     "BoxStatus",
+    "Employee",
+    "ProductivityEntry",
+    "ProductivityReportRun",
     "User",
     "UserRole",
     "Warehouse",

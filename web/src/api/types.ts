@@ -140,6 +140,58 @@ export interface Page<T> {
   page_size: number;
 }
 
+export interface Performer {
+  employee_id: number;
+  employee_name: string;
+  pages: number;
+  hours: number;
+  pages_per_hour: number;
+}
+
+export interface WarehouseProductivity {
+  warehouse_id: number;
+  total_pages: number;
+  total_hours: number;
+  avg_pages_per_hour: number;
+  entry_count: number;
+  active_employees: number;
+  top: Performer[];
+  bottom: Performer[];
+}
+
+export interface ProductivitySummary {
+  period_start: string;
+  period_end: string;
+  warehouses: WarehouseProductivity[];
+  total_pages: number;
+  total_hours: number;
+  avg_pages_per_hour: number;
+}
+
+export interface Employee {
+  id: number;
+  warehouse_id: number;
+  full_name: string;
+  email: string | null;
+  default_hours_per_day: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProductivityEntry {
+  id: number;
+  employee_id: number;
+  warehouse_id: number;
+  entry_date: string;
+  pages: number;
+  hours_worked: string;
+  note: string | null;
+  created_by_user_id: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface WarehouseSummary {
   warehouse_id: number;
   name: string;
@@ -150,6 +202,8 @@ export interface WarehouseSummary {
   returned_today: number;
   counts_by_status: Record<BoxStatus, number>;
   open_alerts: number;
+  productivity_today: WarehouseProductivity | null;
+  productivity_week: WarehouseProductivity | null;
 }
 
 export interface DashboardSummary {

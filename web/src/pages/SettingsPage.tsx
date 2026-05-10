@@ -1,14 +1,18 @@
-import { useState } from "react";
-import { Mail, Plus } from "lucide-react";
+import { useMemo, useState } from "react";
+import { Mail, Plus, Trash2, Undo2 } from "lucide-react";
 import {
   useAlertRecipients,
+  useCreateEmployee,
   useCreateWarehouse,
+  useDeleteEmployee,
+  useEmployees,
+  useUpdateEmployee,
   useUpdateUser,
   useUpdateWarehouse,
   useUsers,
   useWarehouses,
 } from "@/api/hooks";
-import type { Role, User, Warehouse } from "@/api/types";
+import type { Employee, Role, User, Warehouse } from "@/api/types";
 
 export function SettingsPage() {
   return (
@@ -16,13 +20,367 @@ export function SettingsPage() {
       <header>
         <h1 className="text-2xl font-semibold tracking-tight">Settings</h1>
         <p className="text-sm text-slate-500">
-          Admin-only: warehouse thresholds and user access.
+          Admin-only: warehouse thresholds, user access, and employees.
         </p>
       </header>
 
       <WarehousesSection />
+      <EmployeesSection />
       <UsersSection />
       <RecipientsPreview />
+    </div>
+  );
+}
+
+function EmployeesSection() {
+  const { data: warehouses } = useWarehouses();
+  const [warehouseId, setWarehouseId] = useState<number | "">("");
+  const [includeInactive, setIncludeInactive] = useState(false);
+  const [showAdd, setShowAdd] = useState(false);
+  const create = useCreateEmployee();
+  const employees = useEmployees(
+    typeof warehouseId === "number" ? warehouseId : undefined,
+    includeInactive,
+  );
+  const sortedWarehouses = useMemo(
+    () => warehouses ?? [],
+    [warehouses],
+  );
+
+  return (
+    <section className="card overflow-hidden">
+      <header className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-5 py-3">
+        <div>
+          <h2 className="font-semibold">Employees</h2>
+          <p className="text-xs text-slate-500">
+            Roster used by the productivity tracker. Set their working hours
+            here so the daily entry form is pre-filled.
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <select
+            className="input max-w-[180px]"
+            value={warehouseId}
+            onChange={(e) =>
+              setWarehouseId(e.target.value === "" ? "" : Number(e.target.value))
+            }
+          >
+            <option value="">All warehouses</option>
+            {sortedWarehouses.map((w) => (
+              <option key={w.id} value={w.id}>
+                {w.name}
+              </option>
+            ))}
+          </select>
+          <label className="inline-flex items-center gap-1.5 text-xs text-slate-600">
+            <input
+              type="checkbox"
+              checked={includeInactive}
+              onChange={(e) => setIncludeInactive(e.target.checked)}
+            />
+            Include inactive
+          </label>
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={() => setShowAdd((v) => !v)}
+          >
+            <Plus className="h-4 w-4" />
+            {showAdd ? "Cancel" : "Add employee"}
+          </button>
+        </div>
+      </header>
+      {showAdd && (
+        <NewEmployeeForm
+          warehouses={sortedWarehouses}
+          defaultWarehouseId={
+            typeof warehouseId === "number"
+              ? warehouseId
+              : (sortedWarehouses[0]?.id ?? null)
+          }
+          onCreate={async (input) => {
+            await create.mutateAsync(input);
+            setShowAdd(false);
+          }}
+          onCancel={() => setShowAdd(false)}
+        />
+      )}
+      {employees.isLoading ? (
+        <p className="px-5 py-4 text-sm text-slate-500">Loading...</p>
+      ) : (employees.data ?? []).length === 0 ? (
+        <p className="px-5 py-4 text-sm text-slate-500">
+          No employees yet. Add one above.
+        </p>
+      ) : (
+        <div className="divide-y divide-slate-100">
+          {(employees.data ?? []).map((e) => (
+            <EmployeeRow
+              key={e.id}
+              employee={e}
+              warehouses={sortedWarehouses}
+            />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function NewEmployeeForm({
+  warehouses,
+  defaultWarehouseId,
+  onCreate,
+  onCancel,
+}: {
+  warehouses: Warehouse[];
+  defaultWarehouseId: number | null;
+  onCreate: (input: {
+    warehouse_id: number;
+    full_name: string;
+    email?: string;
+    default_hours_per_day?: number;
+  }) => Promise<unknown>;
+  onCancel: () => void;
+}) {
+  const [warehouseId, setWarehouseId] = useState<number | null>(
+    defaultWarehouseId,
+  );
+  const [fullName, setFullName] = useState("");
+  const [email, setEmail] = useState("");
+  const [hours, setHours] = useState<number>(8);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  return (
+    <div className="grid gap-3 border-b border-slate-100 bg-slate-50/60 px-5 py-4 sm:grid-cols-[1fr_2fr_2fr_1fr_auto] sm:items-end">
+      <label className="block">
+        <span className="text-xs text-slate-500">Warehouse</span>
+        <select
+          className="input"
+          value={warehouseId ?? ""}
+          onChange={(e) =>
+            setWarehouseId(e.target.value === "" ? null : Number(e.target.value))
+          }
+        >
+          {warehouses.map((w) => (
+            <option key={w.id} value={w.id}>
+              {w.name}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="block">
+        <span className="text-xs text-slate-500">Full name</span>
+        <input
+          className="input"
+          autoFocus
+          value={fullName}
+          placeholder="Jane Doe"
+          onChange={(e) => setFullName(e.target.value)}
+        />
+      </label>
+      <label className="block">
+        <span className="text-xs text-slate-500">Email (optional)</span>
+        <input
+          className="input"
+          type="email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+        />
+      </label>
+      <label className="block">
+        <span className="text-xs text-slate-500">Hours / day</span>
+        <input
+          type="number"
+          className="input"
+          min={0.25}
+          max={24}
+          step={0.25}
+          value={hours}
+          onChange={(e) => setHours(Number(e.target.value))}
+        />
+      </label>
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          className="btn-primary"
+          disabled={
+            pending || !fullName.trim() || !warehouseId || hours <= 0
+          }
+          onClick={async () => {
+            if (!warehouseId) return;
+            setPending(true);
+            setError(null);
+            try {
+              await onCreate({
+                warehouse_id: warehouseId,
+                full_name: fullName.trim(),
+                email: email.trim() || undefined,
+                default_hours_per_day: hours,
+              });
+              setFullName("");
+              setEmail("");
+            } catch (err: unknown) {
+              const detail =
+                (err as { response?: { data?: { detail?: string } } })?.response
+                  ?.data?.detail ?? "Failed to create employee";
+              setError(typeof detail === "string" ? detail : "Failed to create employee");
+            } finally {
+              setPending(false);
+            }
+          }}
+        >
+          {pending ? "Creating..." : "Create"}
+        </button>
+        <button
+          type="button"
+          className="btn-secondary"
+          disabled={pending}
+          onClick={onCancel}
+        >
+          Cancel
+        </button>
+      </div>
+      {error && <p className="text-xs text-rose-600 sm:col-span-5">{error}</p>}
+    </div>
+  );
+}
+
+function EmployeeRow({
+  employee,
+  warehouses,
+}: {
+  employee: Employee;
+  warehouses: Warehouse[];
+}) {
+  const update = useUpdateEmployee();
+  const remove = useDeleteEmployee();
+  const [fullName, setFullName] = useState(employee.full_name);
+  const [email, setEmail] = useState(employee.email ?? "");
+  const [hours, setHours] = useState<number>(
+    Number(employee.default_hours_per_day) || 8,
+  );
+  const [warehouseId, setWarehouseId] = useState<number>(employee.warehouse_id);
+  const [error, setError] = useState<string | null>(null);
+
+  const dirty =
+    fullName !== employee.full_name ||
+    email !== (employee.email ?? "") ||
+    Math.abs(hours - Number(employee.default_hours_per_day)) > 0.001 ||
+    warehouseId !== employee.warehouse_id;
+
+  return (
+    <div className="grid gap-3 px-5 py-3 sm:grid-cols-[1fr_2fr_2fr_1fr_auto] sm:items-end">
+      <label className="block">
+        <span className="text-xs text-slate-500">Warehouse</span>
+        <select
+          className="input"
+          value={warehouseId}
+          onChange={(e) => setWarehouseId(Number(e.target.value))}
+        >
+          {warehouses.map((w) => (
+            <option key={w.id} value={w.id}>
+              {w.name}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="block">
+        <span className="text-xs text-slate-500">
+          Full name {!employee.is_active && (
+            <span className="ml-1 rounded-full bg-slate-200 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-slate-700">
+              Inactive
+            </span>
+          )}
+        </span>
+        <input
+          className="input"
+          value={fullName}
+          onChange={(e) => setFullName(e.target.value)}
+        />
+      </label>
+      <label className="block">
+        <span className="text-xs text-slate-500">Email</span>
+        <input
+          className="input"
+          type="email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+        />
+      </label>
+      <label className="block">
+        <span className="text-xs text-slate-500">Hours / day</span>
+        <input
+          type="number"
+          className="input"
+          min={0.25}
+          max={24}
+          step={0.25}
+          value={hours}
+          onChange={(e) => setHours(Number(e.target.value))}
+        />
+      </label>
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          className="btn-primary"
+          disabled={!dirty || update.isPending}
+          onClick={async () => {
+            setError(null);
+            try {
+              await update.mutateAsync({
+                id: employee.id,
+                patch: {
+                  full_name: fullName,
+                  email: email || undefined,
+                  default_hours_per_day: hours,
+                  warehouse_id: warehouseId,
+                },
+              });
+            } catch (err: unknown) {
+              const detail =
+                (err as { response?: { data?: { detail?: string } } })?.response
+                  ?.data?.detail ?? "Failed to save";
+              setError(typeof detail === "string" ? detail : "Failed to save");
+            }
+          }}
+        >
+          {update.isPending ? "Saving..." : "Save"}
+        </button>
+        {employee.is_active ? (
+          <button
+            type="button"
+            className="btn-ghost text-rose-600 hover:bg-rose-50"
+            title="Deactivate employee"
+            onClick={() => {
+              if (
+                window.confirm(
+                  `Deactivate ${employee.full_name}? Historical productivity entries are kept.`,
+                )
+              ) {
+                void remove.mutateAsync(employee.id);
+              }
+            }}
+          >
+            <Trash2 className="h-4 w-4" />
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="btn-ghost text-emerald-700 hover:bg-emerald-50"
+            title="Reactivate employee"
+            onClick={() =>
+              void update.mutateAsync({
+                id: employee.id,
+                patch: { is_active: true },
+              })
+            }
+          >
+            <Undo2 className="h-4 w-4" />
+          </button>
+        )}
+      </div>
+      {error && <p className="text-xs text-rose-600 sm:col-span-5">{error}</p>}
     </div>
   );
 }

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pydantic import BaseModel
 
 from app.models.boxes import BoxStatus
+from app.schemas.employees import WarehouseProductivityOut
 
 
 class WarehouseSummary(BaseModel):
@@ -15,6 +16,8 @@ class WarehouseSummary(BaseModel):
     returned_today: int
     counts_by_status: dict[BoxStatus, int]
     open_alerts: int
+    productivity_today: WarehouseProductivityOut | None = None
+    productivity_week: WarehouseProductivityOut | None = None
 
 
 class DashboardSummary(BaseModel):

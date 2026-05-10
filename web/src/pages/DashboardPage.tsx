@@ -1,5 +1,11 @@
 import { Link } from "react-router-dom";
-import { AlertTriangle, Boxes as BoxesIcon, TrendingDown, TrendingUp } from "lucide-react";
+import {
+  Activity,
+  AlertTriangle,
+  Boxes as BoxesIcon,
+  TrendingDown,
+  TrendingUp,
+} from "lucide-react";
 import { useDashboard } from "@/api/hooks";
 import type { WarehouseSummary } from "@/api/types";
 
@@ -101,6 +107,8 @@ function WarehouseCard({ summary }: { summary: WarehouseSummary }) {
         />
       </dl>
 
+      <ProductivitySection summary={summary} />
+
       {summary.open_alerts > 0 && (
         <div className="mt-4 inline-flex items-center gap-2 rounded-md bg-amber-50 px-2 py-1 text-xs text-amber-700">
           <AlertTriangle className="h-3.5 w-3.5" /> {summary.open_alerts} open alert
@@ -108,6 +116,68 @@ function WarehouseCard({ summary }: { summary: WarehouseSummary }) {
         </div>
       )}
     </Link>
+  );
+}
+
+/**
+ * Productivity slice of the warehouse card.
+ *
+ * Sits below the box stats (productivity is additive context, not a
+ * replacement) and degrades to a "no entries today" hint rather than
+ * disappearing -- absence is information for an operator who expected
+ * a shift to have logged numbers by now.
+ */
+function ProductivitySection({ summary }: { summary: WarehouseSummary }) {
+  const today = summary.productivity_today;
+  const week = summary.productivity_week;
+  if (!today && !week) {
+    return null;
+  }
+  const todayPages = today?.total_pages ?? 0;
+  const todayPph = today?.avg_pages_per_hour ?? 0;
+  const weekPages = week?.total_pages ?? 0;
+  const weekPph = week?.avg_pages_per_hour ?? 0;
+  const topToday = today?.top?.[0];
+
+  return (
+    <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50/60 p-3">
+      <div className="mb-2 flex items-center justify-between text-xs">
+        <span className="inline-flex items-center gap-1 font-medium text-slate-600">
+          <Activity className="h-3.5 w-3.5 text-brand-600" /> Productivity
+        </span>
+        <Link
+          to={`/productivity`}
+          className="text-brand-700 hover:underline"
+          onClick={(e) => e.stopPropagation()}
+        >
+          View
+        </Link>
+      </div>
+      <dl className="grid grid-cols-2 gap-2 text-sm">
+        <div>
+          <dt className="text-xs text-slate-500">Today</dt>
+          <dd className="mt-0.5 font-medium tabular-nums">
+            {todayPages} pages · {todayPph.toFixed(2)} p/h
+          </dd>
+        </div>
+        <div>
+          <dt className="text-xs text-slate-500">This week</dt>
+          <dd className="mt-0.5 font-medium tabular-nums">
+            {weekPages} pages · {weekPph.toFixed(2)} p/h
+          </dd>
+        </div>
+      </dl>
+      {topToday ? (
+        <div className="mt-2 text-xs text-slate-600">
+          Top today: <span className="font-medium">{topToday.employee_name}</span>{" "}
+          ({topToday.pages_per_hour.toFixed(2)} p/h)
+        </div>
+      ) : (
+        <div className="mt-2 text-xs text-slate-400">
+          No entries logged today.
+        </div>
+      )}
+    </div>
   );
 }
 

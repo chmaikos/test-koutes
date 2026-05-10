@@ -53,6 +53,25 @@ class Settings(BaseSettings):
         default=30, alias="BOX_STUCK_THRESHOLD_DAYS"
     )
 
+    # Local-time configuration used by the productivity feature.
+    # ``app_timezone`` defines the wall-clock day boundary for "daily"
+    # productivity numbers; an unknown zone silently falls back to UTC
+    # (see app.routers.productivity._today_in_app_tz).
+    app_timezone: str = Field(default="UTC", alias="APP_TIMEZONE")
+    # Hour of day (0-23, in ``app_timezone``) at which the end-of-day
+    # productivity report job runs. Set to 18:00 by default so a
+    # standard 9-5 day is fully captured.
+    productivity_report_hour: int = Field(
+        default=18, alias="PRODUCTIVITY_REPORT_HOUR"
+    )
+    # When False (default), warehouses with zero productivity entries
+    # for the day are skipped so recipients don't get a fleet of empty
+    # "0 pages today" emails. Set to True to always send a per-warehouse
+    # report regardless of whether anything was logged.
+    productivity_report_include_empty: bool = Field(
+        default=False, alias="PRODUCTIVITY_REPORT_INCLUDE_EMPTY"
+    )
+
     # Local (break-glass) auth.
     local_jwt_secret: str = Field(default="", alias="LOCAL_JWT_SECRET")
     local_jwt_ttl_minutes: int = Field(default=480, alias="LOCAL_JWT_TTL_MINUTES")

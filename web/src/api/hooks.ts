@@ -12,8 +12,11 @@ import type {
   BulkDeleteResult,
   BulkResult,
   DashboardSummary,
+  Employee,
   ImportResult,
   Page,
+  ProductivityEntry,
+  ProductivitySummary,
   User,
   Warehouse,
 } from "@/api/types";
@@ -30,7 +33,23 @@ export const queryKeys = {
   boxEvents: (id: number) => ["box-events", id] as const,
   boxes: (filters: BoxFilters, page: number, pageSize: number) =>
     ["boxes", filters, page, pageSize] as const,
+  employees: (warehouseId?: number, includeInactive?: boolean) =>
+    ["employees", warehouseId ?? null, !!includeInactive] as const,
+  productivityEntries: (filters: ProductivityEntryFilters) =>
+    ["productivity-entries", filters] as const,
+  productivityDaily: (warehouseId?: number, date?: string) =>
+    ["productivity-daily", warehouseId ?? null, date ?? null] as const,
+  productivityWeekly: (warehouseId?: number, weekStart?: string) =>
+    ["productivity-weekly", warehouseId ?? null, weekStart ?? null] as const,
 };
+
+export interface ProductivityEntryFilters {
+  warehouse_id?: number;
+  employee_id?: number;
+  from_date?: string;
+  to_date?: string;
+  [key: string]: unknown;
+}
 
 export function useMe() {
   return useQuery({
@@ -305,5 +324,161 @@ export function useImportBoxes() {
       qc.invalidateQueries({ queryKey: queryKeys.dashboard });
       qc.invalidateQueries({ queryKey: ["alerts"] });
     },
+  });
+}
+
+// --- employees + productivity ---------------------------------------------
+
+function invalidateProductivity(qc: ReturnType<typeof useQueryClient>) {
+  // Mutations on entries or roster touch every productivity-shaped view:
+  // entry tables, daily/weekly summaries, and the dashboard cards. We
+  // invalidate broadly rather than surgically because the shared key
+  // prefix keeps the request count small in practice.
+  qc.invalidateQueries({ queryKey: ["productivity-entries"] });
+  qc.invalidateQueries({ queryKey: ["productivity-daily"] });
+  qc.invalidateQueries({ queryKey: ["productivity-weekly"] });
+  qc.invalidateQueries({ queryKey: queryKeys.dashboard });
+}
+
+export function useEmployees(
+  warehouseId?: number,
+  includeInactive: boolean = false,
+) {
+  return useQuery({
+    queryKey: queryKeys.employees(warehouseId, includeInactive),
+    queryFn: async () => {
+      const qs = buildQueryString({
+        warehouse_id: warehouseId,
+        include_inactive: includeInactive,
+      });
+      return (await api.get<Employee[]>(`/employees${qs}`)).data;
+    },
+  });
+}
+
+export function useCreateEmployee() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: {
+      warehouse_id: number;
+      full_name: string;
+      email?: string;
+      default_hours_per_day?: number;
+    }) => (await api.post<Employee>("/employees", input)).data,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["employees"] });
+      invalidateProductivity(qc);
+    },
+  });
+}
+
+export function useUpdateEmployee() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: {
+      id: number;
+      patch: {
+        full_name?: string;
+        email?: string;
+        default_hours_per_day?: number;
+        is_active?: boolean;
+        warehouse_id?: number;
+      };
+    }) =>
+      (await api.patch<Employee>(`/employees/${input.id}`, input.patch)).data,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["employees"] });
+      invalidateProductivity(qc);
+    },
+  });
+}
+
+export function useDeleteEmployee() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (id: number) => {
+      await api.delete(`/employees/${id}`);
+      return id;
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["employees"] });
+      invalidateProductivity(qc);
+    },
+  });
+}
+
+export function useProductivityEntries(filters: ProductivityEntryFilters) {
+  return useQuery({
+    queryKey: queryKeys.productivityEntries(filters),
+    queryFn: async () =>
+      (
+        await api.get<ProductivityEntry[]>(
+          `/productivity/entries${buildQueryString(filters)}`,
+        )
+      ).data,
+  });
+}
+
+export function useUpsertProductivityEntry() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: {
+      employee_id: number;
+      entry_date: string;
+      pages: number;
+      hours_worked: number;
+      note?: string;
+    }) =>
+      (await api.post<ProductivityEntry>("/productivity/entries", input)).data,
+    onSuccess: () => invalidateProductivity(qc),
+  });
+}
+
+export function useDeleteProductivityEntry() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (id: number) => {
+      await api.delete(`/productivity/entries/${id}`);
+      return id;
+    },
+    onSuccess: () => invalidateProductivity(qc),
+  });
+}
+
+export function useProductivityDailySummary(
+  warehouseId?: number,
+  date?: string,
+) {
+  return useQuery({
+    queryKey: queryKeys.productivityDaily(warehouseId, date),
+    queryFn: async () =>
+      (
+        await api.get<ProductivitySummary>(
+          `/productivity/summary${buildQueryString({
+            warehouse_id: warehouseId,
+            date,
+          })}`,
+        )
+      ).data,
+    refetchInterval: 60_000,
+  });
+}
+
+export function useProductivityWeeklySummary(
+  warehouseId?: number,
+  weekStart?: string,
+) {
+  return useQuery({
+    queryKey: queryKeys.productivityWeekly(warehouseId, weekStart),
+    queryFn: async () =>
+      (
+        await api.get<ProductivitySummary>(
+          `/productivity/summary/weekly${buildQueryString({
+            warehouse_id: warehouseId,
+            week_start: weekStart,
+          })}`,
+        )
+      ).data,
+    refetchInterval: 60_000,
   });
 }

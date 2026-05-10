@@ -1,18 +1,75 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter
 from sqlalchemy import func, select
 
+from app.config import get_settings
 from app.deps import CurrentUser, DbSession
 from app.models.alerts import Alert
 from app.models.boxes import ACTIVE_STATUSES, Box, BoxEvent, BoxEventType, BoxStatus
 from app.models.warehouses import Warehouse
 from app.schemas.dashboard import DashboardSummary, WarehouseSummary
+from app.schemas.employees import PerformerOut, WarehouseProductivityOut
 from app.services.acl import apply_warehouse_filter
+from app.services.productivity import (
+    WarehouseProductivity,
+    daily_summary,
+    weekly_summary,
+)
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
+
+
+def _today_in_app_tz() -> date:
+    """Today's date in the configured ``APP_TIMEZONE`` (default UTC).
+
+    Mirrors the helper in :mod:`app.routers.productivity`. We duplicate
+    the tiny implementation here rather than importing it because the
+    productivity router depends on this one transitively (via its
+    response schemas) and a top-level import would risk a cycle.
+    """
+    tz_name = get_settings().app_timezone or "UTC"
+    try:
+        tz = ZoneInfo(tz_name)
+    except ZoneInfoNotFoundError:
+        tz = UTC
+    return datetime.now(tz).date()
+
+
+def _to_productivity_out(
+    summary: WarehouseProductivity,
+) -> WarehouseProductivityOut:
+    return WarehouseProductivityOut(
+        warehouse_id=summary.warehouse_id,
+        total_pages=summary.total_pages,
+        total_hours=summary.total_hours,
+        avg_pages_per_hour=summary.avg_pages_per_hour,
+        entry_count=summary.entry_count,
+        active_employees=summary.active_employees,
+        top=[
+            PerformerOut(
+                employee_id=p.employee_id,
+                employee_name=p.employee_name,
+                pages=p.pages,
+                hours=p.hours,
+                pages_per_hour=p.pages_per_hour,
+            )
+            for p in summary.top
+        ],
+        bottom=[
+            PerformerOut(
+                employee_id=p.employee_id,
+                employee_name=p.employee_name,
+                pages=p.pages,
+                hours=p.hours,
+                pages_per_hour=p.pages_per_hour,
+            )
+            for p in summary.bottom
+        ],
+    )
 
 
 @router.get("/summary", response_model=DashboardSummary)
@@ -79,6 +136,13 @@ def summary(db: DbSession, user: CurrentUser) -> DashboardSummary:
     ).all()
     open_alerts = {wid: int(c) for wid, c in open_alert_rows}
 
+    # Productivity numbers come from the same helpers the standalone
+    # /productivity endpoints use, so the dashboard cards always agree
+    # with the dedicated page.
+    today_local = _today_in_app_tz()
+    productivity_today = daily_summary(db, user=user, on_date=today_local)
+    productivity_week = weekly_summary(db, user=user, week_start=today_local)
+
     summaries: list[WarehouseSummary] = []
     total_active = 0
     total_open_alerts = 0
@@ -89,6 +153,8 @@ def summary(db: DbSession, user: CurrentUser) -> DashboardSummary:
         total_active += inventory
         opens = open_alerts.get(wh.id, 0)
         total_open_alerts += opens
+        prod_today = productivity_today.get(wh.id)
+        prod_week = productivity_week.get(wh.id)
         summaries.append(
             WarehouseSummary(
                 warehouse_id=wh.id,
@@ -100,6 +166,12 @@ def summary(db: DbSession, user: CurrentUser) -> DashboardSummary:
                 returned_today=returned_today.get(wh.id, 0),
                 counts_by_status=full,
                 open_alerts=opens,
+                productivity_today=(
+                    _to_productivity_out(prod_today) if prod_today else None
+                ),
+                productivity_week=(
+                    _to_productivity_out(prod_week) if prod_week else None
+                ),
             )
         )
 
