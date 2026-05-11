@@ -1,0 +1,227 @@
+import { useMemo, useState } from "react";
+import clsx from "clsx";
+import { Link, Navigate, useParams, useSearchParams } from "react-router-dom";
+import { Activity, ArrowLeft, Plus } from "lucide-react";
+import { useHasRole } from "@/components/RoleGate";
+import {
+  useEmployees,
+  useProductivityDailySummary,
+  useProductivityWeeklySummary,
+  useWarehouses,
+} from "@/api/hooks";
+import type { WarehouseProductivity } from "@/api/types";
+import { EntriesList } from "@/components/productivity/EntriesList";
+import { NewEntryForm } from "@/components/productivity/NewEntryForm";
+import { PerformersTable } from "@/components/productivity/PerformersTable";
+import {
+  isoWeekEnd,
+  isoWeekStart,
+  todayStr,
+} from "@/components/productivity/dates";
+
+type Tab = "today" | "week";
+
+export function WarehouseProductivityDetailPage() {
+  const { warehouseId: warehouseIdParam } = useParams();
+  const warehouseId = Number(warehouseIdParam);
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  const initialDate = searchParams.get("date") || todayStr();
+  const initialTab = (searchParams.get("tab") as Tab | null) ?? "today";
+
+  const [date, setDate] = useState<string>(initialDate);
+  const [tab, setTab] = useState<Tab>(
+    initialTab === "week" ? "week" : "today",
+  );
+  const [showAdd, setShowAdd] = useState(false);
+
+  const canWrite = useHasRole(["admin", "operator"]);
+  const { data: warehouses } = useWarehouses();
+  const warehouse = useMemo(
+    () => warehouses?.find((w) => w.id === warehouseId),
+    [warehouses, warehouseId],
+  );
+
+  const dailyQuery = useProductivityDailySummary(warehouseId, date);
+  const weeklyQuery = useProductivityWeeklySummary(
+    warehouseId,
+    isoWeekStart(date),
+  );
+
+  const summary: WarehouseProductivity | undefined =
+    tab === "today"
+      ? dailyQuery.data?.warehouses.find((w) => w.warehouse_id === warehouseId)
+      : weeklyQuery.data?.warehouses.find((w) => w.warehouse_id === warehouseId);
+
+  const employees = useEmployees(warehouseId, false);
+
+  // Keep the query string in sync so refreshing the page or sharing the URL
+  // lands you on the same date + tab you were looking at.
+  const updateParams = (next: { date?: string; tab?: Tab }) => {
+    const merged = new URLSearchParams(searchParams);
+    if (next.date) merged.set("date", next.date);
+    if (next.tab) merged.set("tab", next.tab);
+    setSearchParams(merged, { replace: true });
+  };
+
+  if (Number.isNaN(warehouseId)) {
+    return <Navigate to="/productivity" replace />;
+  }
+
+  const fromDate = tab === "today" ? date : isoWeekStart(date);
+  const toDate = tab === "today" ? date : isoWeekEnd(date);
+
+  return (
+    <div className="space-y-6">
+      <header className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <Link
+            to="/productivity"
+            className="inline-flex items-center gap-1 text-xs font-medium text-slate-500 hover:text-slate-800"
+          >
+            <ArrowLeft className="h-3.5 w-3.5" />
+            All warehouses
+          </Link>
+          <h1 className="mt-1 text-2xl font-semibold tracking-tight">
+            {warehouse?.name ?? `Warehouse #${warehouseId}`}
+          </h1>
+          <p className="text-sm text-slate-500">
+            Productivity entries and leaderboards for this warehouse.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <input
+            type="date"
+            className="input max-w-[180px]"
+            value={date}
+            onChange={(e) => {
+              const next = e.target.value || todayStr();
+              setDate(next);
+              updateParams({ date: next });
+            }}
+            aria-label="Reporting date"
+          />
+        </div>
+      </header>
+
+      <div className="flex items-center gap-1 rounded-lg bg-slate-100 p-1 text-sm font-medium">
+        <TabButton
+          active={tab === "today"}
+          onClick={() => {
+            setTab("today");
+            updateParams({ tab: "today" });
+          }}
+        >
+          Today
+        </TabButton>
+        <TabButton
+          active={tab === "week"}
+          onClick={() => {
+            setTab("week");
+            updateParams({ tab: "week" });
+          }}
+        >
+          This week
+        </TabButton>
+      </div>
+
+      <section className="card overflow-hidden">
+        <header className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-5 py-3">
+          <div className="flex items-center gap-2">
+            <Activity className="h-4 w-4 text-brand-600" />
+            <div>
+              <h2 className="font-semibold">Summary</h2>
+              <p className="text-xs text-slate-500">
+                {summary
+                  ? `${summary.entry_count} entr${
+                      summary.entry_count === 1 ? "y" : "ies"
+                    } from ${summary.active_employees} active employee${
+                      summary.active_employees === 1 ? "" : "s"
+                    }`
+                  : "No entries"}
+              </p>
+            </div>
+          </div>
+          {canWrite && tab === "today" && (
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={() => setShowAdd((v) => !v)}
+            >
+              <Plus className="h-4 w-4" />
+              {showAdd ? "Cancel" : "Add entry"}
+            </button>
+          )}
+        </header>
+
+        <div className="grid grid-cols-3 gap-3 px-5 py-4 text-sm">
+          <Metric label="Pages" value={(summary?.total_pages ?? 0).toString()} />
+          <Metric label="Hours" value={(summary?.total_hours ?? 0).toFixed(2)} />
+          <Metric
+            label="Pages / day"
+            value={(summary?.avg_pages_per_day ?? 0).toFixed(2)}
+          />
+        </div>
+
+        {showAdd && tab === "today" && employees.data && (
+          <NewEntryForm
+            employees={employees.data.items}
+            date={date}
+            onClose={() => setShowAdd(false)}
+          />
+        )}
+
+        <PerformersTable
+          title="Top performers"
+          performers={summary?.top ?? []}
+          emptyHint="No data yet."
+        />
+        <PerformersTable
+          title="Bottom performers"
+          performers={summary?.bottom ?? []}
+          emptyHint=""
+        />
+
+        <EntriesList
+          warehouseId={warehouseId}
+          fromDate={fromDate}
+          toDate={toDate}
+          canWrite={canWrite}
+          title={tab === "today" ? "Entries today" : "Entries this week"}
+        />
+      </section>
+    </div>
+  );
+}
+
+function TabButton({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={clsx(
+        "flex-1 rounded-md px-3 py-1.5 transition sm:flex-none",
+        active ? "bg-white text-slate-900 shadow-sm" : "text-slate-600 hover:text-slate-900",
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
+function Metric({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <dt className="text-xs text-slate-500">{label}</dt>
+      <dd className="mt-0.5 text-xl font-semibold text-slate-900">{value}</dd>
+    </div>
+  );
+}

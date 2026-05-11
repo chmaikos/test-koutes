@@ -1,4 +1,4 @@
-"""Employee CRUD, soft-delete, role gating, and ACL scoping."""
+"""Employee CRUD, soft-delete, role gating, ACL scoping, and pagination."""
 from __future__ import annotations
 
 from datetime import date
@@ -29,7 +29,6 @@ def test_admin_can_create_employee(client):
         json={
             "warehouse_id": 1,
             "full_name": "Jane Doe",
-            "email": "jane@example.com",
             "default_hours_per_day": 7.5,
         },
     )
@@ -38,7 +37,21 @@ def test_admin_can_create_employee(client):
     assert body["full_name"] == "Jane Doe"
     assert body["warehouse_id"] == 1
     assert body["is_active"] is True
+    assert body["excluded_from_metrics"] is False
     assert Decimal(body["default_hours_per_day"]) == Decimal("7.5")
+
+
+def test_admin_can_create_employee_excluded_from_metrics(client):
+    resp = client.post(
+        "/api/employees",
+        json={
+            "warehouse_id": 1,
+            "full_name": "Trainer",
+            "excluded_from_metrics": True,
+        },
+    )
+    assert resp.status_code == 201
+    assert resp.json()["excluded_from_metrics"] is True
 
 
 def test_create_employee_unknown_warehouse_400(client):
@@ -78,10 +91,11 @@ def test_operator_can_list_employees_in_their_warehouses(
     session.refresh(op)
     _impersonate(op)
 
-    rows = client.get("/api/employees").json()
-    names = {r["full_name"] for r in rows}
+    body = client.get("/api/employees").json()
+    names = {r["full_name"] for r in body["items"]}
     # Carol lives in warehouse 2 which the operator can't see.
     assert names == {"Alice", "Bob"}
+    assert body["total"] == 2
 
 
 def test_list_filters_by_warehouse_and_inactive(client, session):
@@ -100,16 +114,47 @@ def test_list_filters_by_warehouse_and_inactive(client, session):
     session.commit()
 
     # Default: active only, all warehouses.
-    rows = client.get("/api/employees").json()
-    assert {r["full_name"] for r in rows} == {"Alice", "Carol"}
+    body = client.get("/api/employees").json()
+    assert {r["full_name"] for r in body["items"]} == {"Alice", "Carol"}
 
     # warehouse_id filter narrows to one.
-    rows = client.get("/api/employees?warehouse_id=1").json()
-    assert {r["full_name"] for r in rows} == {"Alice"}
+    body = client.get("/api/employees?warehouse_id=1").json()
+    assert {r["full_name"] for r in body["items"]} == {"Alice"}
 
     # include_inactive surfaces the soft-deleted Bob.
-    rows = client.get("/api/employees?warehouse_id=1&include_inactive=true").json()
-    assert {r["full_name"] for r in rows} == {"Alice", "Bob"}
+    body = client.get(
+        "/api/employees?warehouse_id=1&include_inactive=true"
+    ).json()
+    assert {r["full_name"] for r in body["items"]} == {"Alice", "Bob"}
+
+
+def test_list_pagination(client, session):
+    # Seed 60 employees in warehouse 1 with sortable names so we know
+    # exactly which slice lands on which page.
+    session.add_all(
+        [
+            Employee(
+                warehouse_id=1,
+                full_name=f"Picker {i:03d}",
+                default_hours_per_day=Decimal("8"),
+            )
+            for i in range(60)
+        ]
+    )
+    session.commit()
+
+    page1 = client.get("/api/employees?warehouse_id=1&page=1&page_size=25").json()
+    assert page1["total"] == 60
+    assert page1["page"] == 1
+    assert page1["page_size"] == 25
+    assert len(page1["items"]) == 25
+    assert page1["items"][0]["full_name"] == "Picker 000"
+
+    page3 = client.get("/api/employees?warehouse_id=1&page=3&page_size=25").json()
+    assert page3["total"] == 60
+    assert page3["page"] == 3
+    assert len(page3["items"]) == 10
+    assert page3["items"][0]["full_name"] == "Picker 050"
 
 
 def test_patch_employee_updates_fields(client, session):
@@ -132,6 +177,28 @@ def test_patch_employee_updates_fields(client, session):
     assert body["full_name"] == "Alice Updated"
     assert body["warehouse_id"] == 2
     assert Decimal(body["default_hours_per_day"]) == Decimal("6.0")
+
+
+def test_patch_employee_toggles_excluded_from_metrics(client, session):
+    emp = Employee(
+        warehouse_id=1, full_name="Alice", default_hours_per_day=Decimal("8")
+    )
+    session.add(emp)
+    session.commit()
+
+    on = client.patch(
+        f"/api/employees/{emp.id}",
+        json={"excluded_from_metrics": True},
+    )
+    assert on.status_code == 200
+    assert on.json()["excluded_from_metrics"] is True
+
+    off = client.patch(
+        f"/api/employees/{emp.id}",
+        json={"excluded_from_metrics": False},
+    )
+    assert off.status_code == 200
+    assert off.json()["excluded_from_metrics"] is False
 
 
 def test_delete_is_soft_and_preserves_entries(client, session):

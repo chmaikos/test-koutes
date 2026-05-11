@@ -1,5 +1,5 @@
-import { useMemo, useState } from "react";
-import { Mail, Plus, Trash2, Undo2 } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { ChevronLeft, ChevronRight, Mail, Plus, Trash2, Undo2 } from "lucide-react";
 import {
   useAlertRecipients,
   useCreateEmployee,
@@ -13,6 +13,8 @@ import {
   useWarehouses,
 } from "@/api/hooks";
 import type { Employee, Role, User, Warehouse } from "@/api/types";
+
+const EMPLOYEES_PAGE_SIZE = 25;
 
 export function SettingsPage() {
   return (
@@ -37,15 +39,28 @@ function EmployeesSection() {
   const [warehouseId, setWarehouseId] = useState<number | "">("");
   const [includeInactive, setIncludeInactive] = useState(false);
   const [showAdd, setShowAdd] = useState(false);
+  const [page, setPage] = useState(1);
   const create = useCreateEmployee();
   const employees = useEmployees(
     typeof warehouseId === "number" ? warehouseId : undefined,
     includeInactive,
+    { page, pageSize: EMPLOYEES_PAGE_SIZE },
   );
+  // Resetting the page whenever the filters change keeps the user from
+  // landing on a (now-empty) page after narrowing the roster down.
+  useEffect(() => {
+    setPage(1);
+  }, [warehouseId, includeInactive]);
+
   const sortedWarehouses = useMemo(
     () => warehouses ?? [],
     [warehouses],
   );
+
+  const items = employees.data?.items ?? [];
+  const total = employees.data?.total ?? 0;
+  const pageSize = employees.data?.page_size ?? EMPLOYEES_PAGE_SIZE;
+  const totalPages = total === 0 ? 1 : Math.ceil(total / pageSize);
 
   return (
     <section className="card overflow-hidden">
@@ -105,24 +120,75 @@ function EmployeesSection() {
           onCancel={() => setShowAdd(false)}
         />
       )}
-      {employees.isLoading ? (
+      {employees.isLoading && items.length === 0 ? (
         <p className="px-5 py-4 text-sm text-slate-500">Loading...</p>
-      ) : (employees.data ?? []).length === 0 ? (
+      ) : items.length === 0 ? (
         <p className="px-5 py-4 text-sm text-slate-500">
           No employees yet. Add one above.
         </p>
       ) : (
-        <div className="divide-y divide-slate-100">
-          {(employees.data ?? []).map((e) => (
-            <EmployeeRow
-              key={e.id}
-              employee={e}
-              warehouses={sortedWarehouses}
-            />
-          ))}
-        </div>
+        <>
+          <div className="divide-y divide-slate-100">
+            {items.map((e) => (
+              <EmployeeRow
+                key={e.id}
+                employee={e}
+                warehouses={sortedWarehouses}
+              />
+            ))}
+          </div>
+          <EmployeesPagination
+            page={page}
+            totalPages={totalPages}
+            total={total}
+            onChange={setPage}
+          />
+        </>
       )}
     </section>
+  );
+}
+
+function EmployeesPagination({
+  page,
+  totalPages,
+  total,
+  onChange,
+}: {
+  page: number;
+  totalPages: number;
+  total: number;
+  onChange: (page: number) => void;
+}) {
+  if (totalPages <= 1 && total <= 0) return null;
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 bg-slate-50/40 px-5 py-2.5 text-xs text-slate-500">
+      <span>
+        Page <span className="font-medium text-slate-700">{page}</span> of{" "}
+        <span className="font-medium text-slate-700">{totalPages}</span>
+        <span className="ml-2 text-slate-400">({total} total)</span>
+      </span>
+      <div className="flex items-center gap-1">
+        <button
+          type="button"
+          className="btn-ghost px-2 py-1 disabled:opacity-40"
+          onClick={() => onChange(Math.max(1, page - 1))}
+          disabled={page <= 1}
+          aria-label="Previous page"
+        >
+          <ChevronLeft className="h-4 w-4" />
+        </button>
+        <button
+          type="button"
+          className="btn-ghost px-2 py-1 disabled:opacity-40"
+          onClick={() => onChange(Math.min(totalPages, page + 1))}
+          disabled={page >= totalPages}
+          aria-label="Next page"
+        >
+          <ChevronRight className="h-4 w-4" />
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -137,8 +203,8 @@ function NewEmployeeForm({
   onCreate: (input: {
     warehouse_id: number;
     full_name: string;
-    email?: string;
     default_hours_per_day?: number;
+    excluded_from_metrics?: boolean;
   }) => Promise<unknown>;
   onCancel: () => void;
 }) {
@@ -146,13 +212,13 @@ function NewEmployeeForm({
     defaultWarehouseId,
   );
   const [fullName, setFullName] = useState("");
-  const [email, setEmail] = useState("");
   const [hours, setHours] = useState<number>(8);
+  const [excluded, setExcluded] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   return (
-    <div className="grid gap-3 border-b border-slate-100 bg-slate-50/60 px-5 py-4 sm:grid-cols-[1fr_2fr_2fr_1fr_auto] sm:items-end">
+    <div className="grid gap-3 border-b border-slate-100 bg-slate-50/60 px-5 py-4 sm:grid-cols-[1fr_2fr_1fr_auto] sm:items-end">
       <label className="block">
         <span className="text-xs text-slate-500">Warehouse</span>
         <select
@@ -177,15 +243,6 @@ function NewEmployeeForm({
           value={fullName}
           placeholder="Jane Doe"
           onChange={(e) => setFullName(e.target.value)}
-        />
-      </label>
-      <label className="block">
-        <span className="text-xs text-slate-500">Email (optional)</span>
-        <input
-          className="input"
-          type="email"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
         />
       </label>
       <label className="block">
@@ -215,11 +272,11 @@ function NewEmployeeForm({
               await onCreate({
                 warehouse_id: warehouseId,
                 full_name: fullName.trim(),
-                email: email.trim() || undefined,
                 default_hours_per_day: hours,
+                excluded_from_metrics: excluded,
               });
               setFullName("");
-              setEmail("");
+              setExcluded(false);
             } catch (err: unknown) {
               const detail =
                 (err as { response?: { data?: { detail?: string } } })?.response
@@ -241,7 +298,20 @@ function NewEmployeeForm({
           Cancel
         </button>
       </div>
-      {error && <p className="text-xs text-rose-600 sm:col-span-5">{error}</p>}
+      <label className="inline-flex items-center gap-2 text-xs text-slate-600 sm:col-span-4">
+        <input
+          type="checkbox"
+          checked={excluded}
+          onChange={(e) => setExcluded(e.target.checked)}
+        />
+        <span>
+          Exclude from metrics
+          <span className="ml-1 text-slate-400">
+            (admin override — pulls every entry out of the totals)
+          </span>
+        </span>
+      </label>
+      {error && <p className="text-xs text-rose-600 sm:col-span-4">{error}</p>}
     </div>
   );
 }
@@ -256,21 +326,21 @@ function EmployeeRow({
   const update = useUpdateEmployee();
   const remove = useDeleteEmployee();
   const [fullName, setFullName] = useState(employee.full_name);
-  const [email, setEmail] = useState(employee.email ?? "");
   const [hours, setHours] = useState<number>(
     Number(employee.default_hours_per_day) || 8,
   );
   const [warehouseId, setWarehouseId] = useState<number>(employee.warehouse_id);
+  const [excluded, setExcluded] = useState<boolean>(employee.excluded_from_metrics);
   const [error, setError] = useState<string | null>(null);
 
   const dirty =
     fullName !== employee.full_name ||
-    email !== (employee.email ?? "") ||
     Math.abs(hours - Number(employee.default_hours_per_day)) > 0.001 ||
-    warehouseId !== employee.warehouse_id;
+    warehouseId !== employee.warehouse_id ||
+    excluded !== employee.excluded_from_metrics;
 
   return (
-    <div className="grid gap-3 px-5 py-3 sm:grid-cols-[1fr_2fr_2fr_1fr_auto] sm:items-end">
+    <div className="grid gap-3 px-5 py-3 sm:grid-cols-[1fr_2fr_1fr_auto] sm:items-end">
       <label className="block">
         <span className="text-xs text-slate-500">Warehouse</span>
         <select
@@ -292,20 +362,16 @@ function EmployeeRow({
               Inactive
             </span>
           )}
+          {employee.excluded_from_metrics && (
+            <span className="ml-1 rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-amber-800">
+              Excluded
+            </span>
+          )}
         </span>
         <input
           className="input"
           value={fullName}
           onChange={(e) => setFullName(e.target.value)}
-        />
-      </label>
-      <label className="block">
-        <span className="text-xs text-slate-500">Email</span>
-        <input
-          className="input"
-          type="email"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
         />
       </label>
       <label className="block">
@@ -332,9 +398,9 @@ function EmployeeRow({
                 id: employee.id,
                 patch: {
                   full_name: fullName,
-                  email: email || undefined,
                   default_hours_per_day: hours,
                   warehouse_id: warehouseId,
+                  excluded_from_metrics: excluded,
                 },
               });
             } catch (err: unknown) {
@@ -380,7 +446,20 @@ function EmployeeRow({
           </button>
         )}
       </div>
-      {error && <p className="text-xs text-rose-600 sm:col-span-5">{error}</p>}
+      <label className="inline-flex items-center gap-2 text-xs text-slate-600 sm:col-span-4">
+        <input
+          type="checkbox"
+          checked={excluded}
+          onChange={(e) => setExcluded(e.target.checked)}
+        />
+        <span>
+          Exclude from metrics
+          <span className="ml-1 text-slate-400">
+            (admin override — pulls every entry out of the totals)
+          </span>
+        </span>
+      </label>
+      {error && <p className="text-xs text-rose-600 sm:col-span-4">{error}</p>}
     </div>
   );
 }

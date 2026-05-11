@@ -41,13 +41,18 @@ class Employee(Base):
         ForeignKey("warehouses.id", ondelete="CASCADE"), nullable=False
     )
     full_name: Mapped[str] = mapped_column(String(160), nullable=False)
-    email: Mapped[str | None] = mapped_column(String(320), nullable=True)
     # Admin-set "working hours" for this employee; pre-fills the daily entry
     # form. Stored as NUMERIC(4,2) to allow fractional shifts like 7.5.
     default_hours_per_day: Mapped[Decimal] = mapped_column(
         Numeric(4, 2), nullable=False, default=Decimal("8.00")
     )
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # Admin override: when true the productivity service ignores every
+    # entry belonging to this employee. Distinct from ``is_active`` --
+    # the employee stays on the roster, just out of the math.
+    excluded_from_metrics: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -94,6 +99,12 @@ class ProductivityEntry(Base):
     pages: Mapped[int] = mapped_column(Integer, nullable=False)
     hours_worked: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False)
     note: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # Per-entry opt-out for one-off cases (training runs, equipment
+    # outages, partial shifts) where the row should exist for audit
+    # purposes but not contribute to averages or leaderboards.
+    excluded_from_metrics: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
     created_by_user_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )

@@ -3,12 +3,17 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.deps import CurrentUser, DbSession, require_admin
 from app.models.employees import Employee
 from app.models.warehouses import Warehouse
-from app.schemas.employees import EmployeeCreate, EmployeeOut, EmployeeUpdate
+from app.schemas.employees import (
+    EmployeeCreate,
+    EmployeeOut,
+    EmployeePage,
+    EmployeeUpdate,
+)
 from app.services.acl import apply_warehouse_filter, can_access
 
 router = APIRouter(prefix="/employees", tags=["employees"])
@@ -24,29 +29,47 @@ def _ensure_warehouse(db: DbSession, warehouse_id: int) -> Warehouse:
     return wh
 
 
-@router.get("", response_model=list[EmployeeOut])
+@router.get("", response_model=EmployeePage)
 def list_employees(
     db: DbSession,
     user: CurrentUser,
     warehouse_id: int | None = Query(default=None, ge=1),
     include_inactive: bool = Query(default=False),
-) -> list[EmployeeOut]:
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=500),
+) -> EmployeePage:
     """List employees scoped to the caller's warehouse ACL.
 
     Operators and viewers see employees in the warehouses they have an
     explicit ACL row for; admins see everyone. ``include_inactive``
     surfaces soft-deleted employees so an admin can reactivate them.
+    The response is paginated -- the SPA's Settings page reads the
+    headline page, while dropdown callers (NewEntryForm, EntriesList
+    name resolution) pass the max ``page_size`` to fetch the whole
+    roster in a single request.
     """
     stmt = select(Employee)
     if warehouse_id is not None:
         stmt = stmt.where(Employee.warehouse_id == warehouse_id)
     if not include_inactive:
         stmt = stmt.where(Employee.is_active.is_(True))
-    stmt = apply_warehouse_filter(stmt, user, Employee.warehouse_id).order_by(
-        Employee.full_name
+    stmt = apply_warehouse_filter(stmt, user, Employee.warehouse_id)
+    # Count BEFORE pagination so ``total`` reflects every row that
+    # matches the filters, not just the current page.
+    total = int(
+        db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     )
-    rows = db.scalars(stmt).all()
-    return [EmployeeOut.model_validate(e) for e in rows]
+    rows = db.scalars(
+        stmt.order_by(Employee.full_name)
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+    return EmployeePage(
+        items=[EmployeeOut.model_validate(e) for e in rows],
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
 
 
 @router.post("", response_model=EmployeeOut, status_code=status.HTTP_201_CREATED)
@@ -59,9 +82,9 @@ def create_employee(
     emp = Employee(
         warehouse_id=payload.warehouse_id,
         full_name=payload.full_name.strip(),
-        email=(payload.email or "").strip() or None,
         default_hours_per_day=payload.default_hours_per_day,
         is_active=True,
+        excluded_from_metrics=payload.excluded_from_metrics,
     )
     db.add(emp)
     db.commit()
@@ -84,12 +107,12 @@ def update_employee(
         emp.warehouse_id = payload.warehouse_id
     if payload.full_name is not None:
         emp.full_name = payload.full_name.strip()
-    if payload.email is not None:
-        emp.email = payload.email.strip() or None
     if payload.default_hours_per_day is not None:
         emp.default_hours_per_day = payload.default_hours_per_day
     if payload.is_active is not None:
         emp.is_active = payload.is_active
+    if payload.excluded_from_metrics is not None:
+        emp.excluded_from_metrics = payload.excluded_from_metrics
     db.commit()
     db.refresh(emp)
     return EmployeeOut.model_validate(emp)

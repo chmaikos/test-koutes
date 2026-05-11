@@ -181,9 +181,9 @@ export interface Employee {
   id: number;
   warehouse_id: number;
   full_name: string;
-  email: string | null;
   default_hours_per_day: string;
   is_active: boolean;
+  excluded_from_metrics: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -196,6 +196,7 @@ export interface ProductivityEntry {
   pages: number;
   hours_worked: string;
   note: string | null;
+  excluded_from_metrics: boolean;
   created_by_user_id: number | null;
   created_at: string;
   updated_at: string;

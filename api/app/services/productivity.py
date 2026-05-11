@@ -157,14 +157,26 @@ def _summary_for_range(
     one entry in the range; warehouses with no data are simply absent
     from the dict (callers fill in defaults as needed).
     """
-    base_stmt: Select = select(
-        ProductivityEntry.warehouse_id,
-        func.coalesce(func.sum(ProductivityEntry.pages), 0),
-        func.coalesce(func.sum(ProductivityEntry.hours_worked), 0),
-        func.count(ProductivityEntry.id),
-    ).where(
-        ProductivityEntry.entry_date >= start,
-        ProductivityEntry.entry_date <= end,
+    # Both totals and per-employee aggregates filter out rows where either
+    # the entry itself or its owning employee is flagged out of the metrics.
+    # Joining ``Employee`` in the totals query keeps the two queries on the
+    # same row set so the numbers can't disagree -- the alternative (filter
+    # entries only) would let a per-employee admin exclusion leak into
+    # warehouse totals while keeping the leaderboard clean.
+    base_stmt: Select = (
+        select(
+            ProductivityEntry.warehouse_id,
+            func.coalesce(func.sum(ProductivityEntry.pages), 0),
+            func.coalesce(func.sum(ProductivityEntry.hours_worked), 0),
+            func.count(ProductivityEntry.id),
+        )
+        .join(Employee, Employee.id == ProductivityEntry.employee_id)
+        .where(
+            ProductivityEntry.entry_date >= start,
+            ProductivityEntry.entry_date <= end,
+            ProductivityEntry.excluded_from_metrics.is_(False),
+            Employee.excluded_from_metrics.is_(False),
+        )
     )
     if warehouse_ids:
         base_stmt = base_stmt.where(
@@ -192,6 +204,8 @@ def _summary_for_range(
         .where(
             ProductivityEntry.entry_date >= start,
             ProductivityEntry.entry_date <= end,
+            ProductivityEntry.excluded_from_metrics.is_(False),
+            Employee.excluded_from_metrics.is_(False),
         )
         .group_by(
             ProductivityEntry.warehouse_id,
@@ -210,7 +224,9 @@ def _summary_for_range(
     perf_rows = db.execute(perf_stmt).all()
 
     # Active employee counts (independent of whether they logged anything
-    # in the period -- "active employees" is a roster metric).
+    # in the period -- "active employees" is a roster metric, so the
+    # excluded-from-metrics override is intentionally ignored: those
+    # employees are still on the floor, just not in the math).
     active_stmt: Select = (
         select(Employee.warehouse_id, func.count(Employee.id))
         .where(Employee.is_active.is_(True))

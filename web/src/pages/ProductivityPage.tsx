@@ -1,50 +1,26 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import clsx from "clsx";
-import { Activity, Plus, Trash2 } from "lucide-react";
-import { useHasRole } from "@/components/RoleGate";
+import { Link } from "react-router-dom";
+import { Activity, ChevronRight } from "lucide-react";
 import {
-  useDeleteProductivityEntry,
-  useEmployees,
   useProductivityDailySummary,
-  useProductivityEntries,
   useProductivityWeeklySummary,
-  useUpsertProductivityEntry,
   useWarehouses,
 } from "@/api/hooks";
 import type {
-  Employee,
-  Performer,
-  ProductivityEntry,
   ProductivitySummary,
   Warehouse,
   WarehouseProductivity,
 } from "@/api/types";
+import { PerformersTable } from "@/components/productivity/PerformersTable";
+import { isoWeekStart, todayStr } from "@/components/productivity/dates";
 
 type Tab = "today" | "week";
-
-/** Today's date as YYYY-MM-DD in the user's local time. */
-function todayStr(): string {
-  const d = new Date();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${d.getFullYear()}-${m}-${day}`;
-}
-
-/** Monday of the ISO week containing ``date``, formatted YYYY-MM-DD. */
-function isoWeekStart(date: string): string {
-  const d = new Date(`${date}T00:00:00`);
-  const dow = (d.getDay() + 6) % 7; // 0 = Mon, 6 = Sun
-  d.setDate(d.getDate() - dow);
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${d.getFullYear()}-${m}-${day}`;
-}
 
 export function ProductivityPage() {
   const { data: warehouses } = useWarehouses();
   const [tab, setTab] = useState<Tab>("today");
   const [date, setDate] = useState<string>(todayStr());
-  const canWrite = useHasRole(["admin", "operator"]);
 
   const dailyQuery = useProductivityDailySummary(undefined, date);
   const weeklyQuery = useProductivityWeeklySummary(
@@ -61,7 +37,8 @@ export function ProductivityPage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Productivity</h1>
           <p className="text-sm text-slate-500">
-            Daily pages-per-hour by warehouse and employee.
+            Per-warehouse averages and leaderboards. Click a warehouse for the
+            full entry list.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -103,7 +80,6 @@ export function ProductivityPage() {
               )}
               date={date}
               tab={tab}
-              canWrite={canWrite}
             />
           ))}
         </div>
@@ -188,19 +164,21 @@ function WarehouseProductivityCard({
   summary,
   date,
   tab,
-  canWrite,
 }: {
   warehouse: Warehouse;
   summary: WarehouseProductivity | undefined;
   date: string;
   tab: Tab;
-  canWrite: boolean;
 }) {
-  const employees = useEmployees(warehouse.id, false);
-  const [showAdd, setShowAdd] = useState(false);
-
+  // Preserve the index page's date/tab through to the detail view so an
+  // operator drilling into a warehouse mid-week keeps seeing the same
+  // period without re-selecting.
+  const search = new URLSearchParams({ date, tab }).toString();
   return (
-    <section className="card overflow-hidden">
+    <Link
+      to={`/productivity/${warehouse.id}?${search}`}
+      className="card block overflow-hidden transition hover:border-slate-300 hover:shadow-sm focus:outline-none focus:ring-2 focus:ring-brand-400"
+    >
       <header className="border-b border-slate-100 px-5 py-3">
         <div className="flex items-center justify-between gap-3">
           <div>
@@ -215,16 +193,10 @@ function WarehouseProductivityCard({
                 : "No entries"}
             </p>
           </div>
-          {canWrite && tab === "today" && (
-            <button
-              type="button"
-              className="btn-secondary"
-              onClick={() => setShowAdd((v) => !v)}
-            >
-              <Plus className="h-4 w-4" />
-              {showAdd ? "Cancel" : "Add entry"}
-            </button>
-          )}
+          <ChevronRight
+            className="h-4 w-4 text-slate-400"
+            aria-hidden="true"
+          />
         </div>
       </header>
 
@@ -237,14 +209,6 @@ function WarehouseProductivityCard({
         />
       </div>
 
-      {showAdd && employees.data && (
-        <NewEntryForm
-          employees={employees.data}
-          date={date}
-          onClose={() => setShowAdd(false)}
-        />
-      )}
-
       <PerformersTable
         title="Top performers"
         performers={summary?.top ?? []}
@@ -255,275 +219,6 @@ function WarehouseProductivityCard({
         performers={summary?.bottom ?? []}
         emptyHint=""
       />
-
-      {tab === "today" && (
-        <EntriesList warehouseId={warehouse.id} date={date} canWrite={canWrite} />
-      )}
-    </section>
-  );
-}
-
-function PerformersTable({
-  title,
-  performers,
-  emptyHint,
-}: {
-  title: string;
-  performers: Performer[];
-  emptyHint: string;
-}) {
-  if (performers.length === 0) {
-    if (!emptyHint) return null;
-    return (
-      <div className="border-t border-slate-100 px-5 py-3 text-xs text-slate-400">
-        {title} — {emptyHint}
-      </div>
-    );
-  }
-  return (
-    <div className="border-t border-slate-100 px-5 py-3">
-      <div className="mb-2 text-xs font-medium uppercase tracking-wider text-slate-500">
-        {title}
-      </div>
-      <table className="w-full text-sm">
-        <tbody className="divide-y divide-slate-100">
-          {performers.map((p) => (
-            <tr key={p.employee_id}>
-              <td className="py-1.5 pr-2">{p.employee_name}</td>
-              <td className="py-1.5 pr-2 text-right text-xs text-slate-500">
-                {p.pages} pages · {p.hours.toFixed(2)}h
-              </td>
-              <td className="py-1.5 text-right font-semibold tabular-nums">
-                {p.pages_per_day.toFixed(2)}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function NewEntryForm({
-  employees,
-  date,
-  onClose,
-}: {
-  employees: Employee[];
-  date: string;
-  onClose: () => void;
-}) {
-  const upsert = useUpsertProductivityEntry();
-  const [employeeId, setEmployeeId] = useState<number | null>(
-    employees[0]?.id ?? null,
-  );
-  const [pages, setPages] = useState<number>(0);
-  const [hours, setHours] = useState<number>(8);
-  const [note, setNote] = useState("");
-  const [error, setError] = useState<string | null>(null);
-
-  const selected = useMemo(
-    () => employees.find((e) => e.id === employeeId) ?? null,
-    [employees, employeeId],
-  );
-
-  // Pre-fill the hours field with the employee's admin-set default so the
-  // common case (a full standard shift) is one less number to type.
-  const handleSelectEmployee = (id: number) => {
-    setEmployeeId(id);
-    const emp = employees.find((e) => e.id === id);
-    if (emp) {
-      const parsed = Number(emp.default_hours_per_day);
-      if (!Number.isNaN(parsed) && parsed > 0) {
-        setHours(parsed);
-      }
-    }
-  };
-
-  if (employees.length === 0) {
-    return (
-      <div className="border-t border-slate-100 bg-slate-50/60 px-5 py-3 text-sm text-slate-500">
-        No active employees in this warehouse. Add one in{" "}
-        <a className="underline" href="/settings">
-          Settings
-        </a>
-        .
-      </div>
-    );
-  }
-
-  return (
-    <div className="grid gap-3 border-t border-slate-100 bg-slate-50/60 px-5 py-4 sm:grid-cols-[1.5fr_1fr_1fr_auto] sm:items-end">
-      <label className="block">
-        <span className="text-xs text-slate-500">Employee</span>
-        <select
-          className="input"
-          value={employeeId ?? ""}
-          onChange={(e) => handleSelectEmployee(Number(e.target.value))}
-        >
-          {employees.map((e) => (
-            <option key={e.id} value={e.id}>
-              {e.full_name}
-            </option>
-          ))}
-        </select>
-      </label>
-      <label className="block">
-        <span className="text-xs text-slate-500">Pages</span>
-        <input
-          type="number"
-          className="input"
-          min={0}
-          value={pages}
-          onChange={(e) => setPages(Math.max(0, Number(e.target.value)))}
-        />
-      </label>
-      <label className="block">
-        <span className="text-xs text-slate-500">Hours</span>
-        <input
-          type="number"
-          className="input"
-          min={0.25}
-          max={24}
-          step={0.25}
-          value={hours}
-          onChange={(e) => setHours(Number(e.target.value))}
-        />
-      </label>
-      <div className="flex items-center gap-2">
-        <button
-          type="button"
-          className="btn-primary"
-          disabled={!selected || hours <= 0 || upsert.isPending}
-          onClick={async () => {
-            if (!selected) return;
-            setError(null);
-            try {
-              await upsert.mutateAsync({
-                employee_id: selected.id,
-                entry_date: date,
-                pages,
-                hours_worked: hours,
-                note: note || undefined,
-              });
-              onClose();
-            } catch (err: unknown) {
-              const detail =
-                (err as { response?: { data?: { detail?: string } } })?.response
-                  ?.data?.detail ?? "Failed to save entry";
-              setError(typeof detail === "string" ? detail : "Failed to save entry");
-            }
-          }}
-        >
-          {upsert.isPending ? "Saving..." : "Save"}
-        </button>
-      </div>
-      <label className="block sm:col-span-4">
-        <span className="text-xs text-slate-500">Note (optional)</span>
-        <input
-          className="input"
-          value={note}
-          maxLength={500}
-          onChange={(e) => setNote(e.target.value)}
-        />
-      </label>
-      {error && <p className="text-xs text-rose-600 sm:col-span-4">{error}</p>}
-    </div>
-  );
-}
-
-function EntriesList({
-  warehouseId,
-  date,
-  canWrite,
-}: {
-  warehouseId: number;
-  date: string;
-  canWrite: boolean;
-}) {
-  const entries = useProductivityEntries({
-    warehouse_id: warehouseId,
-    from_date: date,
-    to_date: date,
-  });
-  const remove = useDeleteProductivityEntry();
-  const employees = useEmployees(warehouseId, true);
-  const employeeName = (id: number) =>
-    employees.data?.find((e) => e.id === id)?.full_name ?? `#${id}`;
-
-  if (entries.isLoading) {
-    return (
-      <div className="border-t border-slate-100 px-5 py-3 text-xs text-slate-500">
-        Loading entries...
-      </div>
-    );
-  }
-
-  const rows = entries.data ?? [];
-  if (rows.length === 0) {
-    return (
-      <div className="border-t border-slate-100 px-5 py-3 text-xs text-slate-400">
-        No entries on this date.
-      </div>
-    );
-  }
-
-  return (
-    <div className="border-t border-slate-100 px-5 py-3">
-      <div className="mb-2 text-xs font-medium uppercase tracking-wider text-slate-500">
-        Entries
-      </div>
-      <table className="w-full text-sm">
-        <thead className="text-xs uppercase tracking-wider text-slate-400">
-          <tr>
-            <th className="py-1 pr-2 text-left">Employee</th>
-            <th className="py-1 pr-2 text-right">Pages</th>
-            <th className="py-1 pr-2 text-right">Hours</th>
-            <th className="py-1 pr-2 text-right">P/hr</th>
-            {canWrite && <th className="py-1"></th>}
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-slate-100">
-          {rows.map((e: ProductivityEntry) => {
-            const hours = Number(e.hours_worked);
-            const pph = hours > 0 ? e.pages / hours : 0;
-            return (
-              <tr key={e.id}>
-                <td className="py-1.5 pr-2">{employeeName(e.employee_id)}</td>
-                <td className="py-1.5 pr-2 text-right tabular-nums">
-                  {e.pages}
-                </td>
-                <td className="py-1.5 pr-2 text-right tabular-nums">
-                  {hours.toFixed(2)}
-                </td>
-                <td className="py-1.5 pr-2 text-right font-semibold tabular-nums">
-                  {pph.toFixed(2)}
-                </td>
-                {canWrite && (
-                  <td className="py-1.5 text-right">
-                    <button
-                      type="button"
-                      className="btn-ghost text-rose-600 hover:bg-rose-50"
-                      onClick={() => {
-                        if (
-                          window.confirm(
-                            `Delete entry for ${employeeName(e.employee_id)} on ${e.entry_date}?`,
-                          )
-                        ) {
-                          void remove.mutateAsync(e.id);
-                        }
-                      }}
-                      aria-label="Delete entry"
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </button>
-                  </td>
-                )}
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </div>
+    </Link>
   );
 }

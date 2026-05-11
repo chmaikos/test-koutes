@@ -174,6 +174,7 @@ def upsert_entry(
             pages=payload.pages,
             hours_worked=payload.hours_worked,
             note=payload.note,
+            excluded_from_metrics=payload.excluded_from_metrics,
             created_by_user_id=user.id,
         )
         db.add(entry)
@@ -181,6 +182,7 @@ def upsert_entry(
         existing.pages = payload.pages
         existing.hours_worked = payload.hours_worked
         existing.note = payload.note
+        existing.excluded_from_metrics = payload.excluded_from_metrics
         existing.warehouse_id = emp.warehouse_id
         existing.created_by_user_id = user.id
         entry = existing

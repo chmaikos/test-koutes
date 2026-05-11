@@ -25,6 +25,7 @@ import { AlertsPage } from "@/pages/AlertsPage";
 import { AlertDetailPage } from "@/pages/AlertDetailPage";
 import { ExportsPage } from "@/pages/ExportsPage";
 import { ProductivityPage } from "@/pages/ProductivityPage";
+import { WarehouseProductivityDetailPage } from "@/pages/WarehouseProductivityDetailPage";
 import { SettingsPage } from "@/pages/SettingsPage";
 
 const queryClient = new QueryClient({
@@ -135,6 +136,10 @@ async function bootstrap() {
                     <Route path="alerts" element={<AlertsPage />} />
                     <Route path="alerts/:id" element={<AlertDetailPage />} />
                     <Route path="productivity" element={<ProductivityPage />} />
+                    <Route
+                      path="productivity/:warehouseId"
+                      element={<WarehouseProductivityDetailPage />}
+                    />
                     <Route path="exports" element={<ExportsPage />} />
                     <Route path="settings" element={<SettingsPage />} />
                     <Route path="*" element={<Navigate to="/" replace />} />

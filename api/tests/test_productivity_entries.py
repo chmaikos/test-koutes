@@ -52,6 +52,50 @@ def test_create_entry_succeeds(client, employee_w1):
     assert Decimal(body["hours_worked"]) == Decimal("4.0")
     # warehouse_id was filled in from the employee row.
     assert body["warehouse_id"] == 1
+    # Default value of the new opt-out flag.
+    assert body["excluded_from_metrics"] is False
+
+
+def test_create_entry_excluded_from_metrics(client, employee_w1):
+    resp = client.post(
+        "/api/productivity/entries",
+        json={
+            "employee_id": employee_w1.id,
+            "entry_date": "2026-05-10",
+            "pages": 250,
+            "hours_worked": 4.0,
+            "excluded_from_metrics": True,
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["excluded_from_metrics"] is True
+
+
+def test_upsert_can_clear_excluded_flag(client, employee_w1):
+    first = client.post(
+        "/api/productivity/entries",
+        json={
+            "employee_id": employee_w1.id,
+            "entry_date": "2026-05-10",
+            "pages": 100,
+            "hours_worked": 2.0,
+            "excluded_from_metrics": True,
+        },
+    )
+    assert first.status_code == 201
+    second = client.post(
+        "/api/productivity/entries",
+        json={
+            "employee_id": employee_w1.id,
+            "entry_date": "2026-05-10",
+            "pages": 100,
+            "hours_worked": 2.0,
+        },
+    )
+    assert second.status_code == 201
+    # Re-submitting without the flag must clear it -- the upsert path is
+    # the only way operators can edit an entry.
+    assert second.json()["excluded_from_metrics"] is False
 
 
 def test_post_again_for_same_day_upserts(client, session, employee_w1):

@@ -33,8 +33,19 @@ export const queryKeys = {
   boxEvents: (id: number) => ["box-events", id] as const,
   boxes: (filters: BoxFilters, page: number, pageSize: number) =>
     ["boxes", filters, page, pageSize] as const,
-  employees: (warehouseId?: number, includeInactive?: boolean) =>
-    ["employees", warehouseId ?? null, !!includeInactive] as const,
+  employees: (
+    warehouseId?: number,
+    includeInactive?: boolean,
+    page?: number,
+    pageSize?: number,
+  ) =>
+    [
+      "employees",
+      warehouseId ?? null,
+      !!includeInactive,
+      page ?? 1,
+      pageSize ?? 500,
+    ] as const,
   productivityEntries: (filters: ProductivityEntryFilters) =>
     ["productivity-entries", filters] as const,
   productivityDaily: (warehouseId?: number, date?: string) =>
@@ -340,19 +351,30 @@ function invalidateProductivity(qc: ReturnType<typeof useQueryClient>) {
   qc.invalidateQueries({ queryKey: queryKeys.dashboard });
 }
 
+// 500 matches the API's hard cap (api/app/routers/employees.py). Dropdown
+// callers want every employee in the warehouse without manual paging;
+// the Settings page passes its own (smaller) pageSize plus a real page.
+const DEFAULT_EMPLOYEES_PAGE_SIZE = 500;
+
 export function useEmployees(
   warehouseId?: number,
   includeInactive: boolean = false,
+  opts: { page?: number; pageSize?: number } = {},
 ) {
+  const page = opts.page ?? 1;
+  const pageSize = opts.pageSize ?? DEFAULT_EMPLOYEES_PAGE_SIZE;
   return useQuery({
-    queryKey: queryKeys.employees(warehouseId, includeInactive),
+    queryKey: queryKeys.employees(warehouseId, includeInactive, page, pageSize),
     queryFn: async () => {
       const qs = buildQueryString({
         warehouse_id: warehouseId,
         include_inactive: includeInactive,
+        page,
+        page_size: pageSize,
       });
-      return (await api.get<Employee[]>(`/employees${qs}`)).data;
+      return (await api.get<Page<Employee>>(`/employees${qs}`)).data;
     },
+    placeholderData: (prev) => prev,
   });
 }
 
@@ -362,8 +384,8 @@ export function useCreateEmployee() {
     mutationFn: async (input: {
       warehouse_id: number;
       full_name: string;
-      email?: string;
       default_hours_per_day?: number;
+      excluded_from_metrics?: boolean;
     }) => (await api.post<Employee>("/employees", input)).data,
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["employees"] });
@@ -379,9 +401,9 @@ export function useUpdateEmployee() {
       id: number;
       patch: {
         full_name?: string;
-        email?: string;
         default_hours_per_day?: number;
         is_active?: boolean;
+        excluded_from_metrics?: boolean;
         warehouse_id?: number;
       };
     }) =>
@@ -428,6 +450,7 @@ export function useUpsertProductivityEntry() {
       pages: number;
       hours_worked: number;
       note?: string;
+      excluded_from_metrics?: boolean;
     }) =>
       (await api.post<ProductivityEntry>("/productivity/entries", input)).data,
     onSuccess: () => invalidateProductivity(qc),

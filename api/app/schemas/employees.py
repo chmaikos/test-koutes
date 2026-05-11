@@ -12,9 +12,9 @@ class EmployeeOut(BaseModel):
     id: int
     warehouse_id: int
     full_name: str
-    email: str | None
     default_hours_per_day: Decimal
     is_active: bool
+    excluded_from_metrics: bool
     created_at: datetime
     updated_at: datetime
 
@@ -22,18 +22,33 @@ class EmployeeOut(BaseModel):
 class EmployeeCreate(BaseModel):
     warehouse_id: int = Field(ge=1)
     full_name: str = Field(min_length=1, max_length=160)
-    email: str | None = Field(default=None, max_length=320)
     default_hours_per_day: Decimal = Field(
         default=Decimal("8.00"), gt=0, le=24
     )
+    excluded_from_metrics: bool = False
 
 
 class EmployeeUpdate(BaseModel):
     full_name: str | None = Field(default=None, min_length=1, max_length=160)
-    email: str | None = Field(default=None, max_length=320)
     default_hours_per_day: Decimal | None = Field(default=None, gt=0, le=24)
     is_active: bool | None = None
+    excluded_from_metrics: bool | None = None
     warehouse_id: int | None = Field(default=None, ge=1)
+
+
+class EmployeePage(BaseModel):
+    """Paginated `GET /employees` response.
+
+    Matches the shape used by `GET /boxes` so the SPA can reuse its
+    generic `Page<T>` type. Callers that need every employee (dropdowns,
+    name lookups) pass a large ``page_size`` rather than a separate
+    endpoint; ``500`` is the hard cap.
+    """
+
+    items: list[EmployeeOut]
+    total: int
+    page: int
+    page_size: int
 
 
 class ProductivityEntryOut(BaseModel):
@@ -46,6 +61,7 @@ class ProductivityEntryOut(BaseModel):
     pages: int
     hours_worked: Decimal
     note: str | None
+    excluded_from_metrics: bool
     created_by_user_id: int | None
     created_at: datetime
     updated_at: datetime
@@ -57,6 +73,7 @@ class ProductivityEntryCreate(BaseModel):
     pages: int = Field(ge=0)
     hours_worked: Decimal = Field(gt=0, le=24)
     note: str | None = Field(default=None, max_length=500)
+    excluded_from_metrics: bool = False
 
 
 class PerformerOut(BaseModel):

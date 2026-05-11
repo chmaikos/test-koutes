@@ -6,7 +6,7 @@ ISO-week assertions stable regardless of when the suite runs.
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
@@ -35,7 +35,16 @@ def warehouse_with_employees(session):
     return rows
 
 
-def _add_entry(session, *, employee, on, pages, hours, warehouse_id=None):
+def _add_entry(
+    session,
+    *,
+    employee,
+    on,
+    pages,
+    hours,
+    warehouse_id=None,
+    excluded_from_metrics: bool = False,
+):
     session.add(
         ProductivityEntry(
             employee_id=employee.id,
@@ -43,6 +52,7 @@ def _add_entry(session, *, employee, on, pages, hours, warehouse_id=None):
             entry_date=on,
             pages=pages,
             hours_worked=Decimal(str(hours)),
+            excluded_from_metrics=excluded_from_metrics,
         )
     )
 
@@ -186,3 +196,60 @@ def test_dashboard_summary_includes_productivity(client, session, warehouse_with
     assert w1["productivity_today"] is not None
     assert w1["productivity_today"]["total_pages"] == 80
     assert w1["productivity_today"]["avg_pages_per_day"] == 160.0
+
+
+def test_excluded_entry_skipped_from_totals_and_rankings(
+    session, warehouse_with_employees
+):
+    alice, bob, _carol, _dave = warehouse_with_employees
+    # Two entries on the same day: Alice's is flagged excluded so it
+    # must not show up in totals OR in the top/bottom leaderboards.
+    _add_entry(
+        session,
+        employee=alice,
+        on=REF_DATE,
+        pages=100,
+        hours=1,
+        excluded_from_metrics=True,
+    )
+    _add_entry(session, employee=bob, on=REF_DATE, pages=100, hours=9)
+    session.commit()
+
+    summary = daily_summary(session, on_date=REF_DATE)
+    w1 = summary[1]
+    # Only Bob's entry contributes.
+    assert w1.total_pages == 100
+    assert w1.total_hours == 9.0
+    assert w1.entry_count == 1
+    assert w1.avg_pages_per_day == round((100 / 9) * 8, 2)
+    # Alice is absent from the leaderboard because her sole entry was
+    # excluded; the active_employees count, however, is unchanged.
+    top_names = [p.employee_name for p in w1.top]
+    assert "Alice" not in top_names
+    assert top_names == ["Bob"]
+    assert w1.active_employees == 3
+
+
+def test_employee_level_exclusion_drops_all_entries(
+    session, warehouse_with_employees
+):
+    alice, bob, *_ = warehouse_with_employees
+    # Admin flips Alice's roster-level exclusion -- every entry she has
+    # logged should fall out of the math regardless of the per-entry
+    # flag. Her active_employees membership stays put.
+    alice.excluded_from_metrics = True
+    session.commit()
+
+    _add_entry(session, employee=alice, on=REF_DATE, pages=200, hours=2)
+    _add_entry(session, employee=alice, on=REF_DATE - timedelta(days=1), pages=300, hours=3)
+    _add_entry(session, employee=bob, on=REF_DATE, pages=100, hours=2)
+    session.commit()
+
+    summary = daily_summary(session, on_date=REF_DATE)
+    w1 = summary[1]
+    assert w1.total_pages == 100
+    assert w1.entry_count == 1
+    top_names = [p.employee_name for p in w1.top]
+    assert "Alice" not in top_names
+    # Roster metric ignores the exclusion override on purpose.
+    assert w1.active_employees == 3
