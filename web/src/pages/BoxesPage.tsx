@@ -1,8 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import {
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
+  ChevronsUpDown,
+  ChevronUp,
   Plus,
   Search,
   Trash2,
@@ -19,6 +22,7 @@ import {
 } from "@/api/hooks";
 import type {
   BoxFilters,
+  BoxSortField,
   BoxStatus,
   BulkDeleteResult,
   BulkResult,
@@ -34,7 +38,12 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { ImportBoxesDialog } from "@/components/ImportBoxesDialog";
 import { useHasRole } from "@/components/RoleGate";
 
-const PAGE_SIZE = 25;
+// Whitelist for the page-size selector. The API enforces a 1..200
+// range; we expose the four common buckets so operators can quickly
+// scale the table density without typing into the URL bar.
+const PAGE_SIZE_OPTIONS = [25, 50, 100, 200] as const;
+type PageSize = (typeof PAGE_SIZE_OPTIONS)[number];
+const DEFAULT_PAGE_SIZE: PageSize = 25;
 
 // Mirrors the API's linear transition map. We expose only the *next*
 // step in the chain so the inline "Move to..." picker is unambiguous;
@@ -47,6 +56,22 @@ const NEXT_STATUS: Record<BoxStatus, BoxStatus[]> = {
   ready_to_return: ["returned"],
   returned: [],
 };
+
+// Mirrors ``SORTABLE_FIELDS`` in the API. Used to validate the URL
+// param before forwarding it to the hook so a stale link with a
+// removed field doesn't trigger a 422.
+const SORTABLE_FIELDS: ReadonlySet<BoxSortField> = new Set([
+  "box_number",
+  "lot",
+  "status",
+  "warehouse",
+  "received_at",
+  "updated_at",
+]);
+
+function isSortField(value: string | null): value is BoxSortField {
+  return value !== null && SORTABLE_FIELDS.has(value as BoxSortField);
+}
 
 type DialogState =
   | { kind: "bulk"; result: BulkResult }
@@ -70,12 +95,59 @@ export function BoxesPage() {
     if (lot) out.lot = lot;
     const search = params.get("q");
     if (search) out.search = search;
+    const sortBy = params.get("sort_by");
+    if (isSortField(sortBy)) {
+      out.sort_by = sortBy;
+      const dir = params.get("sort_dir");
+      out.sort_dir = dir === "asc" ? "asc" : "desc";
+    }
     return out;
   }, [params]);
 
   const page = Number(params.get("page") ?? 1);
-  const { data, isLoading } = useBoxes(filters, page, PAGE_SIZE);
-  const totalPages = data ? Math.max(1, Math.ceil(data.total / PAGE_SIZE)) : 1;
+  const pageSize: PageSize = (() => {
+    const raw = Number(params.get("page_size"));
+    return (PAGE_SIZE_OPTIONS as readonly number[]).includes(raw)
+      ? (raw as PageSize)
+      : DEFAULT_PAGE_SIZE;
+  })();
+  const { data, isLoading } = useBoxes(filters, page, pageSize);
+  const totalPages = data ? Math.max(1, Math.ceil(data.total / pageSize)) : 1;
+
+  const activeSort: BoxSortField | null = filters.sort_by ?? null;
+  const activeSortDir: "asc" | "desc" = filters.sort_dir ?? "desc";
+
+  function toggleSort(field: BoxSortField) {
+    const next = new URLSearchParams(params);
+    next.delete("page");
+    if (activeSort !== field) {
+      // First click on a new column: start at descending. That matches
+      // how most data-grids behave and lines up with the existing
+      // default order (``updated_at desc``).
+      next.set("sort_by", field);
+      next.set("sort_dir", "desc");
+    } else if (activeSortDir === "desc") {
+      next.set("sort_dir", "asc");
+    } else {
+      // Third click: drop the explicit sort, fall back to the API
+      // default. This gives users a way to "undo" a sort without
+      // hunting for a button.
+      next.delete("sort_by");
+      next.delete("sort_dir");
+    }
+    setParams(next);
+  }
+
+  function setPageSize(next: PageSize) {
+    const params2 = new URLSearchParams(params);
+    if (next === DEFAULT_PAGE_SIZE) {
+      params2.delete("page_size");
+    } else {
+      params2.set("page_size", String(next));
+    }
+    params2.delete("page");
+    setParams(params2);
+  }
 
   const [showCreate, setShowCreate] = useState(false);
   const [showImport, setShowImport] = useState(false);
@@ -258,12 +330,49 @@ export function BoxesPage() {
                     />
                   </th>
                 )}
-                <th className="px-4 py-2.5 text-left">Box #</th>
-                <th className="px-4 py-2.5 text-left">Lot</th>
+                <SortableTh
+                  label="Box #"
+                  field="box_number"
+                  activeField={activeSort}
+                  direction={activeSortDir}
+                  onToggle={toggleSort}
+                />
+                <SortableTh
+                  label="Lot"
+                  field="lot"
+                  activeField={activeSort}
+                  direction={activeSortDir}
+                  onToggle={toggleSort}
+                />
                 <th className="px-4 py-2.5 text-left">Contents</th>
-                <th className="px-4 py-2.5 text-left">Warehouse</th>
-                <th className="px-4 py-2.5 text-left">Status</th>
-                <th className="px-4 py-2.5 text-left">Updated</th>
+                <SortableTh
+                  label="Warehouse"
+                  field="warehouse"
+                  activeField={activeSort}
+                  direction={activeSortDir}
+                  onToggle={toggleSort}
+                />
+                <SortableTh
+                  label="Status"
+                  field="status"
+                  activeField={activeSort}
+                  direction={activeSortDir}
+                  onToggle={toggleSort}
+                />
+                <SortableTh
+                  label="Received"
+                  field="received_at"
+                  activeField={activeSort}
+                  direction={activeSortDir}
+                  onToggle={toggleSort}
+                />
+                <SortableTh
+                  label="Updated"
+                  field="updated_at"
+                  activeField={activeSort}
+                  direction={activeSortDir}
+                  onToggle={toggleSort}
+                />
                 <th className="px-4 py-2.5 text-right">Actions</th>
               </tr>
             </thead>
@@ -272,7 +381,7 @@ export function BoxesPage() {
                 <tr>
                   <td
                     className="px-4 py-8 text-center text-slate-400"
-                    colSpan={canWrite ? 8 : 7}
+                    colSpan={canWrite ? 9 : 8}
                   >
                     Loading...
                   </td>
@@ -282,7 +391,7 @@ export function BoxesPage() {
                 <tr>
                   <td
                     className="px-4 py-8 text-center text-slate-400"
-                    colSpan={canWrite ? 8 : 7}
+                    colSpan={canWrite ? 9 : 8}
                   >
                     No boxes match your filters.
                   </td>
@@ -329,14 +438,31 @@ export function BoxesPage() {
             />
           ))}
         </div>
-        <div className="flex items-center justify-between border-t border-slate-100 px-4 py-2 text-xs text-slate-500">
-          <div>
-            Page {page} of {totalPages} · {data?.total ?? 0} total
-            {selectedIds.size > 0 && (
-              <span className="ml-2 text-slate-700">
-                · {selectedIds.size} selected
-              </span>
-            )}
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 px-4 py-2 text-xs text-slate-500">
+          <div className="flex flex-wrap items-center gap-3">
+            <span>
+              Page {page} of {totalPages} · {data?.total ?? 0} total
+              {selectedIds.size > 0 && (
+                <span className="ml-2 text-slate-700">
+                  · {selectedIds.size} selected
+                </span>
+              )}
+            </span>
+            <label className="inline-flex items-center gap-1.5">
+              <span>Rows per page</span>
+              <select
+                className="input h-7 w-auto px-1 py-0 text-xs"
+                value={pageSize}
+                onChange={(e) => setPageSize(Number(e.target.value) as PageSize)}
+                aria-label="Rows per page"
+              >
+                {PAGE_SIZE_OPTIONS.map((n) => (
+                  <option key={n} value={n}>
+                    {n}
+                  </option>
+                ))}
+              </select>
+            </label>
           </div>
           <div className="flex gap-1">
             <button
@@ -433,6 +559,66 @@ export function BoxesPage() {
         />
       )}
     </div>
+  );
+}
+
+/**
+ * Clickable column header for the boxes table.
+ *
+ * Renders the label plus one of three Lucide icons reflecting the
+ * sort state for *this* column. The icon is part of the same
+ * button so the whole header is the click target, which makes the
+ * keyboard / pointer affordance obvious.
+ */
+function SortableTh({
+  label,
+  field,
+  activeField,
+  direction,
+  onToggle,
+}: {
+  label: string;
+  field: BoxSortField;
+  activeField: BoxSortField | null;
+  direction: "asc" | "desc";
+  onToggle: (field: BoxSortField) => void;
+}) {
+  const isActive = activeField === field;
+  const Icon = !isActive
+    ? ChevronsUpDown
+    : direction === "asc"
+      ? ChevronUp
+      : ChevronDown;
+  const ariaSort: "ascending" | "descending" | "none" = !isActive
+    ? "none"
+    : direction === "asc"
+      ? "ascending"
+      : "descending";
+  return (
+    <th
+      className="px-4 py-2.5 text-left"
+      scope="col"
+      aria-sort={ariaSort}
+    >
+      <button
+        type="button"
+        onClick={() => onToggle(field)}
+        className={
+          "inline-flex items-center gap-1 text-xs uppercase tracking-wider " +
+          (isActive
+            ? "text-slate-900"
+            : "text-slate-500 hover:text-slate-700")
+        }
+      >
+        {label}
+        <Icon
+          className={
+            "h-3.5 w-3.5 " +
+            (isActive ? "text-brand-600" : "text-slate-300")
+          }
+        />
+      </button>
+    </th>
   );
 }
 
@@ -623,6 +809,9 @@ function BoxRow({
       <td className="px-4 py-2.5">{warehouseName}</td>
       <td className="px-4 py-2.5">
         <StatusBadge status={box.status} />
+      </td>
+      <td className="px-4 py-2.5 text-slate-500">
+        {box.received_at ? new Date(box.received_at).toLocaleString() : "—"}
       </td>
       <td className="px-4 py-2.5 text-slate-500">
         {new Date(box.updated_at).toLocaleString()}

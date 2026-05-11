@@ -17,7 +17,14 @@ from app.deps import CurrentUser, DbSession, require_admin, require_operator
 from app.events import bus
 from app.models.boxes import Box, BoxEvent
 from app.models.users import User, UserRole
-from app.routers._filters import BoxFilters, apply_box_filters, parse_box_filters
+from app.routers._filters import (
+    BoxFilters,
+    BoxSort,
+    apply_box_filters,
+    apply_box_sort,
+    parse_box_filters,
+    parse_box_sort,
+)
 from app.schemas.boxes import (
     BoxCreate,
     BoxEventOut,
@@ -70,14 +77,14 @@ def list_boxes(
     db: DbSession,
     user: CurrentUser,
     filters: Annotated[BoxFilters, Depends(parse_box_filters)],
+    sort: Annotated[BoxSort, Depends(parse_box_sort)],
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=200),
 ) -> Page[BoxOut]:
     stmt = select(Box)
     stmt = apply_box_filters(stmt, filters)
-    stmt = apply_warehouse_filter(stmt, user, Box.current_warehouse_id).order_by(
-        Box.updated_at.desc()
-    )
+    stmt = apply_warehouse_filter(stmt, user, Box.current_warehouse_id)
+    stmt = apply_box_sort(stmt, sort)
     total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     items = db.scalars(stmt.offset((page - 1) * page_size).limit(page_size)).all()
     return Page[BoxOut](

@@ -121,6 +121,69 @@ def test_filters_search_and_exports(client):
     assert all(r[warehouse_col] == "Building 2" for r in data_rows)
 
 
+def test_box_list_sorting(client):
+    """``GET /boxes`` honours the ``sort_by`` + ``sort_dir`` query
+    params and rejects unknown sort keys with a 422.
+
+    Default ordering (no params) keeps the historical ``updated_at
+    desc`` shape so anything still calling the endpoint without sort
+    params behaves exactly like before. The single-column allowlist
+    in ``parse_box_sort`` is the only thing the router trusts; a
+    typo or injection attempt 422s instead of leaking into ORDER BY.
+    """
+    # Three boxes, deliberately created in *reverse* lexicographic
+    # order so a default-ordered fetch (by ``updated_at desc``) gives
+    # us a different order than ``box_number asc`` would.
+    creates = [
+        {"box_number": "300", "lot": "Acme", "warehouse_id": 3},
+        {"box_number": "100", "lot": "Acme", "warehouse_id": 1},
+        {"box_number": "200", "lot": "Acme", "warehouse_id": 2},
+    ]
+    for payload in creates:
+        assert (
+            client.post("/api/boxes", json=payload).status_code == 201
+        )
+
+    # box_number asc
+    resp = client.get(
+        "/api/boxes", params={"sort_by": "box_number", "sort_dir": "asc"}
+    )
+    assert resp.status_code == 200, resp.text
+    numbers = [b["box_number"] for b in resp.json()["items"]]
+    assert numbers == ["100", "200", "300"]
+
+    # box_number desc reverses the order.
+    resp = client.get(
+        "/api/boxes", params={"sort_by": "box_number", "sort_dir": "desc"}
+    )
+    assert [b["box_number"] for b in resp.json()["items"]] == [
+        "300",
+        "200",
+        "100",
+    ]
+
+    # Sorting by warehouse uses the warehouse *name* (Building 1/2/3),
+    # which here lines up with the warehouse id but exercises the
+    # outer-join branch in ``apply_box_sort``.
+    resp = client.get(
+        "/api/boxes", params={"sort_by": "warehouse", "sort_dir": "asc"}
+    )
+    wids = [b["current_warehouse_id"] for b in resp.json()["items"]]
+    assert wids == [1, 2, 3]
+
+    # Unknown sort key -> 422 with a helpful detail listing the allowed
+    # fields. The OR'd allowlist makes the order stable for the test.
+    bad = client.get("/api/boxes", params={"sort_by": "banana"})
+    assert bad.status_code == 422
+    assert "sort_by" in bad.json()["detail"]
+
+    # No sort params -> historical default (``updated_at desc``). The
+    # most recently created box was ``200``, so it sits at the top.
+    default_resp = client.get("/api/boxes")
+    assert default_resp.status_code == 200
+    assert default_resp.json()["items"][0]["box_number"] == "200"
+
+
 def test_box_lot_contents_round_trip_and_required(client):
     # Round-trip: lot + optional contents are preserved on the resource and
     # surfaced via filters.

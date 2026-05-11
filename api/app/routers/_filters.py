@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
-from fastapi import Query
+from fastapi import HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import Select, or_
 
 from app.models.boxes import Box, BoxStatus
+from app.models.warehouses import Warehouse
 
 
 class BoxFilters(BaseModel):
@@ -20,6 +21,20 @@ class BoxFilters(BaseModel):
     received_to: datetime | None = None
     updated_from: datetime | None = None
     updated_to: datetime | None = None
+
+
+# Allowlist of user-facing sort keys. We translate these to concrete
+# SQLAlchemy columns in ``apply_box_sort`` rather than letting the
+# router pass column names directly, so unknown / unsafe values are
+# always rejected at the edge with a 422.
+SORTABLE_FIELDS: frozenset[str] = frozenset(
+    {"box_number", "lot", "status", "warehouse", "received_at", "updated_at"}
+)
+
+
+class BoxSort(BaseModel):
+    sort_by: str | None = None
+    sort_dir: Literal["asc", "desc"] = "desc"
 
 
 def parse_box_filters(
@@ -44,6 +59,28 @@ def parse_box_filters(
     )
 
 
+def parse_box_sort(
+    sort_by: Annotated[str | None, Query()] = None,
+    sort_dir: Annotated[Literal["asc", "desc"], Query()] = "desc",
+) -> BoxSort:
+    """Validate the sort query params before they reach the DB layer.
+
+    ``sort_by`` is checked against the allowlist; unknown values 422 so
+    a typo never leaks into an ``ORDER BY <user input>`` clause. When
+    ``sort_by`` is omitted the caller stays on the historical default
+    (``updated_at desc`` -- see :func:`apply_box_sort`) which keeps
+    pre-sort consumers behaving identically.
+    """
+    if sort_by is not None and sort_by not in SORTABLE_FIELDS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "sort_by must be one of " + ", ".join(sorted(SORTABLE_FIELDS))
+            ),
+        )
+    return BoxSort(sort_by=sort_by, sort_dir=sort_dir)
+
+
 def apply_box_filters(stmt: Select, filters: BoxFilters) -> Select:
     if filters.warehouse_id is not None:
         stmt = stmt.where(Box.current_warehouse_id == filters.warehouse_id)
@@ -63,3 +100,33 @@ def apply_box_filters(stmt: Select, filters: BoxFilters) -> Select:
     if filters.updated_to is not None:
         stmt = stmt.where(Box.updated_at <= filters.updated_to)
     return stmt
+
+
+def apply_box_sort(stmt: Select, sort: BoxSort) -> Select:
+    """Order the boxes list according to the validated ``BoxSort``.
+
+    A secondary ``Box.id desc`` tiebreaker is always appended so rows
+    sharing the primary sort key keep a stable position across pages
+    (e.g. when sorting by ``status`` the page boundary doesn't
+    shuffle within the same status group).
+
+    ``warehouse`` is the only key that requires a join: we ``outerjoin``
+    ``Warehouse`` so rows whose FK is somehow null (legacy data) still
+    land at the bottom of the listing instead of disappearing.
+    """
+    key = sort.sort_by or "updated_at"
+    if key == "warehouse":
+        stmt = stmt.outerjoin(
+            Warehouse, Warehouse.id == Box.current_warehouse_id
+        )
+        col = Warehouse.name
+    else:
+        col = {
+            "box_number": Box.box_number,
+            "lot": Box.lot,
+            "status": Box.status,
+            "received_at": Box.received_at,
+            "updated_at": Box.updated_at,
+        }[key]
+    ordered = col.asc() if sort.sort_dir == "asc" else col.desc()
+    return stmt.order_by(ordered, Box.id.desc())

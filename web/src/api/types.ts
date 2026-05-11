@@ -239,6 +239,17 @@ export interface DashboardSummary {
   total_open_alerts: number;
 }
 
+// Sortable column keys exposed by ``GET /boxes`` (mirrors
+// ``SORTABLE_FIELDS`` in ``api/app/routers/_filters.py``). The
+// ``BoxesPage`` clickable headers cycle through these.
+export type BoxSortField =
+  | "box_number"
+  | "lot"
+  | "status"
+  | "warehouse"
+  | "received_at"
+  | "updated_at";
+
 export interface BoxFilters {
   warehouse_id?: number;
   status?: BoxStatus;
@@ -248,6 +259,8 @@ export interface BoxFilters {
   received_to?: string;
   updated_from?: string;
   updated_to?: string;
+  sort_by?: BoxSortField;
+  sort_dir?: "asc" | "desc";
 }
 
 export interface BulkBoxUpdate {
