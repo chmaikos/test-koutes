@@ -28,7 +28,9 @@ export function ImportBoxesDialog({
           <code className="rounded bg-slate-100 px-1">contents</code>,{" "}
           <code className="rounded bg-slate-100 px-1">warehouse_id</code> or{" "}
           <code className="rounded bg-slate-100 px-1">warehouse</code>{" "}
-          (by name). Duplicate <code>box_number</code> values and rows missing{" "}
+          (by name). Box numbers must be numeric and are zero-padded to 3
+          digits (<code>1</code> → <code>001</code>). Duplicate{" "}
+          <code>(lot, box_number)</code> pairs and rows missing{" "}
           <code>lot</code> are reported as errors.
         </p>
 

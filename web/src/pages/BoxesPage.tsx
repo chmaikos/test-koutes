@@ -758,8 +758,16 @@ function CreateBoxModal({ onClose }: { onClose: () => void }) {
             }
             try {
               const trimmedContents = contents.trim();
+              const trimmedNumber = boxNumber.trim();
+              // Mirror the server-side rule: numeric only, zero-padded to
+              // a minimum of 3 digits. Server stays authoritative; this
+              // just keeps the optimistic UI in sync with what the API
+              // will ultimately persist.
+              const normalizedNumber = /^[0-9]+$/.test(trimmedNumber)
+                ? trimmedNumber.padStart(3, "0")
+                : trimmedNumber;
               await create.mutateAsync({
-                box_number: boxNumber.trim(),
+                box_number: normalizedNumber,
                 lot: lot.trim(),
                 contents: trimmedContents || undefined,
                 warehouse_id: Number(warehouseId),
@@ -774,10 +782,15 @@ function CreateBoxModal({ onClose }: { onClose: () => void }) {
           }}
         >
           <label className="block">
-            <span className="text-xs text-slate-500">Box number</span>
+            <span className="text-xs text-slate-500">
+              Box number (numeric, padded to 3 digits)
+            </span>
             <input
               required
+              inputMode="numeric"
+              pattern="[0-9]*"
               maxLength={64}
+              placeholder="e.g. 001"
               className="input"
               value={boxNumber}
               onChange={(e) => setBoxNumber(e.target.value)}

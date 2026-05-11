@@ -100,7 +100,7 @@ def test_recent_events_render_in_html_and_text():
     events = [
         {
             "event_type": "moved",
-            "box_number": "B-1",
+            "box_number": "001",
             "occurred_at": datetime(2026, 5, 9, 11, 0, tzinfo=UTC),
             "line": "Moved from Building 1 to Building 2",
         }
@@ -111,7 +111,7 @@ def test_recent_events_render_in_html_and_text():
         warehouse=_warehouse(),
         recent_events=events,
     )
-    assert "B-1" in e.html
+    assert "001" in e.html
     # The plain-text body lists the event lines verbatim.
     assert "Moved" in e.text
 

@@ -43,7 +43,7 @@ def _advance(client, box_id: int, *statuses: str) -> None:
 
 
 def test_bulk_move_happy_path(client):
-    ids = [_create_box(client, box_number=f"H-{i}") for i in range(3)]
+    ids = [_create_box(client, box_number=f"{i + 1:03d}") for i in range(3)]
     resp = client.post(
         "/api/boxes/bulk", json={"box_ids": ids, "warehouse_id": 2}
     )
@@ -55,9 +55,9 @@ def test_bulk_move_happy_path(client):
 
 
 def test_bulk_move_mixed_skips_returned(client):
-    keep_id = _create_box(client, box_number="MIX-1")
-    move_again_id = _create_box(client, box_number="MIX-2")
-    returned_id = _create_box(client, box_number="MIX-3")
+    keep_id = _create_box(client, box_number="001")
+    move_again_id = _create_box(client, box_number="002")
+    returned_id = _create_box(client, box_number="003")
     _advance(client, returned_id, "ready_to_return", "returned")
 
     resp = client.post(
@@ -71,14 +71,14 @@ def test_bulk_move_mixed_skips_returned(client):
     assert len(body["skipped"]) == 1
     skip = body["skipped"][0]
     assert skip["box_id"] == returned_id
-    assert skip["box_number"] == "MIX-3"
+    assert skip["box_number"] == "003"
     assert "returned" in skip["reason"].lower()
 
 
 def test_bulk_status_change_mixed(client):
-    a = _create_box(client, box_number="S-1")
-    b = _create_box(client, box_number="S-2")
-    done = _create_box(client, box_number="S-3")
+    a = _create_box(client, box_number="001")
+    b = _create_box(client, box_number="002")
+    done = _create_box(client, box_number="003")
     _advance(client, done, "ready_to_return", "returned")
 
     # Bulk-step the live boxes one position forward (received -> processing).
@@ -102,14 +102,14 @@ def test_bulk_rejects_empty_box_ids(client):
 
 
 def test_bulk_rejects_no_change_specified(client):
-    box_id = _create_box(client, box_number="NOOP-1")
+    box_id = _create_box(client, box_number="001")
     resp = client.post("/api/boxes/bulk", json={"box_ids": [box_id]})
     assert resp.status_code == 400
     assert "warehouse_id" in resp.json()["detail"]
 
 
 def test_bulk_skips_missing_ids(client):
-    real = _create_box(client, box_number="EXIST-1")
+    real = _create_box(client, box_number="001")
     resp = client.post(
         "/api/boxes/bulk",
         json={"box_ids": [real, 999_999], "warehouse_id": 2},
@@ -156,9 +156,9 @@ def test_import_happy_path(client):
     payload = _build_xlsx(
         [
             ["box_number", "lot", "contents", "warehouse_id"],
-            ["IMP-1", "Acme", "shoes", 1],
-            ["IMP-2", "Globex", None, 2],
-            ["IMP-3", "Initech", "spare parts", 3],
+            ["001", "Acme", "shoes", 1],
+            ["002", "Globex", None, 2],
+            ["003", "Initech", "spare parts", 3],
         ]
     )
     resp = _post_xlsx(client, payload)
@@ -167,17 +167,17 @@ def test_import_happy_path(client):
     assert len(body["created"]) == 3
     assert body["skipped"] == []
     by_number = {b["box_number"]: b for b in body["created"]}
-    assert by_number["IMP-1"]["lot"] == "Acme"
-    assert by_number["IMP-1"]["contents"] == "shoes"
-    assert by_number["IMP-2"]["contents"] is None
-    assert by_number["IMP-3"]["contents"] == "spare parts"
+    assert by_number["001"]["lot"] == "Acme"
+    assert by_number["001"]["contents"] == "shoes"
+    assert by_number["002"]["contents"] is None
+    assert by_number["003"]["contents"] == "spare parts"
 
 
 def test_import_resolves_warehouse_by_name(client):
     payload = _build_xlsx(
         [
             ["box_number", "lot", "warehouse"],
-            ["NAMED-1", "Acme", "Building 2"],
+            ["001", "Acme", "Building 2"],
         ]
     )
     resp = _post_xlsx(client, payload)
@@ -191,8 +191,8 @@ def test_import_uses_default_warehouse(client):
     payload = _build_xlsx(
         [
             ["box_number", "lot"],
-            ["DEF-1", "Acme"],
-            ["DEF-2", "Acme"],
+            ["001", "Acme"],
+            ["002", "Acme"],
         ]
     )
     resp = _post_xlsx(client, payload, warehouse_id=3)
@@ -203,14 +203,17 @@ def test_import_uses_default_warehouse(client):
 
 
 def test_import_duplicate_existing_box_is_skipped(client):
-    _create_box(client, box_number="DUP-1", warehouse_id=1)
+    # The seed box and the duplicate row share BOTH ``lot`` and
+    # ``box_number``; only that combination is a conflict now that
+    # uniqueness is scoped per-lot.
+    _create_box(client, box_number="010", lot="Acme", warehouse_id=1)
 
     payload = _build_xlsx(
         [
             ["box_number", "lot", "warehouse_id"],
-            ["NEW-1", "Acme", 1],
-            ["DUP-1", "Acme", 1],
-            ["NEW-2", "Acme", 1],
+            ["001", "Acme", 1],
+            ["010", "Acme", 1],
+            ["002", "Acme", 1],
         ]
     )
     resp = _post_xlsx(client, payload)
@@ -218,10 +221,10 @@ def test_import_duplicate_existing_box_is_skipped(client):
     body = resp.json()
     assert len(body["created"]) == 2
     created_numbers = {b["box_number"] for b in body["created"]}
-    assert created_numbers == {"NEW-1", "NEW-2"}
+    assert created_numbers == {"001", "002"}
     assert len(body["skipped"]) == 1
     skip = body["skipped"][0]
-    assert skip["box_number"] == "DUP-1"
+    assert skip["box_number"] == "010"
     assert skip["row"] == 3  # header + two rows above
     assert "exists" in skip["reason"].lower()
 
@@ -230,8 +233,8 @@ def test_import_duplicate_within_file_is_skipped(client):
     payload = _build_xlsx(
         [
             ["box_number", "lot", "warehouse_id"],
-            ["TWIN-1", "Acme", 1],
-            ["TWIN-1", "Acme", 1],
+            ["001", "Acme", 1],
+            ["001", "Acme", 1],
         ]
     )
     resp = _post_xlsx(client, payload)
@@ -239,16 +242,19 @@ def test_import_duplicate_within_file_is_skipped(client):
     body = resp.json()
     assert len(body["created"]) == 1
     assert len(body["skipped"]) == 1
-    assert "duplicate" in body["skipped"][0]["reason"].lower()
+    # The dedupe key is the ``(lot, box_number)`` pair now.
+    reason = body["skipped"][0]["reason"].lower()
+    assert "duplicate" in reason
+    assert "lot" in reason
 
 
 def test_import_missing_box_number_cell(client):
     payload = _build_xlsx(
         [
             ["box_number", "lot", "warehouse_id"],
-            ["KEEP-1", "Acme", 1],
+            ["001", "Acme", 1],
             [None, "Acme", 1],
-            ["KEEP-2", "Acme", 1],
+            ["002", "Acme", 1],
         ]
     )
     resp = _post_xlsx(client, payload)
@@ -278,7 +284,7 @@ def test_import_missing_lot_header_rejected(client):
     payload = _build_xlsx(
         [
             ["box_number", "warehouse_id"],
-            ["NOLOT-1", 1],
+            ["001", 1],
         ]
     )
     resp = _post_xlsx(client, payload)
@@ -290,17 +296,17 @@ def test_import_skips_row_with_blank_lot(client):
     payload = _build_xlsx(
         [
             ["box_number", "lot", "warehouse_id"],
-            ["BLOT-1", "Acme", 1],
-            ["BLOT-2", None, 1],
+            ["001", "Acme", 1],
+            ["002", None, 1],
         ]
     )
     resp = _post_xlsx(client, payload)
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert len(body["created"]) == 1
-    assert body["created"][0]["box_number"] == "BLOT-1"
+    assert body["created"][0]["box_number"] == "001"
     assert len(body["skipped"]) == 1
-    assert body["skipped"][0]["box_number"] == "BLOT-2"
+    assert body["skipped"][0]["box_number"] == "002"
     assert "lot" in body["skipped"][0]["reason"].lower()
 
 
@@ -308,15 +314,15 @@ def test_import_unknown_warehouse_name_skipped(client):
     payload = _build_xlsx(
         [
             ["box_number", "lot", "warehouse"],
-            ["WHN-1", "Acme", "Atlantis"],
-            ["WHN-2", "Acme", "Building 1"],
+            ["001", "Acme", "Atlantis"],
+            ["002", "Acme", "Building 1"],
         ]
     )
     resp = _post_xlsx(client, payload)
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert len(body["created"]) == 1
-    assert body["created"][0]["box_number"] == "WHN-2"
+    assert body["created"][0]["box_number"] == "002"
     assert len(body["skipped"]) == 1
     assert "atlantis" in body["skipped"][0]["reason"].lower()
 
@@ -325,7 +331,7 @@ def test_import_rejects_non_xlsx_filename(client):
     payload = _build_xlsx(
         [
             ["box_number", "lot", "warehouse_id"],
-            ["BAD-1", "Acme", 1],
+            ["001", "Acme", 1],
         ]
     )
     files = {
@@ -338,3 +344,118 @@ def test_import_rejects_non_xlsx_filename(client):
     resp = client.post("/api/boxes/import", files=files)
     assert resp.status_code == 400
     assert "xlsx" in resp.json()["detail"].lower()
+
+
+# ---------------------------------------------------------------------------
+# box_number rules (numeric-only, zero-padded to 3 digits, per-lot uniqueness)
+# ---------------------------------------------------------------------------
+
+
+def test_create_pads_box_number_to_three_digits(client):
+    """``"1"`` is canonicalised to ``"001"`` at the schema layer so the
+    persisted row always uses the padded form regardless of what the
+    operator typed in the form."""
+    resp = client.post(
+        "/api/boxes",
+        json={"box_number": "1", "lot": "Acme", "warehouse_id": 1},
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["box_number"] == "001"
+
+    bigger = client.post(
+        "/api/boxes",
+        json={"box_number": "42", "lot": "Acme", "warehouse_id": 1},
+    )
+    assert bigger.json()["box_number"] == "042"
+
+    # Already wider than 3 chars: passes through unchanged.
+    wide = client.post(
+        "/api/boxes",
+        json={"box_number": "1234", "lot": "Acme", "warehouse_id": 1},
+    )
+    assert wide.json()["box_number"] == "1234"
+
+
+def test_create_rejects_non_numeric_box_number(client):
+    """Non-digit characters in ``box_number`` are a 422 at the schema."""
+    resp = client.post(
+        "/api/boxes",
+        json={"box_number": "abc", "lot": "Acme", "warehouse_id": 1},
+    )
+    assert resp.status_code == 422
+
+    mixed = client.post(
+        "/api/boxes",
+        json={"box_number": "12X", "lot": "Acme", "warehouse_id": 1},
+    )
+    assert mixed.status_code == 422
+
+
+def test_same_box_number_allowed_across_lots(client):
+    """The uniqueness key is ``(lot, box_number)``; the same number in
+    a different lot is a brand-new box, not a conflict."""
+    first = client.post(
+        "/api/boxes",
+        json={"box_number": "001", "lot": "Acme", "warehouse_id": 1},
+    )
+    assert first.status_code == 201, first.text
+
+    second = client.post(
+        "/api/boxes",
+        json={"box_number": "001", "lot": "Globex", "warehouse_id": 1},
+    )
+    assert second.status_code == 201, second.text
+    assert second.json()["id"] != first.json()["id"]
+
+
+def test_duplicate_within_same_lot_is_a_conflict(client):
+    """Same ``(lot, box_number)`` pair still 409s."""
+    first = client.post(
+        "/api/boxes",
+        json={"box_number": "001", "lot": "Acme", "warehouse_id": 1},
+    )
+    assert first.status_code == 201, first.text
+
+    dup = client.post(
+        "/api/boxes",
+        json={"box_number": "001", "lot": "Acme", "warehouse_id": 1},
+    )
+    assert dup.status_code == 409
+    assert "Acme" in dup.json()["detail"]
+
+
+def test_import_pads_numeric_box_numbers(client):
+    """XLSX import shares the same canonicalisation as the API."""
+    payload = _build_xlsx(
+        [
+            ["box_number", "lot", "warehouse_id"],
+            [1, "Acme", 1],   # openpyxl returns this as float 1.0 -> "1"
+            ["42", "Acme", 1],
+        ]
+    )
+    resp = _post_xlsx(client, payload)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    numbers = {b["box_number"] for b in body["created"]}
+    assert numbers == {"001", "042"}
+
+
+def test_import_rejects_non_numeric_rows(client):
+    """Non-numeric ``box_number`` cells are surfaced per-row, not 422
+    on the whole upload."""
+    payload = _build_xlsx(
+        [
+            ["box_number", "lot", "warehouse_id"],
+            ["001", "Acme", 1],
+            ["abc", "Acme", 1],
+        ]
+    )
+    resp = _post_xlsx(client, payload)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert len(body["created"]) == 1
+    assert body["created"][0]["box_number"] == "001"
+    assert len(body["skipped"]) == 1
+    skip = body["skipped"][0]
+    assert skip["box_number"] == "abc"
+    assert "numeric" in skip["reason"].lower()

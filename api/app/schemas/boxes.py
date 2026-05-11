@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.models.boxes import BoxEventType, BoxStatus
+from app.services.boxes import BoxRuleError, normalize_box_number
 
 
 class BoxOut(BaseModel):
@@ -29,6 +30,18 @@ class BoxCreate(BaseModel):
     contents: str | None = Field(default=None, max_length=200)
     warehouse_id: int = Field(ge=1)
     note: str | None = Field(default=None, max_length=2000)
+
+    @field_validator("box_number")
+    @classmethod
+    def _normalize_box_number(cls, value: str) -> str:
+        # Single source of truth for the box-number rule lives in
+        # ``services.boxes.normalize_box_number``; here we just translate
+        # the domain error into Pydantic's value-error contract so the
+        # caller sees a 422 with a clear field-scoped message.
+        try:
+            return normalize_box_number(value)
+        except BoxRuleError as exc:
+            raise ValueError(str(exc)) from exc
 
 
 class BoxUpdate(BaseModel):

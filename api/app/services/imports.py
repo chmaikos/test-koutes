@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from app.models.boxes import Box
 from app.models.users import User
 from app.models.warehouses import Warehouse
-from app.services.boxes import BoxRuleError, create_box
+from app.services.boxes import BoxRuleError, create_box, normalize_box_number
 
 # Hard caps: we do this on the request thread so we want a worst-case bound.
 MAX_FILE_BYTES = 5 * 1024 * 1024
@@ -123,7 +123,9 @@ def import_boxes_xlsx(
         )
 
     outcome = ImportOutcome()
-    seen_numbers: set[str] = set()
+    # Box numbers are unique per ``lot`` (see ``services.boxes.create_box``),
+    # so the in-file dedupe key must be the pair, not the number alone.
+    seen_pairs: set[tuple[str, str]] = set()
 
     for offset, row in enumerate(rows_iter, start=2):  # row 1 was the header
         if offset - 1 > MAX_ROWS:
@@ -147,17 +149,29 @@ def import_boxes_xlsx(
                 return ""
             return _cell_str(cells[idx])
 
-        box_number = get("box_number")
+        raw_box_number = get("box_number")
         lot = get("lot")
         contents_raw = get("contents")
         contents = contents_raw or None
         wh_id_raw = get("warehouse_id")
         wh_name_raw = get("warehouse")
 
-        if not box_number:
+        if not raw_box_number:
             outcome.skipped.append(
                 ImportSkipEntry(
                     row=offset, box_number=None, reason="box_number is empty"
+                )
+            )
+            continue
+        # Apply the same canonical-form rule as the API: numeric only,
+        # zero-padded to 3 digits. Non-numeric rows are surfaced with the
+        # row index so the operator can fix the sheet.
+        try:
+            box_number = normalize_box_number(raw_box_number)
+        except BoxRuleError as exc:
+            outcome.skipped.append(
+                ImportSkipEntry(
+                    row=offset, box_number=raw_box_number, reason=str(exc)
                 )
             )
             continue
@@ -168,16 +182,19 @@ def import_boxes_xlsx(
                 )
             )
             continue
-        if box_number in seen_numbers:
+        pair = (lot, box_number)
+        if pair in seen_pairs:
             outcome.skipped.append(
                 ImportSkipEntry(
                     row=offset,
                     box_number=box_number,
-                    reason="duplicate box_number within the uploaded file",
+                    reason=(
+                        "duplicate (lot, box_number) within the uploaded file"
+                    ),
                 )
             )
             continue
-        seen_numbers.add(box_number)
+        seen_pairs.add(pair)
 
         warehouse_id: int | None = None
         if wh_id_raw:

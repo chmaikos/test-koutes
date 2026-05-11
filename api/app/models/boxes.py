@@ -10,6 +10,7 @@ from sqlalchemy import (
     Index,
     String,
     Text,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.orm import Mapped, mapped_column
@@ -53,12 +54,18 @@ class BoxEventType(str, enum.Enum):
 
 class Box(Base):
     __tablename__ = "boxes"
+    # ``box_number`` is unique only within a ``lot``: the same number can show
+    # up across different lots (a real-world warehouse routinely reuses
+    # numbers like 001..050 for every fresh lot). The composite constraint
+    # ``uq_boxes_lot_box_number`` enforces that at the database level so
+    # racing inserts can't slip a duplicate past the application check.
     __table_args__ = (
         Index("ix_boxes_status_warehouse", "status", "current_warehouse_id"),
+        UniqueConstraint("lot", "box_number", name="uq_boxes_lot_box_number"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    box_number: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    box_number: Mapped[str] = mapped_column(String(64), index=True)
     lot: Mapped[str] = mapped_column(String(64), nullable=False)
     contents: Mapped[str | None] = mapped_column(String(200))
     current_warehouse_id: Mapped[int] = mapped_column(

@@ -53,7 +53,7 @@ def _impersonate(role):
 
 
 def test_force_lets_admin_resurrect_returned_box(client):
-    box_id = _create_box(client, box_number="F-1")
+    box_id = _create_box(client, box_number="001")
     _advance(client, box_id, "ready_to_return", "returned")
 
     no_force = client.patch(
@@ -79,7 +79,7 @@ def test_force_lets_admin_resurrect_returned_box(client):
 
 
 def test_force_lets_admin_move_returned_box(client):
-    box_id = _create_box(client, box_number="F-2", warehouse_id=1)
+    box_id = _create_box(client, box_number="001", warehouse_id=1)
     _advance(client, box_id, "ready_to_return", "returned")
 
     rejected = client.patch(f"/api/boxes/{box_id}", json={"warehouse_id": 2})
@@ -95,7 +95,7 @@ def test_force_lets_admin_move_returned_box(client):
 def test_force_requires_admin(client, make_user):
     from app.models.users import UserRole
 
-    box_id = _create_box(client, box_number="F-3")
+    box_id = _create_box(client, box_number="001")
     _advance(client, box_id, "ready_to_return", "returned")
 
     operator = make_user(UserRole.operator)
@@ -116,7 +116,7 @@ def test_force_requires_admin(client, make_user):
 
 def test_force_default_false_still_enforces_rules(client):
     """Regression: omitting force keeps the original 400 behaviour."""
-    box_id = _create_box(client, box_number="F-4")
+    box_id = _create_box(client, box_number="001")
     _advance(client, box_id, "ready_to_return", "returned")
 
     resp = client.patch(f"/api/boxes/{box_id}", json={"status": "received"})
@@ -129,8 +129,8 @@ def test_force_default_false_still_enforces_rules(client):
 
 
 def test_bulk_force_overrides_returned(client):
-    active = _create_box(client, box_number="BF-1")
-    returned = _create_box(client, box_number="BF-2")
+    active = _create_box(client, box_number="001")
+    returned = _create_box(client, box_number="002")
     _advance(client, returned, "ready_to_return", "returned")
 
     without_force = client.post(
@@ -158,7 +158,7 @@ def test_bulk_force_overrides_returned(client):
 def test_bulk_force_requires_admin(client, make_user):
     from app.models.users import UserRole
 
-    box_id = _create_box(client, box_number="BF-3")
+    box_id = _create_box(client, box_number="001")
     operator = make_user(UserRole.operator)
     _impersonate(operator)
     try:
@@ -180,7 +180,7 @@ def test_bulk_force_requires_admin(client, make_user):
 
 
 def test_admin_can_delete_box_and_history_vanishes(client):
-    box_id = _create_box(client, box_number="D-1")
+    box_id = _create_box(client, box_number="001")
     _advance(client, box_id, "ready_to_return")
 
     resp = client.delete(f"/api/boxes/{box_id}")
@@ -198,7 +198,7 @@ def test_delete_missing_returns_404(client):
 def test_operator_cannot_delete(client, make_user):
     from app.models.users import UserRole
 
-    box_id = _create_box(client, box_number="D-2")
+    box_id = _create_box(client, box_number="001")
     operator = make_user(UserRole.operator)
     _impersonate(operator)
     try:
@@ -212,8 +212,8 @@ def test_operator_cannot_delete(client, make_user):
 
 
 def test_bulk_delete_with_missing_id(client):
-    a = _create_box(client, box_number="BD-1")
-    b = _create_box(client, box_number="BD-2")
+    a = _create_box(client, box_number="001")
+    b = _create_box(client, box_number="002")
 
     resp = client.post(
         "/api/boxes/bulk-delete",
@@ -233,7 +233,7 @@ def test_bulk_delete_with_missing_id(client):
 def test_bulk_delete_requires_admin(client, make_user):
     from app.models.users import UserRole
 
-    box_id = _create_box(client, box_number="BD-3")
+    box_id = _create_box(client, box_number="001")
     operator = make_user(UserRole.operator)
     _impersonate(operator)
     try:
@@ -249,7 +249,7 @@ def test_bulk_delete_requires_admin(client, make_user):
 
 
 def test_bulk_delete_dedupes_ids(client):
-    a = _create_box(client, box_number="DD-1")
+    a = _create_box(client, box_number="001")
     resp = client.post(
         "/api/boxes/bulk-delete", json={"box_ids": [a, a, a]}
     )

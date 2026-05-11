@@ -45,7 +45,29 @@ class BoxRuleError(Exception):
 
 
 class BoxConflictError(BoxRuleError):
-    """A unique-constraint violation (duplicate box_number)."""
+    """A uniqueness violation for ``(lot, box_number)``.
+
+    Box numbers are unique only within a lot; this is raised when an
+    operator tries to add the same number twice in the same lot. Same
+    number under a different lot is allowed and will not trigger this.
+    """
+
+
+def normalize_box_number(raw: str) -> str:
+    """Canonical form for box numbers: numeric, zero-padded to 3 digits.
+
+    Strips whitespace, requires the remaining string to be purely digits
+    and zero-pads to a minimum of 3 characters. Values already longer
+    than 3 digits (``"1234"``) round-trip unchanged. Empty or non-numeric
+    input raises ``BoxRuleError`` so callers (both the schema validator
+    and the XLSX import) get a single source of truth for the rule.
+    """
+    cleaned = raw.strip() if raw is not None else ""
+    if not cleaned:
+        raise BoxRuleError("box_number is required")
+    if not cleaned.isdigit():
+        raise BoxRuleError("box_number must be numeric")
+    return cleaned.zfill(3)
 
 
 class BoxAccessError(BoxRuleError):
@@ -74,9 +96,7 @@ def create_box(
         raise BoxAccessError(
             f"no access to warehouse {warehouse_id}"
         )
-    cleaned_number = box_number.strip()
-    if not cleaned_number:
-        raise BoxRuleError("box_number is required")
+    cleaned_number = normalize_box_number(box_number)
     cleaned_lot = lot.strip()
     if not cleaned_lot:
         raise BoxRuleError("lot is required")
@@ -86,9 +106,16 @@ def create_box(
         cleaned_contents = stripped or None
     from sqlalchemy import select
 
-    existing = db.scalar(select(Box).where(Box.box_number == cleaned_number))
+    existing = db.scalar(
+        select(Box).where(
+            Box.box_number == cleaned_number,
+            Box.lot == cleaned_lot,
+        )
+    )
     if existing is not None:
-        raise BoxConflictError(f"box {cleaned_number!r} already exists")
+        raise BoxConflictError(
+            f"box {cleaned_number!r} already exists in lot {cleaned_lot!r}"
+        )
     now = datetime.now(UTC)
     box = Box(
         box_number=cleaned_number,

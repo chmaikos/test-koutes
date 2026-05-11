@@ -89,7 +89,7 @@ def test_near_capacity_fires_between_threshold_and_max(session, monkeypatch):
     for i in range(8):  # 80% of 10 -> threshold = 8
         _box(
             session,
-            box_number=f"NC-{i}",
+            box_number=f"{i + 1:03d}",
             warehouse_id=1,
             status=BoxStatus.ready_to_return,
         )
@@ -121,7 +121,7 @@ def test_near_capacity_resolves_when_max_capacity_takes_over(
     for i in range(10):
         _box(
             session,
-            box_number=f"OC-{i}",
+            box_number=f"{i + 1:03d}",
             warehouse_id=1,
             status=BoxStatus.ready_to_return,
         )
@@ -153,7 +153,7 @@ def test_near_low_inventory_fires_within_buffer(session, monkeypatch):
     _set_warehouse(session, 1, mn=5, mx=100)
     # 6 boxes -> within buffer of min(5), but still above min.
     for i in range(6):
-        _box(session, box_number=f"NL-{i}", warehouse_id=1)
+        _box(session, box_number=f"{i + 1:03d}", warehouse_id=1)
 
     evaluate_alerts(session)
 
@@ -184,7 +184,7 @@ def test_near_low_inventory_resolves_when_dropping_below_min(
     _set_warehouse(session, 1, mn=5, mx=100)
     # 4 boxes -> below min -> hard low_inventory only.
     for i in range(4):
-        _box(session, box_number=f"NL2-{i}", warehouse_id=1)
+        _box(session, box_number=f"{i + 1:03d}", warehouse_id=1)
 
     evaluate_alerts(session)
 
@@ -215,13 +215,13 @@ def test_box_stuck_counts_received_boxes_past_window(session, monkeypatch):
     long_ago = datetime.now(UTC) - timedelta(days=45)
     recent = datetime.now(UTC) - timedelta(days=5)
 
-    _box(session, box_number="ST-1", warehouse_id=1, received_at=long_ago)
-    _box(session, box_number="ST-2", warehouse_id=1, received_at=long_ago)
-    _box(session, box_number="ST-3", warehouse_id=1, received_at=recent)
+    _box(session, box_number="001", warehouse_id=1, received_at=long_ago)
+    _box(session, box_number="002", warehouse_id=1, received_at=long_ago)
+    _box(session, box_number="003", warehouse_id=1, received_at=recent)
     # A processed-out box of the same age should NOT be counted as stuck.
     _box(
         session,
-        box_number="ST-4",
+        box_number="004",
         warehouse_id=1,
         status=BoxStatus.returned,
         received_at=long_ago,
@@ -245,7 +245,7 @@ def test_box_stuck_resolves_when_no_more_stuck_boxes(session, monkeypatch):
     long_ago = datetime.now(UTC) - timedelta(days=45)
     box = _box(
         session,
-        box_number="ST-A",
+        box_number="001",
         warehouse_id=1,
         received_at=long_ago,
     )
@@ -270,7 +270,7 @@ def test_box_stuck_disabled_when_threshold_is_zero(session, monkeypatch):
 
     _set_warehouse(session, 1, mn=0, mx=100)
     long_ago = datetime.now(UTC) - timedelta(days=365)
-    _box(session, box_number="ST-Z", warehouse_id=1, received_at=long_ago)
+    _box(session, box_number="001", warehouse_id=1, received_at=long_ago)
 
     evaluate_alerts(session)
 
