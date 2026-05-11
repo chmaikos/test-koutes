@@ -1,6 +1,6 @@
 """employees: add excluded_from_metrics on employees + productivity_entries; drop employees.email
 
-Revision ID: 0012_employee_metrics_exclusion_drop_email
+Revision ID: 0012_exclude_metrics_drop_email
 Revises: 0011_box_number_per_lot
 Create Date: 2026-05-11 23:25:00.000000
 
@@ -31,7 +31,7 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision = "0012_employee_metrics_exclusion_drop_email"
+revision = "0012_exclude_metrics_drop_email"
 down_revision = "0011_box_number_per_lot"
 branch_labels = None
 depends_on = None
