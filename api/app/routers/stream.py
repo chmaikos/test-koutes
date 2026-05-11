@@ -15,7 +15,8 @@ from typing import Annotated
 from fastapi import APIRouter, HTTPException, Query, Request
 from sse_starlette.sse import EventSourceResponse
 
-from app.deps import DbSession, resolve_user_from_token
+from app.db import SessionLocal
+from app.deps import resolve_user_from_token
 from app.events import bus
 from app.services.acl import allowed_warehouse_ids
 
@@ -54,24 +55,36 @@ def _payload_visible_to(payload: str, allowed: set[int] | None) -> bool:
 @router.get("/stream")
 async def stream(
     request: Request,
-    db: DbSession,
     access_token: Annotated[str | None, Query()] = None,
 ) -> EventSourceResponse:
     if not access_token:
         raise HTTPException(status_code=401, detail="missing access_token")
-    user = await resolve_user_from_token(db, access_token)
-    # Refuse the live stream while the bootstrapped admin still has to rotate
-    # credentials, mirroring `require_credentials_set` on the rest of the API.
-    if user.must_change_credentials:
-        raise HTTPException(
-            status_code=428, detail="credentials_must_change"
-        )
 
-    # Snapshot the caller's ACL once at connect time; admins get None
-    # (unrestricted), everyone else gets a (possibly empty) set of
-    # warehouse ids. Restricted users with no grants will simply receive
-    # no events besides the keepalive pings.
-    allowed = allowed_warehouse_ids(user)
+    # Open a short-lived session purely for auth + ACL snapshot. We must
+    # NOT take ``DbSession`` as a FastAPI dependency here: ``yield``-based
+    # dependencies are only torn down once the response is fully sent,
+    # and an SSE response stays open for the entire lifetime of the
+    # browser tab. Holding the connection that long quickly drains the
+    # pool (one slot per open tab) and starves every other handler. By
+    # closing the session before returning ``EventSourceResponse`` the
+    # stream costs zero DB connections while idle.
+    db = SessionLocal()
+    try:
+        user = await resolve_user_from_token(db, access_token)
+        # Refuse the live stream while the bootstrapped admin still has to
+        # rotate credentials, mirroring `require_credentials_set` on the
+        # rest of the API.
+        if user.must_change_credentials:
+            raise HTTPException(
+                status_code=428, detail="credentials_must_change"
+            )
+        # Snapshot the caller's ACL once at connect time; admins get None
+        # (unrestricted), everyone else gets a (possibly empty) set of
+        # warehouse ids. Restricted users with no grants will simply
+        # receive no events besides the keepalive pings.
+        allowed = allowed_warehouse_ids(user)
+    finally:
+        db.close()
 
     queue = await bus.subscribe()
 

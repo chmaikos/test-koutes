@@ -15,6 +15,17 @@ class Settings(BaseSettings):
         default="postgresql+psycopg://warehouse:warehouse@db:5432/warehouse",
         alias="DATABASE_URL",
     )
+    # SQLAlchemy connection-pool tuning. The defaults assume a single
+    # uvicorn worker with a handful of SSE subscribers + a couple of
+    # APScheduler jobs; bump these if you run multiple workers or see
+    # ``QueuePool limit ... reached`` in the logs. ``pool_recycle`` exists
+    # because long-idle connections eventually get dropped by Postgres /
+    # PgBouncer and we'd rather rotate them ourselves than have a request
+    # fail with a stale-socket error.
+    db_pool_size: int = Field(default=10, alias="DB_POOL_SIZE")
+    db_max_overflow: int = Field(default=20, alias="DB_MAX_OVERFLOW")
+    db_pool_timeout: int = Field(default=30, alias="DB_POOL_TIMEOUT")
+    db_pool_recycle: int = Field(default=1800, alias="DB_POOL_RECYCLE")
     api_log_level: str = Field(default="info", alias="API_LOG_LEVEL")
     api_cors_origins: str = Field(default="", alias="API_CORS_ORIGINS")
 
