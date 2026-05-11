@@ -154,14 +154,14 @@ export interface Performer {
   employee_name: string;
   pages: number;
   hours: number;
-  pages_per_hour: number;
+  pages_per_day: number;
 }
 
 export interface WarehouseProductivity {
   warehouse_id: number;
   total_pages: number;
   total_hours: number;
-  avg_pages_per_hour: number;
+  avg_pages_per_day: number;
   entry_count: number;
   active_employees: number;
   top: Performer[];
@@ -174,7 +174,7 @@ export interface ProductivitySummary {
   warehouses: WarehouseProductivity[];
   total_pages: number;
   total_hours: number;
-  avg_pages_per_hour: number;
+  avg_pages_per_day: number;
 }
 
 export interface Employee {
@@ -221,9 +221,9 @@ export interface WarehouseSummary {
   received_today: number;
   returned_today: number;
   // Boxes that left `processing` today (into incomplete or
-  // ready_to_return) and the corresponding per-hour rate.
+  // ready_to_return) and projected completions per full calendar day.
   completed_today: number;
-  completed_per_hour: number;
+  completed_per_day: number;
   counts_by_status: Record<BoxStatus, number>;
   open_alerts: number;
   productivity_today: WarehouseProductivity | null;

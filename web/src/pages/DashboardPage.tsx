@@ -124,8 +124,8 @@ function WarehouseCard({ summary }: { summary: WarehouseSummary }) {
           icon={<CheckCircle2 className="h-4 w-4 text-indigo-500" />}
         />
         <Stat
-          label="Boxes / hour"
-          value={summary.completed_per_hour.toFixed(2)}
+          label="Boxes / day"
+          value={summary.completed_per_day.toFixed(2)}
           icon={<Activity className="h-4 w-4 text-indigo-500" />}
         />
         <Stat
@@ -220,9 +220,9 @@ function ProductivitySection({ summary }: { summary: WarehouseSummary }) {
     return null;
   }
   const todayPages = today?.total_pages ?? 0;
-  const todayPph = today?.avg_pages_per_hour ?? 0;
+  const todayPpd = today?.avg_pages_per_day ?? 0;
   const weekPages = week?.total_pages ?? 0;
-  const weekPph = week?.avg_pages_per_hour ?? 0;
+  const weekPpd = week?.avg_pages_per_day ?? 0;
   const topToday = today?.top?.[0];
 
   return (
@@ -243,20 +243,20 @@ function ProductivitySection({ summary }: { summary: WarehouseSummary }) {
         <div>
           <dt className="text-xs text-slate-500">Today</dt>
           <dd className="mt-0.5 font-medium tabular-nums">
-            {todayPages} pages · {todayPph.toFixed(2)} p/h
+            {todayPages} pages · {todayPpd.toFixed(2)} p/day
           </dd>
         </div>
         <div>
           <dt className="text-xs text-slate-500">This week</dt>
           <dd className="mt-0.5 font-medium tabular-nums">
-            {weekPages} pages · {weekPph.toFixed(2)} p/h
+            {weekPages} pages · {weekPpd.toFixed(2)} p/day
           </dd>
         </div>
       </dl>
       {topToday ? (
         <div className="mt-2 text-xs text-slate-600">
           Top today: <span className="font-medium">{topToday.employee_name}</span>{" "}
-          ({topToday.pages_per_hour.toFixed(2)} p/h)
+          ({topToday.pages_per_day.toFixed(2)} p/day)
         </div>
       ) : (
         <div className="mt-2 text-xs text-slate-400">

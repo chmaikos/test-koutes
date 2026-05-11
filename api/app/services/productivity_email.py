@@ -59,7 +59,7 @@ def _summary_to_context(summary: WarehouseProductivity) -> dict:
     return {
         "total_pages": summary.total_pages,
         "total_hours": summary.total_hours,
-        "avg_pages_per_hour": summary.avg_pages_per_hour,
+        "avg_pages_per_day": summary.avg_pages_per_day,
         "entry_count": summary.entry_count,
         "active_employees": summary.active_employees,
         "top": [
@@ -68,7 +68,7 @@ def _summary_to_context(summary: WarehouseProductivity) -> dict:
                 "employee_name": p.employee_name,
                 "pages": p.pages,
                 "hours": p.hours,
-                "pages_per_hour": p.pages_per_hour,
+                "pages_per_day": p.pages_per_day,
             }
             for p in summary.top
         ],
@@ -78,7 +78,7 @@ def _summary_to_context(summary: WarehouseProductivity) -> dict:
                 "employee_name": p.employee_name,
                 "pages": p.pages,
                 "hours": p.hours,
-                "pages_per_hour": p.pages_per_hour,
+                "pages_per_day": p.pages_per_day,
             }
             for p in summary.bottom
         ],

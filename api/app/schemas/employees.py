@@ -64,14 +64,14 @@ class PerformerOut(BaseModel):
     employee_name: str
     pages: int
     hours: float
-    pages_per_hour: float
+    pages_per_day: float
 
 
 class WarehouseProductivityOut(BaseModel):
     warehouse_id: int
     total_pages: int
     total_hours: float
-    avg_pages_per_hour: float
+    avg_pages_per_day: float
     entry_count: int
     active_employees: int
     top: list[PerformerOut]
@@ -86,4 +86,4 @@ class ProductivitySummaryOut(BaseModel):
     warehouses: list[WarehouseProductivityOut]
     total_pages: int
     total_hours: float
-    avg_pages_per_hour: float
+    avg_pages_per_day: float

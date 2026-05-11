@@ -1,4 +1,4 @@
-"""Aggregation math: weighted pages-per-hour, top/bottom rankings, weekly window.
+"""Aggregation math: weighted pages-per-workday, top/bottom rankings, weekly window.
 
 These tests exercise the service-layer helpers directly; the HTTP layer
 just wraps them. Anchoring the date inputs to a fixed Wednesday makes
@@ -53,10 +53,10 @@ def test_week_bounds_snaps_to_monday():
     assert sunday == WEEK_SUNDAY
 
 
-def test_daily_summary_weighted_pages_per_hour(session, warehouse_with_employees):
+def test_daily_summary_weighted_pages_per_workday(session, warehouse_with_employees):
     alice, bob, _carol, _dave = warehouse_with_employees
-    # Alice: 100p / 1h = 100 p/h; Bob: 100p / 9h ~= 11.11 p/h.
-    # Mean of ratios would be ~55.5; weighted is 200 / 10 = 20.
+    # Alice: 100p / 1h = 800 p/day; Bob: 100p / 9h scaled to 8h workday ~= 88.89 p/day.
+    # Mean of ratios would differ; weighted is (200/10)*8 = 160 p/day.
     _add_entry(session, employee=alice, on=REF_DATE, pages=100, hours=1)
     _add_entry(session, employee=bob, on=REF_DATE, pages=100, hours=9)
     session.commit()
@@ -65,14 +65,13 @@ def test_daily_summary_weighted_pages_per_hour(session, warehouse_with_employees
     w1 = summary[1]
     assert w1.total_pages == 200
     assert w1.total_hours == 10.0
-    # Weighted pages-per-hour: sum(pages) / sum(hours) = 200/10 = 20.0.
-    assert w1.avg_pages_per_hour == 20.0
+    assert w1.avg_pages_per_day == 160.0
     assert w1.entry_count == 2
 
 
 def test_top_and_bottom_ordering(session, warehouse_with_employees):
     alice, bob, carol, _dave = warehouse_with_employees
-    # Pages-per-hour: Alice=100, Bob=10, Carol=50.
+    # Pages-per-workday: Alice=800, Bob=80, Carol=400 (same ordering as p/h * 8).
     _add_entry(session, employee=alice, on=REF_DATE, pages=100, hours=1)
     _add_entry(session, employee=bob, on=REF_DATE, pages=10, hours=1)
     _add_entry(session, employee=carol, on=REF_DATE, pages=50, hours=1)
@@ -82,16 +81,14 @@ def test_top_and_bottom_ordering(session, warehouse_with_employees):
     w1 = summary[1]
     top_names = [p.employee_name for p in w1.top]
     bottom_names = [p.employee_name for p in w1.bottom]
-    # Top: highest p/h first.
     assert top_names == ["Alice", "Carol", "Bob"]
-    # Bottom: worst (lowest p/h) first.
     assert bottom_names[0] == "Bob"
 
 
 def test_tie_break_prefers_more_pages_then_name(session, warehouse_with_employees):
     alice, bob, carol, _dave = warehouse_with_employees
-    # Same pages-per-hour (50). Carol has more pages so wins the tie.
-    # Alice and Bob are then tied on both p/h and pages -> alphabetic.
+    # Same pages-per-workday (400). Carol has more pages so wins the tie.
+    # Alice and Bob are then tied on both rate and pages -> alphabetic.
     _add_entry(session, employee=alice, on=REF_DATE, pages=50, hours=1)
     _add_entry(session, employee=bob, on=REF_DATE, pages=50, hours=1)
     _add_entry(session, employee=carol, on=REF_DATE, pages=100, hours=2)
@@ -115,9 +112,8 @@ def test_inactive_employees_excluded_from_rankings_but_count_in_totals(
 
     summary = daily_summary(session, on_date=REF_DATE)
     w1 = summary[1]
-    # Both entries contribute to totals.
     assert w1.total_pages == 220
-    # Bob is inactive so absent from rankings even though his p/h would top.
+    # Bob is inactive so absent from rankings even though his rate would top.
     top_names = [p.employee_name for p in w1.top]
     assert "Bob" not in top_names
     assert top_names == ["Alice"]
@@ -162,7 +158,7 @@ def test_weekly_summary_sums_all_days_in_week(
     w1 = weekly[1]
     assert w1.total_pages == 60
     assert w1.total_hours == 3.0
-    assert w1.avg_pages_per_hour == 20.0
+    assert w1.avg_pages_per_day == 160.0
 
 
 def test_active_employees_count_independent_of_entries(
@@ -189,4 +185,4 @@ def test_dashboard_summary_includes_productivity(client, session, warehouse_with
     w1 = next(w for w in body["warehouses"] if w["warehouse_id"] == 1)
     assert w1["productivity_today"] is not None
     assert w1["productivity_today"]["total_pages"] == 80
-    assert w1["productivity_today"]["avg_pages_per_hour"] == 20.0
+    assert w1["productivity_today"]["avg_pages_per_day"] == 160.0

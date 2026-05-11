@@ -34,11 +34,11 @@ class WarehouseSummary(BaseModel):
     # (into ``incomplete`` or ``ready_to_return``). Captures how many
     # open boxes were finished today -- "box completion".
     completed_today: int
-    # Rolling per-hour rate for today's completions; uses elapsed
-    # local-time hours in APP_TIMEZONE so it agrees with the
-    # productivity day boundary. Floored at 1 hour to avoid a
-    # divide-by-zero in the first minute of the day.
-    completed_per_hour: float
+    # Projected completions per full calendar day at today's pace:
+    # ``completed_today * 24 / elapsed_hours`` where ``elapsed_hours``
+    # is wall-clock time since local midnight in APP_TIMEZONE (floored
+    # at 1.0 so the first minute of the day never divides by zero).
+    completed_per_day: float
     counts_by_status: dict[BoxStatus, int]
     open_alerts: int
     productivity_today: WarehouseProductivityOut | None = None

@@ -166,8 +166,8 @@ function GrandTotalsCard({
         <Metric label="Pages" value={summary.total_pages.toString()} />
         <Metric label="Hours" value={summary.total_hours.toFixed(2)} />
         <Metric
-          label="Pages / hr"
-          value={summary.avg_pages_per_hour.toFixed(2)}
+          label="Pages / day"
+          value={summary.avg_pages_per_day.toFixed(2)}
         />
       </dl>
     </section>
@@ -232,8 +232,8 @@ function WarehouseProductivityCard({
         <Metric label="Pages" value={(summary?.total_pages ?? 0).toString()} />
         <Metric label="Hours" value={(summary?.total_hours ?? 0).toFixed(2)} />
         <Metric
-          label="Pages / hr"
-          value={(summary?.avg_pages_per_hour ?? 0).toFixed(2)}
+          label="Pages / day"
+          value={(summary?.avg_pages_per_day ?? 0).toFixed(2)}
         />
       </div>
 
@@ -294,7 +294,7 @@ function PerformersTable({
                 {p.pages} pages · {p.hours.toFixed(2)}h
               </td>
               <td className="py-1.5 text-right font-semibold tabular-nums">
-                {p.pages_per_hour.toFixed(2)}
+                {p.pages_per_day.toFixed(2)}
               </td>
             </tr>
           ))}

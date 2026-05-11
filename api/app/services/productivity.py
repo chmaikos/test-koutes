@@ -6,12 +6,15 @@ report all read from these helpers so the numbers can never disagree.
 
 Two concrete decisions worth remembering:
 
-* ``avg_pages_per_hour`` is computed as ``sum(pages) / sum(hours)`` over
-  the period rather than the mean of per-employee ratios. A picker who
-  logs ``50 pages / 0.5h`` shouldn't dilute the warehouse average down
-  to nothing alongside an 8-hour shift; weighting by hours makes the
-  ratio match the operator's intuition of "pages produced per hour
-  worked across the whole crew".
+* ``avg_pages_per_day`` is ``sum(pages) / sum(hours) * HOURS_PER_PRODUCTIVITY_DAY``
+  over the period (same weighting as the old hourly rate, scaled to an
+  8-hour workday). A picker who logs ``50 pages / 0.5h`` should not
+  dilute the warehouse average alongside an 8-hour shift; weighting by
+  hours keeps the ratio match the operator's intuition of "pages
+  produced per standard workday across the whole crew".
+* ``HOURS_PER_PRODUCTIVITY_DAY`` matches the default
+  ``Employee.default_hours_per_day`` (8): "per day" means per that many
+  logged work hours, not wall-clock calendar days.
 * Top/bottom rankings only consider entries that belong to currently
   active employees. Inactive (offboarded) staff still contribute to
   totals so historical numbers stay accurate, but their names are
@@ -32,6 +35,10 @@ from app.models.employees import Employee, ProductivityEntry
 from app.models.users import User
 from app.services.acl import allowed_warehouse_ids
 
+# Aligns with ``Employee.default_hours_per_day`` default (8). All
+# "pages per day" metrics scale logged hours to this standard day.
+HOURS_PER_PRODUCTIVITY_DAY = 8.0
+
 
 @dataclass(frozen=True)
 class Performer:
@@ -41,7 +48,7 @@ class Performer:
     employee_name: str
     pages: int
     hours: float
-    pages_per_hour: float
+    pages_per_day: float
 
 
 @dataclass(frozen=True)
@@ -51,7 +58,7 @@ class WarehouseProductivity:
     warehouse_id: int
     total_pages: int = 0
     total_hours: float = 0.0
-    avg_pages_per_hour: float = 0.0
+    avg_pages_per_day: float = 0.0
     entry_count: int = 0
     active_employees: int = 0
     top: list[Performer] = field(default_factory=list)
@@ -65,11 +72,11 @@ def _round_hours(value: Decimal | float | int | None) -> float:
     return round(float(value), 2)
 
 
-def _round_pph(pages: int, hours: float) -> float:
-    """Pages-per-hour, rounded to 2dp. 0 hours -> 0 to avoid div-by-zero."""
+def _round_ppd(pages: int, hours: float) -> float:
+    """Pages per standard workday, rounded to 2dp. 0 hours -> 0."""
     if hours <= 0:
         return 0.0
-    return round(pages / hours, 2)
+    return round((pages / hours) * HOURS_PER_PRODUCTIVITY_DAY, 2)
 
 
 def _scope_to_warehouses(
@@ -98,9 +105,9 @@ def _rank_performers(
     Inputs are tuples of ``(employee_id, name, is_active, pages, hours)``.
     Tie-breaks (intentional, deterministic):
 
-    * Ranking metric is pages/hour desc.
-    * Ties on pages/hour are broken by total pages desc -- a 50p/hr
-      shift that produced 400 pages outranks the same rate over 50.
+    * Ranking metric is pages/day desc (8h-scaled rate).
+    * Ties on pages/day are broken by total pages desc -- a high rate
+      over more pages outranks the same rate over fewer.
     * Final tie-break is name ascending so the order doesn't change
       when two employees happen to have identical numbers.
     """
@@ -112,23 +119,23 @@ def _rank_performers(
             continue
         if hours <= 0:
             continue
-        pph = _round_pph(int(pages), float(hours))
+        ppd = _round_ppd(int(pages), float(hours))
         ranked.append(
             Performer(
                 employee_id=int(employee_id),
                 employee_name=name,
                 pages=int(pages),
                 hours=_round_hours(hours),
-                pages_per_hour=pph,
+                pages_per_day=ppd,
             )
         )
     if not ranked:
         return [], []
     ranked.sort(
-        key=lambda p: (-p.pages_per_hour, -p.pages, p.employee_name.lower())
+        key=lambda p: (-p.pages_per_day, -p.pages, p.employee_name.lower())
     )
     top = ranked[:n]
-    # Bottom = lowest pages/hour first. Reuse the sort, slice from the
+    # Bottom = lowest pages/day first. Reuse the sort, slice from the
     # tail, then reverse so the *worst* performer is at index 0 (which is
     # what UIs and email reports tend to show).
     bottom_pool = ranked[-n:][::-1]
@@ -244,7 +251,7 @@ def _summary_for_range(
             warehouse_id=wid_int,
             total_pages=pages_int,
             total_hours=_round_hours(hours_float),
-            avg_pages_per_hour=_round_pph(pages_int, hours_float),
+            avg_pages_per_day=_round_ppd(pages_int, hours_float),
             entry_count=int(entry_count or 0),
             active_employees=active_rows.get(wid_int, 0),
             top=top,
@@ -316,6 +323,7 @@ def empty_summary(warehouse_id: int) -> WarehouseProductivity:
 
 
 __all__ = [
+    "HOURS_PER_PRODUCTIVITY_DAY",
     "Performer",
     "WarehouseProductivity",
     "daily_summary",

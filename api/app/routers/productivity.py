@@ -19,6 +19,7 @@ from app.schemas.employees import (
 )
 from app.services.acl import apply_warehouse_filter, can_access
 from app.services.productivity import (
+    HOURS_PER_PRODUCTIVITY_DAY,
     WarehouseProductivity,
     daily_summary,
     week_bounds,
@@ -51,7 +52,7 @@ def _to_performer_out(performer) -> PerformerOut:
         employee_name=performer.employee_name,
         pages=performer.pages,
         hours=performer.hours,
-        pages_per_hour=performer.pages_per_hour,
+        pages_per_day=performer.pages_per_day,
     )
 
 
@@ -60,7 +61,7 @@ def _to_warehouse_out(summary: WarehouseProductivity) -> WarehouseProductivityOu
         warehouse_id=summary.warehouse_id,
         total_pages=summary.total_pages,
         total_hours=summary.total_hours,
-        avg_pages_per_hour=summary.avg_pages_per_hour,
+        avg_pages_per_day=summary.avg_pages_per_day,
         entry_count=summary.entry_count,
         active_employees=summary.active_employees,
         top=[_to_performer_out(p) for p in summary.top],
@@ -83,14 +84,21 @@ def _wrap_summary(
     warehouses = sorted(summaries.values(), key=lambda s: s.warehouse_id)
     total_pages = sum(s.total_pages for s in warehouses)
     total_hours = round(sum(s.total_hours for s in warehouses), 2)
-    avg = round(total_pages / total_hours, 2) if total_hours > 0 else 0.0
+    avg = (
+        round(
+            (total_pages / total_hours) * HOURS_PER_PRODUCTIVITY_DAY,
+            2,
+        )
+        if total_hours > 0
+        else 0.0
+    )
     return ProductivitySummaryOut(
         period_start=period_start,
         period_end=period_end,
         warehouses=[_to_warehouse_out(s) for s in warehouses],
         total_pages=total_pages,
         total_hours=total_hours,
-        avg_pages_per_hour=avg,
+        avg_pages_per_day=avg,
     )
 
 

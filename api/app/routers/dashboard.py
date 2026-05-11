@@ -57,8 +57,8 @@ def _local_day_bounds_utc() -> tuple[datetime, datetime, float]:
     ``start`` / ``end`` are timezone-aware UTC instants so they can be
     compared directly against the timezone-aware ``occurred_at`` column.
     ``elapsed_hours`` is how far we are into the local day, floored at
-    1.0 so a divide-by-zero never sneaks into the per-hour rate at the
-    very start of the day.
+    1.0 so a divide-by-zero never sneaks into the projected per-day
+    completion rate at the very start of the day.
     """
     tz = _app_tz()
     local_now = datetime.now(tz)
@@ -77,7 +77,7 @@ def _to_productivity_out(
         warehouse_id=summary.warehouse_id,
         total_pages=summary.total_pages,
         total_hours=summary.total_hours,
-        avg_pages_per_hour=summary.avg_pages_per_hour,
+        avg_pages_per_day=summary.avg_pages_per_day,
         entry_count=summary.entry_count,
         active_employees=summary.active_employees,
         top=[
@@ -86,7 +86,7 @@ def _to_productivity_out(
                 employee_name=p.employee_name,
                 pages=p.pages,
                 hours=p.hours,
-                pages_per_hour=p.pages_per_hour,
+                pages_per_day=p.pages_per_day,
             )
             for p in summary.top
         ],
@@ -96,7 +96,7 @@ def _to_productivity_out(
                 employee_name=p.employee_name,
                 pages=p.pages,
                 hours=p.hours,
-                pages_per_hour=p.pages_per_hour,
+                pages_per_day=p.pages_per_day,
             )
             for p in summary.bottom
         ],
@@ -212,7 +212,7 @@ def summary(db: DbSession, user: CurrentUser) -> DashboardSummary:
         inventory = sum(full[s] for s in ACTIVE_STATUSES)
         ready_to_return = full[BoxStatus.ready_to_return]
         completed = completed_today.get(wh.id, 0)
-        per_hour = round(completed / elapsed_hours, 2)
+        per_day = round(completed * 24.0 / elapsed_hours, 2)
         total_active += inventory
         total_available += available
         total_unavailable += unavailable
@@ -234,7 +234,7 @@ def summary(db: DbSession, user: CurrentUser) -> DashboardSummary:
                 received_today=received_today.get(wh.id, 0),
                 returned_today=returned_today.get(wh.id, 0),
                 completed_today=completed,
-                completed_per_hour=per_hour,
+                completed_per_day=per_day,
                 counts_by_status=full,
                 open_alerts=opens,
                 productivity_today=(
