@@ -83,8 +83,16 @@ def test_near_capacity_fires_between_threshold_and_max(session, monkeypatch):
     get_settings.cache_clear()
 
     _set_warehouse(session, 1, mn=0, mx=10)
+    # Near-capacity now fires against the *unavailable* backlog
+    # (incomplete + ready_to_return). Seed boxes directly in
+    # ``ready_to_return`` so the trigger sees them as unavailable.
     for i in range(8):  # 80% of 10 -> threshold = 8
-        _box(session, box_number=f"NC-{i}", warehouse_id=1)
+        _box(
+            session,
+            box_number=f"NC-{i}",
+            warehouse_id=1,
+            status=BoxStatus.ready_to_return,
+        )
 
     evaluate_alerts(session)
 
@@ -111,7 +119,12 @@ def test_near_capacity_resolves_when_max_capacity_takes_over(
 
     _set_warehouse(session, 1, mn=0, mx=10)
     for i in range(10):
-        _box(session, box_number=f"OC-{i}", warehouse_id=1)
+        _box(
+            session,
+            box_number=f"OC-{i}",
+            warehouse_id=1,
+            status=BoxStatus.ready_to_return,
+        )
 
     evaluate_alerts(session)
 

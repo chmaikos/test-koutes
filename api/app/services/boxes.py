@@ -15,9 +15,21 @@ from app.models.users import User
 from app.models.warehouses import Warehouse
 from app.services.acl import can_access
 
-# Valid forward transitions; "returned" is terminal.
+# Valid forward transitions: a box walks the chain one step at a time. The
+# physical reality is:
+#   received        - closed, full, available for use
+#   processing      - open, being worked on, still has stuff
+#   incomplete      - open, empty of stuff, but pages from it are still
+#                     being processed elsewhere (data entry, QC, ...)
+#   ready_to_return - closed, packaged for pickup
+#   returned        - terminal, left the warehouse
+# Skip-ahead transitions are intentionally disallowed without ``force=true``
+# so we never lose intermediate audit rows. Admins still get the bypass via
+# the force flag enforced in the router.
 _ALLOWED_TRANSITIONS: dict[BoxStatus, set[BoxStatus]] = {
-    BoxStatus.received: {BoxStatus.ready_to_return},
+    BoxStatus.received: {BoxStatus.processing},
+    BoxStatus.processing: {BoxStatus.incomplete},
+    BoxStatus.incomplete: {BoxStatus.ready_to_return},
     BoxStatus.ready_to_return: {BoxStatus.returned},
     BoxStatus.returned: set(),
 }

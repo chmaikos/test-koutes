@@ -15,10 +15,26 @@ def _create_box(client, *, box_number: str, warehouse_id: int = 1, lot: str = "x
     return resp.json()["id"]
 
 
+# Canonical forward chain; the helper walks intermediate states so tests
+# only have to declare the milestones they care about.
+_FORWARD_CHAIN = (
+    "received",
+    "processing",
+    "incomplete",
+    "ready_to_return",
+    "returned",
+)
+
+
 def _advance(client, box_id: int, *statuses: str) -> None:
-    for s in statuses:
-        resp = client.patch(f"/api/boxes/{box_id}", json={"status": s})
-        assert resp.status_code == 200, resp.text
+    """Walk a box forward through each requested status milestone."""
+    for target in statuses:
+        current = client.get(f"/api/boxes/{box_id}").json()["status"]
+        start = _FORWARD_CHAIN.index(current)
+        end = _FORWARD_CHAIN.index(target)
+        for step in _FORWARD_CHAIN[start + 1 : end + 1]:
+            resp = client.patch(f"/api/boxes/{box_id}", json={"status": step})
+            assert resp.status_code == 200, resp.text
 
 
 # ---------------------------------------------------------------------------
@@ -65,9 +81,12 @@ def test_bulk_status_change_mixed(client):
     done = _create_box(client, box_number="S-3")
     _advance(client, done, "ready_to_return", "returned")
 
+    # Bulk-step the live boxes one position forward (received -> processing).
+    # The third box is already ``returned`` and must be skipped because that
+    # is a terminal state without ``force``.
     resp = client.post(
         "/api/boxes/bulk",
-        json={"box_ids": [a, b, done], "status": "ready_to_return"},
+        json={"box_ids": [a, b, done], "status": "processing"},
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()

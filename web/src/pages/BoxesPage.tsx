@@ -36,8 +36,14 @@ import { useHasRole } from "@/components/RoleGate";
 
 const PAGE_SIZE = 25;
 
+// Mirrors the API's linear transition map. We expose only the *next*
+// step in the chain so the inline "Move to..." picker is unambiguous;
+// admins who need to leapfrog still have the bulk action bar's
+// "Override rules" affordance plus the box detail page.
 const NEXT_STATUS: Record<BoxStatus, BoxStatus[]> = {
-  received: ["ready_to_return"],
+  received: ["processing"],
+  processing: ["incomplete"],
+  incomplete: ["ready_to_return"],
   ready_to_return: ["returned"],
   returned: [],
 };

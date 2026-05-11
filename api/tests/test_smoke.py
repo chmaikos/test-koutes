@@ -1,8 +1,9 @@
 """End-to-end smoke test through the HTTP layer.
 
-Walks the full happy path: receive -> ready_to_return -> returned, plus
-exports, dashboard, alerts, and warehouse threshold updates. SQLite is the
-substrate so this runs anywhere without Docker or Postgres.
+Walks the full happy path: received -> processing -> incomplete ->
+ready_to_return -> returned, plus exports, dashboard, alerts, and
+warehouse threshold updates. SQLite is the substrate so this runs
+anywhere without Docker or Postgres.
 """
 from __future__ import annotations
 
@@ -39,10 +40,17 @@ def test_full_box_lifecycle_and_dashboard(client):
     )
     assert dup.status_code == 409
 
+    # Skip-ahead transitions are rejected without ``force``. A box in
+    # ``received`` cannot jump directly to ``returned``.
     bad = client.patch(f"/api/boxes/{box_id}", json={"status": "returned"})
     assert bad.status_code == 400
 
-    for transition in ("ready_to_return", "returned"):
+    for transition in (
+        "processing",
+        "incomplete",
+        "ready_to_return",
+        "returned",
+    ):
         resp = client.patch(f"/api/boxes/{box_id}", json={"status": transition})
         assert resp.status_code == 200, resp.text
         assert resp.json()["status"] == transition
@@ -51,7 +59,8 @@ def test_full_box_lifecycle_and_dashboard(client):
     assert detail["returned_at"] is not None
 
     events = client.get(f"/api/boxes/{box_id}/events").json()
-    assert len(events) >= 3
+    # 1 created + 4 status transitions = 5 events minimum.
+    assert len(events) >= 5
     types = [ev["event_type"] for ev in events]
     assert "created" in types
     assert "returned" in types
@@ -61,6 +70,11 @@ def test_full_box_lifecycle_and_dashboard(client):
     assert wh1["received_today"] == 1
     assert wh1["returned_today"] == 1
     assert wh1["counts_by_status"]["returned"] == 1
+    # The full walk produced exactly one box-completion event today
+    # (the processing -> incomplete transition).
+    assert wh1["completed_today"] == 1
+    assert wh1["available_boxes"] == 0
+    assert wh1["unavailable_boxes"] == 0
 
 
 def test_filters_search_and_exports(client):
@@ -185,7 +199,9 @@ def test_xlsx_export_with_timezone_aware_timestamps():
 
 
 def test_alerts_max_capacity(client, session):
+    from app.models.boxes import Box, BoxStatus
     from app.models.warehouses import Warehouse
+    from app.services.alerts import evaluate_alerts
 
     wh = session.get(Warehouse, 3)
     wh.max_capacity = 2
@@ -199,6 +215,20 @@ def test_alerts_max_capacity(client, session):
             ).status_code
             == 201
         )
+
+    # ``max_capacity`` now reflects the *unavailable* backlog
+    # (``incomplete`` + ``ready_to_return``). New boxes default to
+    # ``received`` which is *available*, so we walk them into the
+    # unavailable bucket directly in the DB -- the chain-of-PATCH path
+    # is exercised in ``test_full_box_lifecycle_and_dashboard``.
+    from sqlalchemy import select
+
+    for box in session.scalars(
+        select(Box).where(Box.current_warehouse_id == 3)
+    ).all():
+        box.status = BoxStatus.ready_to_return
+    session.commit()
+    evaluate_alerts(session)
 
     resp = client.get("/api/alerts")
     assert resp.status_code == 200
@@ -297,6 +327,49 @@ def test_create_warehouse_requires_admin(client, make_user):
         assert resp.status_code == 403
     finally:
         app.dependency_overrides.pop(get_current_user, None)
+
+
+def test_linear_box_status_chain_rejects_skip_ahead(client):
+    """The status enum is a strict chain:
+
+        received -> processing -> incomplete -> ready_to_return -> returned
+
+    Every non-adjacent transition without ``force`` must 400 so we never
+    end up with a box that, e.g., is ``ready_to_return`` while pages
+    from it are still being processed (i.e. the ``incomplete`` step was
+    skipped). This is the single test that pins the whole machine; the
+    happy-path walk in ``test_full_box_lifecycle_and_dashboard`` covers
+    the legal transitions in line, this one enumerates the illegal
+    pairs.
+    """
+    chain = (
+        "received",
+        "processing",
+        "incomplete",
+        "ready_to_return",
+        "returned",
+    )
+
+    resp = client.post(
+        "/api/boxes",
+        json={"box_number": "CHAIN-1", "lot": "Acme", "warehouse_id": 1},
+    )
+    assert resp.status_code == 201, resp.text
+    box_id = resp.json()["id"]
+
+    # Every "jump more than one step" from ``received`` must be rejected.
+    for target in chain[2:]:
+        bad = client.patch(f"/api/boxes/{box_id}", json={"status": target})
+        assert bad.status_code == 400, f"jump received->{target} must 400"
+
+    # Walk the chain end-to-end one step at a time; each step succeeds
+    # and lands the box on the expected state.
+    for current, nxt in zip(chain, chain[1:]):
+        resp = client.patch(
+            f"/api/boxes/{box_id}", json={"status": nxt}
+        )
+        assert resp.status_code == 200, f"step {current}->{nxt}: {resp.text}"
+        assert resp.json()["status"] == nxt
 
 
 def test_role_gating_operator_cannot_manage_users(client, session, make_user):

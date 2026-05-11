@@ -27,7 +27,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, case, func, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -38,7 +38,12 @@ from app.models.alerts import (
     AlertNotificationKind,
     AlertType,
 )
-from app.models.boxes import ACTIVE_STATUSES, Box, BoxStatus
+from app.models.boxes import (
+    AVAILABLE_STATUSES,
+    UNAVAILABLE_STATUSES,
+    Box,
+    BoxStatus,
+)
 from app.models.warehouses import Warehouse
 from app.services.alert_email import EmailKind, render_for_alert
 from app.services.alert_recipients import (
@@ -57,21 +62,60 @@ logger = logging.getLogger("warehouse.alerts")
 
 @dataclass
 class _Eval:
+    """One warehouse's per-status accounting used by every alert trigger.
+
+    Splitting into ``available`` / ``unavailable`` matters because the
+    business rules diverge: low_inventory / near_low_inventory ask
+    "do we have enough boxes ready to be used" (available), while
+    max_capacity / near_capacity ask "are we accumulating too many
+    occupied-but-not-usable boxes" (unavailable). The dashboard
+    surfaces the same two numbers so operators and the alert engine
+    can never disagree about the state of a warehouse.
+    """
+
     warehouse: Warehouse
-    inventory: int
+    available: int
+    unavailable: int
+
+    @property
+    def inventory(self) -> int:
+        """Total in-warehouse boxes (everything but ``returned``)."""
+        return self.available + self.unavailable
 
 
 def _inventory_per_warehouse(db: Session) -> list[_Eval]:
+    """Return one ``_Eval`` per warehouse with the available/unavailable
+    split materialised in a single query. Warehouses with no boxes still
+    appear (zeroed) so per-warehouse alerts (e.g. low_inventory on an
+    empty warehouse) can fire from a cold start."""
+
+    available_case = func.sum(
+        case(
+            (Box.status.in_(AVAILABLE_STATUSES), 1),
+            else_=0,
+        )
+    )
+    unavailable_case = func.sum(
+        case(
+            (Box.status.in_(UNAVAILABLE_STATUSES), 1),
+            else_=0,
+        )
+    )
     rows = db.execute(
-        select(Warehouse, func.count(Box.id))
+        select(Warehouse, available_case, unavailable_case)
         .join(Box, Box.current_warehouse_id == Warehouse.id, isouter=True)
-        .where((Box.status.in_(ACTIVE_STATUSES)) | (Box.id.is_(None)))
         .group_by(Warehouse.id)
         .order_by(Warehouse.id)
     ).all()
     out: list[_Eval] = []
-    for warehouse, count in rows:
-        out.append(_Eval(warehouse=warehouse, inventory=int(count or 0)))
+    for warehouse, available, unavailable in rows:
+        out.append(
+            _Eval(
+                warehouse=warehouse,
+                available=int(available or 0),
+                unavailable=int(unavailable or 0),
+            )
+        )
     return out
 
 
@@ -102,7 +146,10 @@ def _stuck_boxes_per_warehouse(
     A box counts as stuck if its ``received_at`` is older than
     ``older_than`` (or if it has no ``received_at`` but was created before
     that, as a defensive fallback for legacy rows). Boxes that have moved
-    past ``received`` are skipped regardless of how long they've been there.
+    past ``received`` (into ``processing`` / ``incomplete`` / ...) are
+    skipped regardless of how long they've been there -- ageing inside
+    the open-box pipeline is intentionally out of scope for this alert
+    and would need its own threshold to be meaningful.
     """
     rows = db.execute(
         select(Box.current_warehouse_id, func.count(Box.id))
@@ -189,26 +236,35 @@ def evaluate_alerts(db: Session) -> list[Alert]:
     for ev in _inventory_per_warehouse(db):
         wh = ev.warehouse
 
-        low = ev.inventory < wh.min_inventory
+        # Low / near-low fire on the *available* supply -- the operator
+        # cares whether there are enough usable boxes to pull from, not
+        # how many are awaiting pickup. ``value`` stores the metric that
+        # actually triggered so the email templates (which read it as the
+        # current count) keep displaying the right number.
+        low = ev.available < wh.min_inventory
         _reconcile_alert(
             db,
             warehouse_id=wh.id,
             alert_type=AlertType.low_inventory,
             triggered_now=low,
-            value=ev.inventory,
+            value=ev.available,
             threshold=wh.min_inventory,
             now=now,
             triggered_out=triggered,
             resolved_out=resolved,
         )
 
-        over = ev.inventory >= wh.max_capacity
+        # Capacity / near-capacity fire on the *unavailable* backlog --
+        # closed-and-done plus emptied-but-not-cleared. That's the
+        # backlog actively eating warehouse space waiting for pickup or
+        # downstream processing.
+        over = ev.unavailable >= wh.max_capacity
         _reconcile_alert(
             db,
             warehouse_id=wh.id,
             alert_type=AlertType.max_capacity,
             triggered_now=over,
-            value=ev.inventory,
+            value=ev.unavailable,
             threshold=wh.max_capacity,
             now=now,
             triggered_out=triggered,
@@ -225,15 +281,15 @@ def evaluate_alerts(db: Session) -> list[Alert]:
                 1, int(math.ceil(wh.max_capacity * pct / 100))
             )
             near_cap = (
-                ev.inventory >= near_threshold
-                and ev.inventory < wh.max_capacity
+                ev.unavailable >= near_threshold
+                and ev.unavailable < wh.max_capacity
             )
             _reconcile_alert(
                 db,
                 warehouse_id=wh.id,
                 alert_type=AlertType.near_capacity,
                 triggered_now=near_cap,
-                value=ev.inventory,
+                value=ev.unavailable,
                 threshold=near_threshold,
                 now=now,
                 triggered_out=triggered,
@@ -241,23 +297,23 @@ def evaluate_alerts(db: Session) -> list[Alert]:
             )
 
         # --- near low inventory (heads-up) ---------------------------------
-        # Fires when inventory is within ``buffer`` of the minimum but
-        # still above it; once we drop below min the low_inventory alert
-        # takes over. We use min_inventory itself as the stored threshold
-        # so the email body can talk in concrete numbers.
+        # Fires when available supply is within ``buffer`` of the minimum
+        # but still above it; once we drop below min the low_inventory
+        # alert takes over. We use min_inventory itself as the stored
+        # threshold so the email body can talk in concrete numbers.
         buffer_n = settings.near_low_inventory_buffer
         if buffer_n > 0 and wh.min_inventory > 0:
             warning_floor = wh.min_inventory + buffer_n
             near_low = (
-                ev.inventory >= wh.min_inventory
-                and ev.inventory <= warning_floor
+                ev.available >= wh.min_inventory
+                and ev.available <= warning_floor
             )
             _reconcile_alert(
                 db,
                 warehouse_id=wh.id,
                 alert_type=AlertType.near_low_inventory,
                 triggered_now=near_low,
-                value=ev.inventory,
+                value=ev.available,
                 threshold=wh.min_inventory,
                 now=now,
                 triggered_out=triggered,

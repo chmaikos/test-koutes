@@ -19,14 +19,29 @@ from app.db import Base
 
 class BoxStatus(str, enum.Enum):
     received = "received"
+    processing = "processing"
+    incomplete = "incomplete"
     ready_to_return = "ready_to_return"
     returned = "returned"
 
 
-ACTIVE_STATUSES: tuple[BoxStatus, ...] = (
+# Functional groupings. ``available`` covers boxes that still have stuff to
+# work with (closed = ``received``, open = ``processing``); ``unavailable``
+# covers boxes that no longer have stuff but still occupy the warehouse
+# (open-but-empty = ``incomplete``, closed-and-done = ``ready_to_return``).
+# These two tuples are the basis of the dashboard's "available vs min" /
+# "unavailable vs max" cards and of the alert thresholds; keeping them in
+# the model means every downstream caller (alerts, dashboard, exports) gets
+# the same answer for "is this box currently inventory?".
+AVAILABLE_STATUSES: tuple[BoxStatus, ...] = (
     BoxStatus.received,
+    BoxStatus.processing,
+)
+UNAVAILABLE_STATUSES: tuple[BoxStatus, ...] = (
+    BoxStatus.incomplete,
     BoxStatus.ready_to_return,
 )
+ACTIVE_STATUSES: tuple[BoxStatus, ...] = AVAILABLE_STATUSES + UNAVAILABLE_STATUSES
 
 
 class BoxEventType(str, enum.Enum):
@@ -108,4 +123,12 @@ class BoxEvent(Base):
 
 
 # helper imported by routers/services
-__all__ = ["Box", "BoxEvent", "BoxEventType", "BoxStatus", "ACTIVE_STATUSES"]
+__all__ = [
+    "Box",
+    "BoxEvent",
+    "BoxEventType",
+    "BoxStatus",
+    "ACTIVE_STATUSES",
+    "AVAILABLE_STATUSES",
+    "UNAVAILABLE_STATUSES",
+]

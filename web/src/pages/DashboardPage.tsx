@@ -3,8 +3,8 @@ import {
   Activity,
   AlertTriangle,
   Boxes as BoxesIcon,
-  TrendingDown,
-  TrendingUp,
+  CheckCircle2,
+  PackageCheck,
 } from "lucide-react";
 import { useDashboard } from "@/api/hooks";
 import type { WarehouseSummary } from "@/api/types";
@@ -18,16 +18,25 @@ export function DashboardPage() {
 
   return (
     <div className="space-y-6">
-      <header className="flex items-end justify-between">
+      <header className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Dashboard</h1>
           <p className="text-sm text-slate-500">
-            Live state across all 3 warehouses.
+            Live state across all {data.warehouses.length} warehouses.
           </p>
         </div>
-        <div className="flex gap-3 text-sm text-slate-500">
+        <div className="flex flex-wrap gap-3 text-sm text-slate-500">
           <span className="inline-flex items-center gap-1">
-            <BoxesIcon className="h-4 w-4" /> {data.total_active_boxes} active
+            <BoxesIcon className="h-4 w-4 text-brand-600" />{" "}
+            {data.total_available_boxes} available
+          </span>
+          <span className="inline-flex items-center gap-1">
+            <PackageCheck className="h-4 w-4 text-emerald-600" />{" "}
+            {data.total_unavailable_boxes} unavailable
+          </span>
+          <span className="inline-flex items-center gap-1">
+            <CheckCircle2 className="h-4 w-4 text-indigo-500" />{" "}
+            {data.total_completed_today} completed today
           </span>
           <span className="inline-flex items-center gap-1">
             <AlertTriangle className="h-4 w-4 text-amber-500" />{" "}
@@ -46,12 +55,26 @@ export function DashboardPage() {
 }
 
 function WarehouseCard({ summary }: { summary: WarehouseSummary }) {
-  const pct = Math.min(
+  // Two independent bars: available compared to the minimum
+  // (low = danger when we drop below) and unavailable compared to the
+  // maximum (high = danger when we accumulate too much backlog).
+  const lowAvailable = summary.available_boxes < summary.min_inventory;
+  const highUnavailable =
+    summary.unavailable_boxes >= summary.max_capacity;
+  // We want the "available" bar to read full when supply comfortably
+  // exceeds the minimum, so divide by max(min, available). Once supply
+  // drops below the minimum the bar visibly shrinks proportionally.
+  const availableScale = Math.max(summary.min_inventory, summary.available_boxes, 1);
+  const availablePct = Math.min(
     100,
-    Math.round((summary.inventory / Math.max(1, summary.max_capacity)) * 100),
+    Math.round((summary.available_boxes / availableScale) * 100),
   );
-  const danger = summary.inventory >= summary.max_capacity;
-  const low = summary.inventory < summary.min_inventory;
+  const unavailablePct = Math.min(
+    100,
+    Math.round(
+      (summary.unavailable_boxes / Math.max(1, summary.max_capacity)) * 100,
+    ),
+  );
 
   return (
     <Link
@@ -65,45 +88,54 @@ function WarehouseCard({ summary }: { summary: WarehouseSummary }) {
           </div>
           <div className="text-lg font-semibold">{summary.name}</div>
         </div>
-        <div className="text-right">
-          <div className="text-2xl font-semibold">{summary.inventory}</div>
-          <div className="text-xs text-slate-500">
-            of {summary.max_capacity} capacity
+        <div className="text-right text-xs text-slate-500">
+          <div>
+            min <span className="font-medium text-slate-700">{summary.min_inventory}</span>
+          </div>
+          <div>
+            max <span className="font-medium text-slate-700">{summary.max_capacity}</span>
           </div>
         </div>
       </div>
 
-      <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-slate-100">
-        <div
-          className={
-            danger
-              ? "h-full bg-rose-500"
-              : low
-                ? "h-full bg-amber-400"
-                : "h-full bg-brand-500"
-          }
-          style={{ width: `${pct}%` }}
-        />
-      </div>
+      <BarMetric
+        label="Available"
+        hint="vs. min inventory"
+        value={summary.available_boxes}
+        anchor={summary.min_inventory}
+        anchorLabel="min"
+        pct={availablePct}
+        tone={lowAvailable ? "danger" : "ok"}
+      />
+      <BarMetric
+        label="Unavailable"
+        hint="vs. max capacity"
+        value={summary.unavailable_boxes}
+        anchor={summary.max_capacity}
+        anchorLabel="max"
+        pct={unavailablePct}
+        tone={highUnavailable ? "danger" : "warn"}
+      />
 
       <dl className="mt-4 grid grid-cols-2 gap-2 text-sm">
         <Stat
+          label="Completed today"
+          value={summary.completed_today}
+          icon={<CheckCircle2 className="h-4 w-4 text-indigo-500" />}
+        />
+        <Stat
+          label="Boxes / hour"
+          value={summary.completed_per_hour.toFixed(2)}
+          icon={<Activity className="h-4 w-4 text-indigo-500" />}
+        />
+        <Stat
+          label="Packaged for return"
+          value={summary.ready_to_return_boxes}
+          icon={<PackageCheck className="h-4 w-4 text-emerald-500" />}
+        />
+        <Stat
           label="Received today"
           value={summary.received_today}
-          icon={<TrendingUp className="h-4 w-4 text-emerald-500" />}
-        />
-        <Stat
-          label="Returned today"
-          value={summary.returned_today}
-          icon={<TrendingDown className="h-4 w-4 text-sky-500" />}
-        />
-        <Stat
-          label="Received"
-          value={summary.counts_by_status.received ?? 0}
-        />
-        <Stat
-          label="Ready to return"
-          value={summary.counts_by_status.ready_to_return ?? 0}
         />
       </dl>
 
@@ -116,6 +148,60 @@ function WarehouseCard({ summary }: { summary: WarehouseSummary }) {
         </div>
       )}
     </Link>
+  );
+}
+
+/**
+ * Single metric line with a progress bar. Used by the dashboard for the
+ * available-vs-min and unavailable-vs-max gauges so both bars share the
+ * same DOM shape and only their colour/labels change.
+ */
+function BarMetric({
+  label,
+  hint,
+  value,
+  anchor,
+  anchorLabel,
+  pct,
+  tone,
+}: {
+  label: string;
+  hint: string;
+  value: number;
+  anchor: number;
+  anchorLabel: string;
+  pct: number;
+  tone: "ok" | "warn" | "danger";
+}) {
+  const barClass =
+    tone === "danger"
+      ? "bg-rose-500"
+      : tone === "warn"
+        ? "bg-amber-400"
+        : "bg-brand-500";
+  return (
+    <div className="mt-3">
+      <div className="flex items-baseline justify-between gap-2 text-sm">
+        <div className="font-medium text-slate-700">
+          {label}{" "}
+          <span className="text-xs font-normal text-slate-400">{hint}</span>
+        </div>
+        <div className="tabular-nums text-slate-600">
+          <span className="text-base font-semibold text-slate-900">
+            {value}
+          </span>{" "}
+          <span className="text-xs">
+            / {anchor} {anchorLabel}
+          </span>
+        </div>
+      </div>
+      <div className="mt-1 h-2 w-full overflow-hidden rounded-full bg-slate-100">
+        <div
+          className={`h-full ${barClass}`}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+    </div>
   );
 }
 
@@ -187,7 +273,8 @@ function Stat({
   icon,
 }: {
   label: string;
-  value: number;
+  // Accepts string for pre-formatted values (e.g. fixed-decimal rates).
+  value: number | string;
   icon?: React.ReactNode;
 }) {
   return (

@@ -1,9 +1,18 @@
 export type Role = "admin" | "operator" | "viewer";
 
-export type BoxStatus = "received" | "ready_to_return" | "returned";
+export type BoxStatus =
+  | "received"
+  | "processing"
+  | "incomplete"
+  | "ready_to_return"
+  | "returned";
 
+// Ordered to match the API's linear status chain so dropdowns and other
+// "advance to next status" affordances render in the natural sequence.
 export const ALL_BOX_STATUSES: BoxStatus[] = [
   "received",
+  "processing",
+  "incomplete",
   "ready_to_return",
   "returned",
 ];
@@ -197,9 +206,24 @@ export interface WarehouseSummary {
   name: string;
   min_inventory: number;
   max_capacity: number;
+  // Total in-warehouse boxes (everything but `returned`). Kept for
+  // back-compat with older bundles; the dashboard renders
+  // available/unavailable separately now.
   inventory: number;
+  // Two-bucket split that the dashboard cards read directly:
+  //   available   = received + processing  (vs `min_inventory`)
+  //   unavailable = incomplete + ready_to_return (vs `max_capacity`)
+  available_boxes: number;
+  unavailable_boxes: number;
+  // Subset of `unavailable_boxes`: how many boxes are physically
+  // packaged for return right now.
+  ready_to_return_boxes: number;
   received_today: number;
   returned_today: number;
+  // Boxes that left `processing` today (into incomplete or
+  // ready_to_return) and the corresponding per-hour rate.
+  completed_today: number;
+  completed_per_hour: number;
   counts_by_status: Record<BoxStatus, number>;
   open_alerts: number;
   productivity_today: WarehouseProductivity | null;
@@ -209,6 +233,9 @@ export interface WarehouseSummary {
 export interface DashboardSummary {
   warehouses: WarehouseSummary[];
   total_active_boxes: number;
+  total_available_boxes: number;
+  total_unavailable_boxes: number;
+  total_completed_today: number;
   total_open_alerts: number;
 }
 

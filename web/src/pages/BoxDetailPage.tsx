@@ -14,8 +14,13 @@ import { STATUS_LABEL, StatusBadge } from "@/components/StatusBadge";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useHasRole } from "@/components/RoleGate";
 
+// Mirrors the API's linear chain. Each entry is "the next legal step"
+// for that state; admins toggling "Override rules" below get the full
+// status list instead of just this single button.
 const NEXT_STATUS: Record<BoxStatus, BoxStatus[]> = {
-  received: ["ready_to_return"],
+  received: ["processing"],
+  processing: ["incomplete"],
+  incomplete: ["ready_to_return"],
   ready_to_return: ["returned"],
   returned: [],
 };

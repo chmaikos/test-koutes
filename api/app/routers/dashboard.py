@@ -9,7 +9,15 @@ from sqlalchemy import func, select
 from app.config import get_settings
 from app.deps import CurrentUser, DbSession
 from app.models.alerts import Alert
-from app.models.boxes import ACTIVE_STATUSES, Box, BoxEvent, BoxEventType, BoxStatus
+from app.models.boxes import (
+    ACTIVE_STATUSES,
+    AVAILABLE_STATUSES,
+    UNAVAILABLE_STATUSES,
+    Box,
+    BoxEvent,
+    BoxEventType,
+    BoxStatus,
+)
 from app.models.warehouses import Warehouse
 from app.schemas.dashboard import DashboardSummary, WarehouseSummary
 from app.schemas.employees import PerformerOut, WarehouseProductivityOut
@@ -23,6 +31,15 @@ from app.services.productivity import (
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
 
+def _app_tz() -> ZoneInfo:
+    """Resolve ``APP_TIMEZONE`` to a real ZoneInfo (UTC on bad input)."""
+    tz_name = get_settings().app_timezone or "UTC"
+    try:
+        return ZoneInfo(tz_name)
+    except ZoneInfoNotFoundError:
+        return ZoneInfo("UTC")
+
+
 def _today_in_app_tz() -> date:
     """Today's date in the configured ``APP_TIMEZONE`` (default UTC).
 
@@ -31,12 +48,26 @@ def _today_in_app_tz() -> date:
     productivity router depends on this one transitively (via its
     response schemas) and a top-level import would risk a cycle.
     """
-    tz_name = get_settings().app_timezone or "UTC"
-    try:
-        tz = ZoneInfo(tz_name)
-    except ZoneInfoNotFoundError:
-        tz = UTC
-    return datetime.now(tz).date()
+    return datetime.now(_app_tz()).date()
+
+
+def _local_day_bounds_utc() -> tuple[datetime, datetime, float]:
+    """Return (start, end, elapsed_hours) for "today" in APP_TIMEZONE.
+
+    ``start`` / ``end`` are timezone-aware UTC instants so they can be
+    compared directly against the timezone-aware ``occurred_at`` column.
+    ``elapsed_hours`` is how far we are into the local day, floored at
+    1.0 so a divide-by-zero never sneaks into the per-hour rate at the
+    very start of the day.
+    """
+    tz = _app_tz()
+    local_now = datetime.now(tz)
+    local_midnight = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    local_tomorrow = local_midnight + timedelta(days=1)
+    start_utc = local_midnight.astimezone(UTC)
+    end_utc = local_tomorrow.astimezone(UTC)
+    elapsed = (local_now - local_midnight).total_seconds() / 3600.0
+    return start_utc, end_utc, max(1.0, elapsed)
 
 
 def _to_productivity_out(
@@ -74,9 +105,11 @@ def _to_productivity_out(
 
 @router.get("/summary", response_model=DashboardSummary)
 def summary(db: DbSession, user: CurrentUser) -> DashboardSummary:
-    now = datetime.now(UTC)
-    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    tomorrow = midnight + timedelta(days=1)
+    # The "today" window for the daily counters (received / returned /
+    # completed) is in APP_TIMEZONE so it agrees with the productivity
+    # boundary; ``_local_day_bounds_utc`` hands us the equivalent UTC
+    # instants for the comparison.
+    midnight, tomorrow, elapsed_hours = _local_day_bounds_utc()
 
     warehouses = db.scalars(
         apply_warehouse_filter(select(Warehouse), user, Warehouse.id).order_by(
@@ -125,6 +158,28 @@ def summary(db: DbSession, user: CurrentUser) -> DashboardSummary:
     ).all()
     returned_today = {wid: int(c) for wid, c in returned_today_rows}
 
+    # "Box completion" = a box left the ``processing`` state today (into
+    # either ``incomplete`` when emptied early or ``ready_to_return``
+    # when finished cleanly). We look at audit events rather than the
+    # current ``status`` column because a box can complete and later be
+    # returned in the same day; the audit row is the canonical record.
+    completed_today_rows = db.execute(
+        apply_warehouse_filter(
+            select(BoxEvent.warehouse_id, func.count(BoxEvent.id)),
+            user,
+            BoxEvent.warehouse_id,
+        )
+        .where(
+            BoxEvent.event_type == BoxEventType.status_changed,
+            BoxEvent.from_status == BoxStatus.processing,
+            BoxEvent.to_status.in_(list(UNAVAILABLE_STATUSES)),
+            BoxEvent.occurred_at >= midnight,
+            BoxEvent.occurred_at < tomorrow,
+        )
+        .group_by(BoxEvent.warehouse_id)
+    ).all()
+    completed_today = {wid: int(c) for wid, c in completed_today_rows}
+
     open_alert_rows = db.execute(
         apply_warehouse_filter(
             select(Alert.warehouse_id, func.count(Alert.id)),
@@ -145,12 +200,23 @@ def summary(db: DbSession, user: CurrentUser) -> DashboardSummary:
 
     summaries: list[WarehouseSummary] = []
     total_active = 0
+    total_available = 0
+    total_unavailable = 0
+    total_completed = 0
     total_open_alerts = 0
     for wh in warehouses:
         status_counts = by_warehouse_status.get(wh.id, {})
         full = {s: int(status_counts.get(s, 0)) for s in BoxStatus}
+        available = sum(full[s] for s in AVAILABLE_STATUSES)
+        unavailable = sum(full[s] for s in UNAVAILABLE_STATUSES)
         inventory = sum(full[s] for s in ACTIVE_STATUSES)
+        ready_to_return = full[BoxStatus.ready_to_return]
+        completed = completed_today.get(wh.id, 0)
+        per_hour = round(completed / elapsed_hours, 2)
         total_active += inventory
+        total_available += available
+        total_unavailable += unavailable
+        total_completed += completed
         opens = open_alerts.get(wh.id, 0)
         total_open_alerts += opens
         prod_today = productivity_today.get(wh.id)
@@ -162,8 +228,13 @@ def summary(db: DbSession, user: CurrentUser) -> DashboardSummary:
                 min_inventory=wh.min_inventory,
                 max_capacity=wh.max_capacity,
                 inventory=inventory,
+                available_boxes=available,
+                unavailable_boxes=unavailable,
+                ready_to_return_boxes=ready_to_return,
                 received_today=received_today.get(wh.id, 0),
                 returned_today=returned_today.get(wh.id, 0),
+                completed_today=completed,
+                completed_per_hour=per_hour,
                 counts_by_status=full,
                 open_alerts=opens,
                 productivity_today=(
@@ -178,5 +249,8 @@ def summary(db: DbSession, user: CurrentUser) -> DashboardSummary:
     return DashboardSummary(
         warehouses=summaries,
         total_active_boxes=total_active,
+        total_available_boxes=total_available,
+        total_unavailable_boxes=total_unavailable,
+        total_completed_today=total_completed,
         total_open_alerts=total_open_alerts,
     )

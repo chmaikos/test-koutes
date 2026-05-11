@@ -11,10 +11,32 @@ def _create_box(client, *, box_number: str, warehouse_id: int = 1, lot: str = "x
     return resp.json()["id"]
 
 
+# Canonical forward chain. ``_advance`` walks intermediate states so a test
+# that wants to land on (say) ``returned`` doesn't have to spell out every
+# single step explicitly each time -- it just declares the milestones.
+_FORWARD_CHAIN = (
+    "received",
+    "processing",
+    "incomplete",
+    "ready_to_return",
+    "returned",
+)
+
+
 def _advance(client, box_id: int, *statuses: str) -> None:
-    for s in statuses:
-        resp = client.patch(f"/api/boxes/{box_id}", json={"status": s})
-        assert resp.status_code == 200, resp.text
+    """Walk a box forward through each requested status milestone.
+
+    ``statuses`` are *destinations*; the helper fills in the intermediate
+    transitions implied by the linear chain so callers stay terse and any
+    future state machine changes are absorbed in one place.
+    """
+    for target in statuses:
+        current = client.get(f"/api/boxes/{box_id}").json()["status"]
+        start = _FORWARD_CHAIN.index(current)
+        end = _FORWARD_CHAIN.index(target)
+        for step in _FORWARD_CHAIN[start + 1 : end + 1]:
+            resp = client.patch(f"/api/boxes/{box_id}", json={"status": step})
+            assert resp.status_code == 200, resp.text
 
 
 def _impersonate(role):
