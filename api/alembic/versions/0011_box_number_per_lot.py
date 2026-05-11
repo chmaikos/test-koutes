@@ -28,20 +28,26 @@ depends_on = None
 
 
 def upgrade() -> None:
-    # Pad existing purely-numeric box numbers up to the new 3-char minimum
-    # before swapping the constraints. Done first so any (lot, box_number)
-    # collisions surface as the constraint-creation failure below rather
-    # than a silent data-shape change later.
+    # Drop the old global uniqueness FIRST. If we pad before dropping it,
+    # an existing row like ``'14'`` becoming ``'014'`` collides with any
+    # row that already holds ``'014'`` (legitimately, in a different
+    # lot or the same one) -- the old constraint can't see the lot, so
+    # it rejects the UPDATE even though the new schema would allow it.
+    # Doing the drop first lets the pad run cleanly; any remaining real
+    # ambiguity (two rows in the *same* lot that both end up at the
+    # padded value) surfaces below when we create the per-lot
+    # constraint, with Postgres pointing at the offending pair.
+    op.drop_constraint("boxes_box_number_key", "boxes", type_="unique")
+    op.drop_index("ix_boxes_box_number", table_name="boxes")
+
+    # Now pad existing purely-numeric box numbers up to the 3-char minimum.
+    # ``< 3`` is the right filter: we never shrink a longer value (1234
+    # stays 1234). Non-numeric legacy rows are skipped on purpose; the
+    # API validator only enforces numeric input on new writes.
     op.execute(
         "UPDATE boxes SET box_number = lpad(box_number, 3, '0') "
         "WHERE box_number ~ '^[0-9]+$' AND char_length(box_number) < 3"
     )
-
-    # Drop the old global uniqueness: the auto-generated UNIQUE constraint
-    # SQLAlchemy created from ``unique=True`` on the column, plus the
-    # explicit unique index from ``0001_initial``.
-    op.drop_constraint("boxes_box_number_key", "boxes", type_="unique")
-    op.drop_index("ix_boxes_box_number", table_name="boxes")
 
     # Recreate as a plain (non-unique) index so the ``ilike`` search in
     # routers/_filters.py keeps using an index scan.
@@ -51,7 +57,9 @@ def upgrade() -> None:
 
     # The new uniqueness key: same number is allowed across lots, but only
     # once within a single lot. Postgres enforces this with a unique btree
-    # index under the hood, so the search/sort cost is the same.
+    # index under the hood, so the search/sort cost is the same. If the
+    # pad produced a real duplicate within one lot, this raises and the
+    # operator has to reconcile the data by hand.
     op.create_unique_constraint(
         "uq_boxes_lot_box_number", "boxes", ["lot", "box_number"]
     )
