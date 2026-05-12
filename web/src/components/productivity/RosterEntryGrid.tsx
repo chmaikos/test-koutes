@@ -132,11 +132,20 @@ export function RosterEntryGrid({
     () =>
       (employeesQuery.data?.items ?? [])
         .slice()
-        .sort((a, b) =>
-          a.full_name.localeCompare(b.full_name, undefined, {
+        // Group employees by shift length first (longest first so full-time
+        // shifts sit at the top) and alphabetize within each group. This
+        // matches how operators tend to think about the roster -- "the
+        // 8-hour folks" vs "the part-timers".
+        .sort((a, b) => {
+          const ah = Number(a.default_hours_per_day);
+          const bh = Number(b.default_hours_per_day);
+          const aHours = Number.isFinite(ah) ? ah : 0;
+          const bHours = Number.isFinite(bh) ? bh : 0;
+          if (aHours !== bHours) return bHours - aHours;
+          return a.full_name.localeCompare(b.full_name, undefined, {
             sensitivity: "base",
-          }),
-        ),
+          });
+        }),
     [employeesQuery.data],
   );
 
