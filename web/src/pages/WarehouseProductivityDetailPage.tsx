@@ -1,23 +1,17 @@
 import { useMemo, useState } from "react";
 import clsx from "clsx";
 import { Link, Navigate, useParams, useSearchParams } from "react-router-dom";
-import { Activity, ArrowLeft, Plus } from "lucide-react";
+import { Activity, ArrowLeft } from "lucide-react";
 import { useHasRole } from "@/components/RoleGate";
 import {
-  useEmployees,
   useProductivityDailySummary,
   useProductivityWeeklySummary,
   useWarehouses,
 } from "@/api/hooks";
 import type { WarehouseProductivity } from "@/api/types";
-import { EntriesList } from "@/components/productivity/EntriesList";
-import { NewEntryForm } from "@/components/productivity/NewEntryForm";
 import { PerformersTable } from "@/components/productivity/PerformersTable";
-import {
-  isoWeekEnd,
-  isoWeekStart,
-  todayStr,
-} from "@/components/productivity/dates";
+import { RosterEntryGrid } from "@/components/productivity/RosterEntryGrid";
+import { isoWeekStart, todayStr } from "@/components/productivity/dates";
 
 type Tab = "today" | "week";
 
@@ -33,7 +27,6 @@ export function WarehouseProductivityDetailPage() {
   const [tab, setTab] = useState<Tab>(
     initialTab === "week" ? "week" : "today",
   );
-  const [showAdd, setShowAdd] = useState(false);
 
   const canWrite = useHasRole(["admin", "operator"]);
   const { data: warehouses } = useWarehouses();
@@ -53,8 +46,6 @@ export function WarehouseProductivityDetailPage() {
       ? dailyQuery.data?.warehouses.find((w) => w.warehouse_id === warehouseId)
       : weeklyQuery.data?.warehouses.find((w) => w.warehouse_id === warehouseId);
 
-  const employees = useEmployees(warehouseId, false);
-
   // Keep the query string in sync so refreshing the page or sharing the URL
   // lands you on the same date + tab you were looking at.
   const updateParams = (next: { date?: string; tab?: Tab }) => {
@@ -67,9 +58,6 @@ export function WarehouseProductivityDetailPage() {
   if (Number.isNaN(warehouseId)) {
     return <Navigate to="/productivity" replace />;
   }
-
-  const fromDate = tab === "today" ? date : isoWeekStart(date);
-  const toDate = tab === "today" ? date : isoWeekEnd(date);
 
   return (
     <div className="space-y-6">
@@ -89,7 +77,7 @@ export function WarehouseProductivityDetailPage() {
             Productivity entries and leaderboards for this warehouse.
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-col items-end gap-1">
           <input
             type="date"
             className="input max-w-[180px]"
@@ -101,6 +89,9 @@ export function WarehouseProductivityDetailPage() {
             }}
             aria-label="Reporting date"
           />
+          <span className="text-[11px] text-slate-400">
+            Editing entries for this date
+          </span>
         </div>
       </header>
 
@@ -142,16 +133,6 @@ export function WarehouseProductivityDetailPage() {
               </p>
             </div>
           </div>
-          {canWrite && tab === "today" && (
-            <button
-              type="button"
-              className="btn-secondary"
-              onClick={() => setShowAdd((v) => !v)}
-            >
-              <Plus className="h-4 w-4" />
-              {showAdd ? "Cancel" : "Add entry"}
-            </button>
-          )}
         </header>
 
         <div className="grid grid-cols-3 gap-3 px-5 py-4 text-sm">
@@ -162,14 +143,6 @@ export function WarehouseProductivityDetailPage() {
             value={(summary?.avg_pages_per_day ?? 0).toFixed(2)}
           />
         </div>
-
-        {showAdd && tab === "today" && employees.data && (
-          <NewEntryForm
-            employees={employees.data.items}
-            date={date}
-            onClose={() => setShowAdd(false)}
-          />
-        )}
 
         <PerformersTable
           title="Top performers"
@@ -182,12 +155,10 @@ export function WarehouseProductivityDetailPage() {
           emptyHint=""
         />
 
-        <EntriesList
+        <RosterEntryGrid
           warehouseId={warehouseId}
-          fromDate={fromDate}
-          toDate={toDate}
+          date={date}
           canWrite={canWrite}
-          title={tab === "today" ? "Entries today" : "Entries this week"}
         />
       </section>
     </div>
