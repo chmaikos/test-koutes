@@ -11,6 +11,11 @@ pip install -e .[dev]
 
 # point at any postgres
 export DATABASE_URL=postgresql+psycopg://warehouse:warehouse@localhost:5432/warehouse
+# For ERP document upload/download, point these at a local RustFS instance:
+export OBJECT_STORAGE_ENDPOINT=http://localhost:9000
+export OBJECT_STORAGE_BUCKET=warehouse-documents
+export OBJECT_STORAGE_ACCESS_KEY=replace-me
+export OBJECT_STORAGE_SECRET_KEY=replace-me
 alembic upgrade head
 uvicorn app.main:app --reload
 ```
@@ -22,6 +27,9 @@ OpenAPI docs at <http://localhost:8000/api/docs>.
 ```bash
 ruff check app alembic
 pytest
+
+# Optional real RustFS round-trip (uses the OBJECT_STORAGE_* variables above)
+RUN_RUSTFS_INTEGRATION=1 pytest tests/test_rustfs_integration.py
 ```
 
 ## Layout
@@ -37,7 +45,7 @@ app/
   models/          SQLAlchemy ORM models
   schemas/         pydantic schemas (request/response)
   routers/         FastAPI routers, one per resource
-  services/        domain logic (boxes, alerts, exports, graph email)
+  services/        domain logic (boxes, requests, documents, alerts, exports)
   jobs/scheduler.py APScheduler tick that calls services.alerts.evaluate_safe
 alembic/
   env.py

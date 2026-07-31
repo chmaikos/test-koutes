@@ -23,6 +23,7 @@ from app.models.warehouses import Warehouse
 
 class UserRole(str, enum.Enum):
     admin = "admin"
+    warehouse_mover = "warehouse_mover"
     operator = "operator"
     viewer = "viewer"
 

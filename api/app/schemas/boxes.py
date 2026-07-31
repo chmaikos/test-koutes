@@ -20,8 +20,12 @@ class BoxOut(BaseModel):
     received_at: datetime | None
     processing_completed_at: datetime | None
     returned_at: datetime | None
+    archived_at: datetime | None
+    archived_by_user_id: int | None
+    archive_reason: str | None
     created_at: datetime
     updated_at: datetime
+    receipt_request_id: int | None = None
 
 
 class BoxCreate(BaseModel):
@@ -89,14 +93,30 @@ class BulkSkip(BaseModel):
 class BulkResult(BaseModel):
     updated: list[BoxOut]
     skipped: list[BulkSkip]
+    cancelled_request_ids: list[int] = Field(default_factory=list)
+
+
+class BoxDeleteRequest(BaseModel):
+    force: bool = False
+    reason: str | None = Field(default=None, max_length=2000)
+
+
+class BoxDeleteResult(BaseModel):
+    box_id: int
+    archived: bool
+    cancelled_request_ids: list[int] = Field(default_factory=list)
 
 
 class BulkDeleteRequest(BaseModel):
     box_ids: list[int] = Field(min_length=1, max_length=500)
+    force: bool = False
+    reason: str | None = Field(default=None, max_length=2000)
 
 
 class BulkDeleteResult(BaseModel):
     deleted_ids: list[int]
+    archived_ids: list[int] = Field(default_factory=list)
+    cancelled_request_ids: list[int] = Field(default_factory=list)
     skipped: list[BulkSkip]
 
 
@@ -106,6 +126,20 @@ class ImportSkip(BaseModel):
     reason: str
 
 
+class MappedImportItem(BaseModel):
+    box_number: str = Field(min_length=1, max_length=64)
+    lot: str = Field(min_length=1, max_length=64)
+    contents: str | None = Field(default=None, max_length=200)
+
+
+class MappedImportRequest(BaseModel):
+    warehouse_id: int = Field(ge=1)
+    items: list[MappedImportItem] = Field(min_length=1, max_length=5000)
+    restore_archived: bool = False
+
+
 class ImportResult(BaseModel):
     created: list[BoxOut]
+    restored: list[BoxOut] = Field(default_factory=list)
     skipped: list[ImportSkip]
+    receipt_request_ids: list[int] = Field(default_factory=list)

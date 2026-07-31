@@ -41,7 +41,10 @@ def parse_box_filters(
     warehouse_id: Annotated[int | None, Query()] = None,
     status: Annotated[BoxStatus | None, Query()] = None,
     lot: Annotated[str | None, Query()] = None,
-    search: Annotated[str | None, Query(description="matches box_number or lot")] = None,
+    search: Annotated[
+        str | None,
+        Query(description="matches box_number, lot, or contents"),
+    ] = None,
     received_from: Annotated[datetime | None, Query()] = None,
     received_to: Annotated[datetime | None, Query()] = None,
     updated_from: Annotated[datetime | None, Query()] = None,
@@ -82,6 +85,7 @@ def parse_box_sort(
 
 
 def apply_box_filters(stmt: Select, filters: BoxFilters) -> Select:
+    stmt = stmt.where(Box.archived_at.is_(None))
     if filters.warehouse_id is not None:
         stmt = stmt.where(Box.current_warehouse_id == filters.warehouse_id)
     if filters.status is not None:
@@ -90,7 +94,13 @@ def apply_box_filters(stmt: Select, filters: BoxFilters) -> Select:
         stmt = stmt.where(Box.lot.ilike(f"%{filters.lot}%"))
     if filters.search:
         like = f"%{filters.search}%"
-        stmt = stmt.where(or_(Box.box_number.ilike(like), Box.lot.ilike(like)))
+        stmt = stmt.where(
+            or_(
+                Box.box_number.ilike(like),
+                Box.lot.ilike(like),
+                Box.contents.ilike(like),
+            )
+        )
     if filters.received_from is not None:
         stmt = stmt.where(Box.received_at >= filters.received_from)
     if filters.received_to is not None:

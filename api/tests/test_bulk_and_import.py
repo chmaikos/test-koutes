@@ -3,7 +3,10 @@ from __future__ import annotations
 
 from io import BytesIO
 
+import pytest
 from openpyxl import Workbook
+
+from app.models.boxes import Box
 
 
 def _create_box(client, *, box_number: str, warehouse_id: int = 1, lot: str = "x") -> int:
@@ -42,10 +45,16 @@ def _advance(client, box_id: int, *statuses: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_bulk_move_happy_path(client):
+def test_bulk_move_linked_boxes_requires_audited_override(client):
     ids = [_create_box(client, box_number=f"{i + 1:03d}") for i in range(3)]
     resp = client.post(
-        "/api/boxes/bulk", json={"box_ids": ids, "warehouse_id": 2}
+        "/api/boxes/bulk",
+        json={
+            "box_ids": ids,
+            "warehouse_id": 2,
+            "force": True,
+            "note": "Correcting receipt warehouse",
+        },
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -54,7 +63,7 @@ def test_bulk_move_happy_path(client):
     assert all(b["current_warehouse_id"] == 2 for b in body["updated"])
 
 
-def test_bulk_move_mixed_skips_returned(client):
+def test_bulk_move_without_override_skips_request_linked_boxes(client):
     keep_id = _create_box(client, box_number="001")
     move_again_id = _create_box(client, box_number="002")
     returned_id = _create_box(client, box_number="003")
@@ -66,13 +75,13 @@ def test_bulk_move_mixed_skips_returned(client):
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    updated_ids = {b["id"] for b in body["updated"]}
-    assert updated_ids == {keep_id, move_again_id}
-    assert len(body["skipped"]) == 1
-    skip = body["skipped"][0]
-    assert skip["box_id"] == returned_id
-    assert skip["box_number"] == "003"
-    assert "returned" in skip["reason"].lower()
+    assert body["updated"] == []
+    assert {skip["box_id"] for skip in body["skipped"]} == {
+        keep_id,
+        move_again_id,
+        returned_id,
+    }
+    assert all("linked to request" in skip["reason"] for skip in body["skipped"])
 
 
 def test_bulk_status_change_mixed(client):
@@ -112,7 +121,12 @@ def test_bulk_skips_missing_ids(client):
     real = _create_box(client, box_number="001")
     resp = client.post(
         "/api/boxes/bulk",
-        json={"box_ids": [real, 999_999], "warehouse_id": 2},
+        json={
+            "box_ids": [real, 999_999],
+            "warehouse_id": 2,
+            "force": True,
+            "note": "Correcting receipt warehouse",
+        },
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -171,6 +185,245 @@ def test_import_happy_path(client):
     assert by_number["001"]["contents"] == "shoes"
     assert by_number["002"]["contents"] is None
     assert by_number["003"]["contents"] == "spare parts"
+    assert len(body["receipt_request_ids"]) == 3
+    receipts = [
+        client.get(f"/api/requests/{request_id}").json()
+        for request_id in body["receipt_request_ids"]
+    ]
+    assert all(receipt["origin"] == "xlsx_import" for receipt in receipts)
+    assert all(receipt["status"] == "completed" for receipt in receipts)
+    assert sum(receipt["quantity"] for receipt in receipts) == 3
+
+
+def test_box_import_mapper_previews_arbitrary_layout_and_imports_selection(client):
+    payload = _build_xlsx(
+        [
+            ["ERP export", None, None],
+            ["Description", "Container", "Batch"],
+            ["Invoices", "7", "LOT-MAPPED"],
+            ["Contracts", "8", "LOT-MAPPED"],
+        ]
+    )
+    preview = client.post(
+        "/api/boxes/import-preview",
+        files={
+            "file": (
+                "arbitrary.xlsx",
+                payload,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["sheets"][0]["rows"][0]["cells"][0] == "ERP export"
+
+    imported = client.post(
+        "/api/boxes/import-mapped",
+        json={
+            "warehouse_id": 2,
+            "items": [
+                {
+                    "box_number": "7",
+                    "lot": "LOT-MAPPED",
+                    "contents": "Invoices",
+                },
+                {
+                    "box_number": "8",
+                    "lot": "LOT-MAPPED",
+                    "contents": "Contracts",
+                },
+            ],
+        },
+    )
+    assert imported.status_code == 200, imported.text
+    body = imported.json()
+    assert [box["box_number"] for box in body["created"]] == ["007", "008"]
+    assert all(box["current_warehouse_id"] == 2 for box in body["created"])
+    assert len(body["receipt_request_ids"]) == 1
+    receipt = client.get(
+        f"/api/requests/{body['receipt_request_ids'][0]}"
+    ).json()
+    assert receipt["origin"] == "xlsx_import"
+    assert receipt["quantity"] == 2
+
+
+def test_mapped_import_can_explicitly_restore_archived_box(client):
+    original = client.post(
+        "/api/boxes",
+        json={
+            "box_number": "9",
+            "lot": "RESTORE-ME",
+            "contents": "Wrong contents",
+            "warehouse_id": 1,
+        },
+    ).json()
+    original_receipt_id = original["receipt_request_id"]
+    _advance(client, original["id"], "returned")
+    archived = client.post(
+        f"/api/boxes/{original['id']}/delete",
+        json={"force": True, "reason": "Imported by mistake"},
+    )
+    assert archived.status_code == 200
+
+    payload = {
+        "warehouse_id": 2,
+        "items": [
+            {
+                "box_number": "9",
+                "lot": "RESTORE-ME",
+                "contents": "Correct contents",
+            }
+        ],
+    }
+    blocked = client.post("/api/boxes/import-mapped", json=payload)
+    assert blocked.status_code == 200
+    assert blocked.json()["created"] == []
+    assert blocked.json()["restored"] == []
+    assert "already exists" in blocked.json()["skipped"][0]["reason"]
+
+    restored = client.post(
+        "/api/boxes/import-mapped",
+        json={**payload, "restore_archived": True},
+    )
+    assert restored.status_code == 200, restored.text
+    body = restored.json()
+    assert body["created"] == []
+    assert [box["id"] for box in body["restored"]] == [original["id"]]
+    restored_box = body["restored"][0]
+    assert restored_box["archived_at"] is None
+    assert restored_box["archive_reason"] is None
+    assert restored_box["status"] == "received"
+    assert restored_box["current_warehouse_id"] == 2
+    assert restored_box["contents"] == "Correct contents"
+    assert restored_box["returned_at"] is None
+
+    new_receipt = client.get(
+        f"/api/requests/{body['receipt_request_ids'][0]}"
+    ).json()
+    old_receipt = client.get(f"/api/requests/{original_receipt_id}").json()
+    assert new_receipt["items"][0]["box_id"] == original["id"]
+    assert old_receipt["items"][0]["box_id"] == original["id"]
+    events = client.get(f"/api/boxes/{original['id']}/events").json()
+    assert events[0]["event_type"] == "restored"
+    assert "Imported by mistake" in events[0]["note"]
+
+    active_duplicate = client.post(
+        "/api/boxes/import-mapped",
+        json={**payload, "restore_archived": True},
+    ).json()
+    assert active_duplicate["restored"] == []
+    assert "already exists" in active_duplicate["skipped"][0]["reason"]
+
+
+def test_legacy_xlsx_import_can_restore_archived_box(client):
+    original = client.post(
+        "/api/boxes",
+        json={"box_number": "15", "lot": "LEGACY-RESTORE", "warehouse_id": 1},
+    ).json()
+    client.post(
+        f"/api/boxes/{original['id']}/delete",
+        json={"force": True, "reason": "Incorrect legacy import"},
+    )
+    workbook = _build_xlsx(
+        [
+            ["box_number", "lot", "contents", "warehouse_id"],
+            ["15", "LEGACY-RESTORE", "Corrected", 1],
+        ]
+    )
+    response = client.post(
+        "/api/boxes/import",
+        files={
+            "file": (
+                "legacy.xlsx",
+                workbook,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+        data={"restore_archived": "true"},
+    )
+    assert response.status_code == 200, response.text
+    assert [box["id"] for box in response.json()["restored"]] == [original["id"]]
+
+
+def test_archived_restore_rolls_back_when_receipt_creation_fails(
+    client, session, monkeypatch
+):
+    original = client.post(
+        "/api/boxes",
+        json={"box_number": "20", "lot": "ROLLBACK", "warehouse_id": 1},
+    ).json()
+    client.post(
+        f"/api/boxes/{original['id']}/delete",
+        json={"force": True, "reason": "Rollback test"},
+    )
+
+    def fail_receipt(*_args, **_kwargs):
+        raise RuntimeError("receipt creation failed")
+
+    monkeypatch.setattr(
+        "app.services.imports.create_completed_receipt",
+        fail_receipt,
+    )
+    with pytest.raises(RuntimeError, match="receipt creation failed"):
+        client.post(
+            "/api/boxes/import-mapped",
+            json={
+                "warehouse_id": 2,
+                "restore_archived": True,
+                "items": [{"box_number": "20", "lot": "ROLLBACK"}],
+            },
+        )
+    session.rollback()
+    session.expire_all()
+    box = session.get(Box, original["id"])
+    assert box.archived_at is not None
+    assert box.current_warehouse_id == 1
+
+
+def test_manual_box_creates_completed_receipt(client):
+    response = client.post(
+        "/api/boxes",
+        json={"box_number": "1", "lot": "MANUAL", "warehouse_id": 1},
+    )
+    assert response.status_code == 201
+    receipt_id = response.json()["receipt_request_id"]
+    assert receipt_id is not None
+    receipt = client.get(f"/api/requests/{receipt_id}").json()
+    assert receipt["origin"] == "manual_entry"
+    assert receipt["status"] == "completed"
+    assert receipt["actual_received_quantity"] == 1
+    assert receipt["items"][0]["box_id"] == response.json()["id"]
+
+
+def test_imported_boxes_are_available_to_linked_return_flow(client):
+    payload = _build_xlsx(
+        [
+            ["box_number", "lot", "warehouse_id"],
+            ["1", "IMPORT-RETURN", 1],
+            ["2", "IMPORT-RETURN", 1],
+        ]
+    )
+    imported = _post_xlsx(client, payload).json()
+    assert len(imported["receipt_request_ids"]) == 1
+    source_id = imported["receipt_request_ids"][0]
+    for box in imported["created"]:
+        _advance(client, box["id"], "ready_to_return")
+
+    candidates = client.get(f"/api/requests/{source_id}/return-candidates")
+    assert {item["box_id"] for item in candidates.json()} == {
+        box["id"] for box in imported["created"]
+    }
+    created_return = client.post(
+        "/api/requests",
+        json={
+            "direction": "return",
+            "warehouse_id": 1,
+            "quantity": 1,
+            "source_inbound_request_id": source_id,
+            "box_ids": [imported["created"][0]["id"]],
+        },
+    )
+    assert created_return.status_code == 201
 
 
 def test_import_resolves_warehouse_by_name(client):

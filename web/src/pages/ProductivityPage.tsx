@@ -4,6 +4,8 @@ import { Link } from "react-router-dom";
 import { Activity, ChevronRight } from "lucide-react";
 import {
   useProductivityDailySummary,
+  useProductivityMonthlySummary,
+  useProductivityThreeMonthSummary,
   useProductivityWeeklySummary,
   useWarehouses,
 } from "@/api/hooks";
@@ -15,7 +17,7 @@ import type {
 import { PerformersTable } from "@/components/productivity/PerformersTable";
 import { isoWeekStart, todayStr } from "@/components/productivity/dates";
 
-type Tab = "today" | "week";
+type Tab = "today" | "week" | "month" | "three-month";
 
 export function ProductivityPage() {
   const { data: warehouses } = useWarehouses();
@@ -27,9 +29,19 @@ export function ProductivityPage() {
     undefined,
     isoWeekStart(date),
   );
+  const monthlyQuery = useProductivityMonthlySummary(undefined, date);
+  const threeMonthQuery = useProductivityThreeMonthSummary(undefined, date);
 
-  const summary = tab === "today" ? dailyQuery.data : weeklyQuery.data;
-  const isLoading = tab === "today" ? dailyQuery.isLoading : weeklyQuery.isLoading;
+  const activeQuery =
+    tab === "today"
+      ? dailyQuery
+      : tab === "week"
+        ? weeklyQuery
+        : tab === "month"
+          ? monthlyQuery
+          : threeMonthQuery;
+  const summary = activeQuery.data;
+  const isLoading = activeQuery.isLoading;
 
   return (
     <div className="space-y-6">
@@ -58,6 +70,15 @@ export function ProductivityPage() {
         </TabButton>
         <TabButton active={tab === "week"} onClick={() => setTab("week")}>
           This week
+        </TabButton>
+        <TabButton active={tab === "month"} onClick={() => setTab("month")}>
+          This month
+        </TabButton>
+        <TabButton
+          active={tab === "three-month"}
+          onClick={() => setTab("three-month")}
+        >
+          3 months
         </TabButton>
       </div>
 

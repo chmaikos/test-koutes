@@ -1,7 +1,9 @@
 import { useState } from "react";
 import { Upload } from "lucide-react";
-import { useImportBoxes, useWarehouses } from "@/api/hooks";
-import type { ImportResult } from "@/api/types";
+import { useImportMappedBoxes, useWarehouses } from "@/api/hooks";
+import type { ImportResult, InboundRequestItemInput } from "@/api/types";
+import { mappedImportPayload } from "@/pages/importResults";
+import { ExcelRowMapper } from "@/pages/RequestDetailPage";
 
 export function ImportBoxesDialog({
   onClose,
@@ -11,27 +13,21 @@ export function ImportBoxesDialog({
   onResult: (result: ImportResult) => void;
 }) {
   const warehouses = useWarehouses();
-  const importBoxes = useImportBoxes();
-  const [file, setFile] = useState<File | null>(null);
+  const importBoxes = useImportMappedBoxes();
   const [warehouseId, setWarehouseId] = useState<number | "">("");
+  const [mappedRows, setMappedRows] = useState<InboundRequestItemInput[]>([]);
+  const [restoreArchived, setRestoreArchived] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   return (
     <div className="modal-backdrop z-30">
-      <div className="modal-sheet max-w-md">
+      <div className="modal-sheet max-w-5xl">
         <h2 className="text-lg font-semibold">Import boxes from XLSX</h2>
         <p className="mt-1 text-sm text-slate-500">
-          Each row creates a new box in the <strong>received</strong> state.
-          Required columns (case-insensitive):{" "}
-          <code className="rounded bg-slate-100 px-1">box_number</code>,{" "}
-          <code className="rounded bg-slate-100 px-1">lot</code>. Optional:{" "}
-          <code className="rounded bg-slate-100 px-1">contents</code>,{" "}
-          <code className="rounded bg-slate-100 px-1">warehouse_id</code> or{" "}
-          <code className="rounded bg-slate-100 px-1">warehouse</code>{" "}
-          (by name). Box numbers must be numeric and are zero-padded to 3
-          digits (<code>1</code> → <code>001</code>). Duplicate{" "}
-          <code>(lot, box_number)</code> pairs and rows missing{" "}
-          <code>lot</code> are reported as errors.
+          Choose the destination warehouse, then map any workbook layout just
+          like an inbound delivery. All rows start included; exclude headers or
+          unrelated data. Repeated rows for the same lot and box number are
+          merged into one box.
         </p>
 
         <form
@@ -39,16 +35,22 @@ export function ImportBoxesDialog({
           onSubmit={async (e) => {
             e.preventDefault();
             setError(null);
-            if (!file) {
-              setError("Pick an .xlsx file to upload.");
+            if (warehouseId === "") {
+              setError("Choose the destination warehouse.");
+              return;
+            }
+            if (mappedRows.length === 0) {
+              setError("Map and review at least one box before importing.");
               return;
             }
             try {
-              const result = await importBoxes.mutateAsync({
-                file,
-                warehouse_id:
-                  warehouseId === "" ? undefined : Number(warehouseId),
-              });
+              const result = await importBoxes.mutateAsync(
+                mappedImportPayload(
+                  Number(warehouseId),
+                  mappedRows,
+                  restoreArchived,
+                ),
+              );
               onResult(result);
               onClose();
             } catch (err: unknown) {
@@ -60,40 +62,65 @@ export function ImportBoxesDialog({
           }}
         >
           <label className="block">
-            <span className="text-xs text-slate-500">XLSX file</span>
-            <input
-              required
-              type="file"
-              accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-              className="input"
-              onChange={(e) => {
-                const next = e.target.files?.[0] ?? null;
-                setFile(next);
-              }}
-            />
-          </label>
-          <label className="block">
             <span className="text-xs text-slate-500">
-              Default warehouse (optional)
+              Destination warehouse
             </span>
             <select
+              required
               className="input"
               value={warehouseId}
-              onChange={(e) =>
-                setWarehouseId(e.target.value ? Number(e.target.value) : "")
-              }
+              onChange={(e) => {
+                setWarehouseId(e.target.value ? Number(e.target.value) : "");
+                setError(null);
+              }}
             >
-              <option value="">No default — column required per row</option>
+              <option value="">Choose a warehouse</option>
               {warehouses.data?.map((w) => (
                 <option key={w.id} value={w.id}>
                   {w.name}
                 </option>
               ))}
             </select>
-            <span className="mt-1 block text-xs text-slate-400">
-              Used only when a row leaves the warehouse column blank.
+          </label>
+
+          <label className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              checked={restoreArchived}
+              onChange={(event) => setRestoreArchived(event.target.checked)}
+            />
+            <span>
+              <strong>Restore matching archived boxes.</strong> Reuse the
+              existing box when its lot and number match, preserve its audit
+              and request history, and link it to this new import receipt.
+              Active duplicates are still skipped.
             </span>
           </label>
+
+          <ExcelRowMapper
+            onApply={(rows) => {
+              setMappedRows(rows);
+              setError(null);
+            }}
+          />
+
+          {mappedRows.length > 0 && (
+            <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3">
+              <p className="text-sm font-medium text-emerald-900">
+                {mappedRows.length} unique box
+                {mappedRows.length === 1 ? "" : "es"} ready to import
+              </p>
+              <div className="mt-2 max-h-32 overflow-auto text-xs text-emerald-900">
+                {mappedRows.map((row) => (
+                  <div key={`${row.lot}-${row.box_number}`}>
+                    {row.lot} · {row.box_number}
+                    {row.contents ? ` · ${row.contents}` : ""}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {error && <p className="text-sm text-rose-600">{error}</p>}
 
@@ -109,10 +136,20 @@ export function ImportBoxesDialog({
             <button
               type="submit"
               className="btn-primary"
-              disabled={importBoxes.isPending}
+              disabled={
+                importBoxes.isPending ||
+                warehouseId === "" ||
+                mappedRows.length === 0
+              }
             >
               <Upload className="h-4 w-4" />
-              {importBoxes.isPending ? "Importing..." : "Import"}
+              {importBoxes.isPending
+                ? "Importing..."
+                : mappedRows.length > 0
+                  ? `Import ${mappedRows.length} box${
+                      mappedRows.length === 1 ? "" : "es"
+                    }`
+                  : "Import boxes"}
             </button>
           </div>
         </form>

@@ -112,9 +112,11 @@ def summary(db: DbSession, user: CurrentUser) -> DashboardSummary:
     midnight, tomorrow, elapsed_hours = _local_day_bounds_utc()
 
     warehouses = db.scalars(
-        apply_warehouse_filter(select(Warehouse), user, Warehouse.id).order_by(
-            Warehouse.id
-        )
+        apply_warehouse_filter(
+            select(Warehouse).where(Warehouse.is_active.is_(True)),
+            user,
+            Warehouse.id,
+        ).order_by(Warehouse.id)
     ).all()
 
     status_rows = db.execute(
@@ -122,7 +124,9 @@ def summary(db: DbSession, user: CurrentUser) -> DashboardSummary:
             select(Box.current_warehouse_id, Box.status, func.count(Box.id)),
             user,
             Box.current_warehouse_id,
-        ).group_by(Box.current_warehouse_id, Box.status)
+        )
+        .where(Box.archived_at.is_(None))
+        .group_by(Box.current_warehouse_id, Box.status)
     ).all()
     by_warehouse_status: dict[int, dict[BoxStatus, int]] = {}
     for wid, st, c in status_rows:

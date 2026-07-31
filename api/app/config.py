@@ -29,6 +29,17 @@ class Settings(BaseSettings):
     api_log_level: str = Field(default="info", alias="API_LOG_LEVEL")
     api_cors_origins: str = Field(default="", alias="API_CORS_ORIGINS")
 
+    # Private S3-compatible storage for ERP delivery/return documents.
+    object_storage_endpoint: str = Field(default="", alias="OBJECT_STORAGE_ENDPOINT")
+    object_storage_region: str = Field(default="us-east-1", alias="OBJECT_STORAGE_REGION")
+    object_storage_bucket: str = Field(
+        default="warehouse-documents", alias="OBJECT_STORAGE_BUCKET"
+    )
+    object_storage_access_key: str = Field(default="", alias="OBJECT_STORAGE_ACCESS_KEY")
+    object_storage_secret_key: str = Field(default="", alias="OBJECT_STORAGE_SECRET_KEY")
+    object_storage_secure: bool = Field(default=False, alias="OBJECT_STORAGE_SECURE")
+    document_max_bytes: int = Field(default=10 * 1024 * 1024, alias="DOCUMENT_MAX_BYTES")
+
     entra_tenant_id: str = Field(default="", alias="ENTRA_TENANT_ID")
     entra_client_id: str = Field(default="", alias="ENTRA_CLIENT_ID")
     entra_client_secret: str = Field(default="", alias="ENTRA_CLIENT_SECRET")
@@ -122,6 +133,15 @@ class Settings(BaseSettings):
     @property
     def local_auth_enabled(self) -> bool:
         return bool(self.local_jwt_secret)
+
+    @property
+    def object_storage_configured(self) -> bool:
+        return bool(
+            self.object_storage_endpoint
+            and self.object_storage_bucket
+            and self.object_storage_access_key
+            and self.object_storage_secret_key
+        )
 
     @property
     def graph_configured(self) -> bool:

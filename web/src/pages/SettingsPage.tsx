@@ -1,11 +1,21 @@
 import { useEffect, useMemo, useState } from "react";
-import { ChevronLeft, ChevronRight, Mail, Plus, Trash2, Undo2 } from "lucide-react";
+import {
+  ChevronLeft,
+  ChevronRight,
+  Mail,
+  Plus,
+  Trash2,
+  Undo2,
+  Upload,
+} from "lucide-react";
 import {
   useAlertRecipients,
+  useArchiveWarehouse,
   useCreateEmployee,
   useCreateWarehouse,
   useDeleteEmployee,
   useEmployees,
+  useRestoreWarehouse,
   useUpdateEmployee,
   useUpdateUser,
   useUpdateWarehouse,
@@ -13,6 +23,8 @@ import {
   useWarehouses,
 } from "@/api/hooks";
 import type { Employee, Role, User, Warehouse } from "@/api/types";
+import { ImportEmployeesDialog } from "@/components/ImportEmployeesDialog";
+import { warehouseArchiveError } from "@/pages/warehouseArchive";
 
 const EMPLOYEES_PAGE_SIZE = 25;
 
@@ -39,6 +51,7 @@ function EmployeesSection() {
   const [warehouseId, setWarehouseId] = useState<number | "">("");
   const [includeInactive, setIncludeInactive] = useState(false);
   const [showAdd, setShowAdd] = useState(false);
+  const [showImport, setShowImport] = useState(false);
   const [page, setPage] = useState(1);
   const create = useCreateEmployee();
   const employees = useEmployees(
@@ -63,6 +76,7 @@ function EmployeesSection() {
   const totalPages = total === 0 ? 1 : Math.ceil(total / pageSize);
 
   return (
+    <>
     <section className="card overflow-hidden">
       <header className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-5 py-3">
         <div>
@@ -95,6 +109,14 @@ function EmployeesSection() {
             />
             Include inactive
           </label>
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={() => setShowImport(true)}
+          >
+            <Upload className="h-4 w-4" />
+            Import
+          </button>
           <button
             type="button"
             className="btn-secondary"
@@ -146,6 +168,18 @@ function EmployeesSection() {
         </>
       )}
     </section>
+    {showImport && (
+      <ImportEmployeesDialog
+        warehouses={sortedWarehouses}
+        defaultWarehouseId={
+          typeof warehouseId === "number"
+            ? warehouseId
+            : (sortedWarehouses[0]?.id ?? null)
+        }
+        onClose={() => setShowImport(false)}
+      />
+    )}
+    </>
   );
 }
 
@@ -465,9 +499,12 @@ function EmployeeRow({
 }
 
 function WarehousesSection() {
-  const { data } = useWarehouses();
+  const [includeInactive, setIncludeInactive] = useState(false);
+  const { data } = useWarehouses(includeInactive);
   const update = useUpdateWarehouse();
   const create = useCreateWarehouse();
+  const archive = useArchiveWarehouse();
+  const restore = useRestoreWarehouse();
   const [showAdd, setShowAdd] = useState(false);
 
   return (
@@ -476,18 +513,28 @@ function WarehousesSection() {
         <div>
           <h2 className="font-semibold">Warehouses & thresholds</h2>
           <p className="text-xs text-slate-500">
-            Inventory below the minimum or at/above the maximum will trigger an
-            alert.
+            Configure inventory limits and the minimum expected productivity
+            rate for each warehouse.
           </p>
         </div>
-        <button
-          type="button"
-          className="btn-secondary"
-          onClick={() => setShowAdd((v) => !v)}
-        >
-          <Plus className="h-4 w-4" />
-          {showAdd ? "Cancel" : "Add warehouse"}
-        </button>
+        <div className="flex flex-wrap items-center justify-end gap-3">
+          <label className="inline-flex items-center gap-2 text-xs text-slate-600">
+            <input
+              type="checkbox"
+              checked={includeInactive}
+              onChange={(event) => setIncludeInactive(event.target.checked)}
+            />
+            Include archived
+          </label>
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={() => setShowAdd((v) => !v)}
+          >
+            <Plus className="h-4 w-4" />
+            {showAdd ? "Cancel" : "Add warehouse"}
+          </button>
+        </div>
       </header>
       {showAdd && (
         <NewWarehouseForm
@@ -505,6 +552,7 @@ function WarehousesSection() {
               <th className="px-4 py-2.5 text-left">Name</th>
               <th className="px-4 py-2.5 text-left">Min inventory</th>
               <th className="px-4 py-2.5 text-left">Max capacity</th>
+              <th className="px-4 py-2.5 text-left">Min pages / day</th>
               <th className="px-4 py-2.5"></th>
             </tr>
           </thead>
@@ -514,6 +562,8 @@ function WarehousesSection() {
                 key={w.id}
                 warehouse={w}
                 onSave={(patch) => update.mutateAsync({ id: w.id, patch })}
+                onArchive={() => archive.mutateAsync(w.id)}
+                onRestore={() => restore.mutateAsync(w.id)}
               />
             ))}
           </tbody>
@@ -525,6 +575,8 @@ function WarehousesSection() {
             key={w.id}
             warehouse={w}
             onSave={(patch) => update.mutateAsync({ id: w.id, patch })}
+            onArchive={() => archive.mutateAsync(w.id)}
+            onRestore={() => restore.mutateAsync(w.id)}
           />
         ))}
       </div>
@@ -540,17 +592,19 @@ function NewWarehouseForm({
     name: string;
     min_inventory: number;
     max_capacity: number;
+    min_pages_per_day: number | null;
   }) => Promise<unknown>;
   onCancel: () => void;
 }) {
   const [name, setName] = useState("");
   const [minInv, setMinInv] = useState(0);
   const [maxCap, setMaxCap] = useState(1000);
+  const [minPages, setMinPages] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   return (
-    <div className="grid gap-3 border-b border-slate-100 bg-slate-50/60 px-5 py-4 sm:grid-cols-[2fr_1fr_1fr_auto] sm:items-end">
+    <div className="grid gap-3 border-b border-slate-100 bg-slate-50/60 px-5 py-4 sm:grid-cols-[2fr_1fr_1fr_1fr_auto] sm:items-end">
       <label className="block">
         <span className="text-xs text-slate-500">Name</span>
         <input
@@ -581,6 +635,18 @@ function NewWarehouseForm({
           onChange={(e) => setMaxCap(Number(e.target.value))}
         />
       </label>
+      <label className="block">
+        <span className="text-xs text-slate-500">Min pages / day</span>
+        <input
+          type="number"
+          className="input"
+          min={1}
+          step={1}
+          value={minPages}
+          placeholder="Not set"
+          onChange={(e) => setMinPages(e.target.value)}
+        />
+      </label>
       <div className="flex items-center gap-2">
         <button
           type="button"
@@ -594,6 +660,7 @@ function NewWarehouseForm({
                 name: name.trim(),
                 min_inventory: minInv,
                 max_capacity: maxCap,
+                min_pages_per_day: minPages === "" ? null : Number(minPages),
               });
             } catch (err: unknown) {
               const detail =
@@ -617,7 +684,7 @@ function NewWarehouseForm({
         </button>
       </div>
       {error && (
-        <p className="text-xs text-rose-600 sm:col-span-4">{error}</p>
+        <p className="text-xs text-rose-600 sm:col-span-5">{error}</p>
       )}
     </div>
   );
@@ -627,6 +694,7 @@ type WarehousePatch = {
   name?: string;
   min_inventory?: number;
   max_capacity?: number;
+  min_pages_per_day?: number | null;
 };
 
 /**
@@ -641,19 +709,28 @@ function useWarehouseEditor(
   const [name, setName] = useState(warehouse.name);
   const [minInv, setMinInv] = useState(warehouse.min_inventory);
   const [maxCap, setMaxCap] = useState(warehouse.max_capacity);
+  const [minPages, setMinPages] = useState(
+    warehouse.min_pages_per_day?.toString() ?? "",
+  );
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const dirty =
     name !== warehouse.name ||
     minInv !== warehouse.min_inventory ||
-    maxCap !== warehouse.max_capacity;
+    maxCap !== warehouse.max_capacity ||
+    minPages !== (warehouse.min_pages_per_day?.toString() ?? "");
 
   async function save() {
     setPending(true);
     setError(null);
     try {
-      await onSave({ name, min_inventory: minInv, max_capacity: maxCap });
+      await onSave({
+        name,
+        min_inventory: minInv,
+        max_capacity: maxCap,
+        min_pages_per_day: minPages === "" ? null : Number(minPages),
+      });
     } catch (err: unknown) {
       const detail =
         (err as { response?: { data?: { detail?: string } } })?.response?.data
@@ -671,6 +748,8 @@ function useWarehouseEditor(
     setMinInv,
     maxCap,
     setMaxCap,
+    minPages,
+    setMinPages,
     pending,
     error,
     dirty,
@@ -678,22 +757,64 @@ function useWarehouseEditor(
   };
 }
 
+function useWarehouseLifecycle(
+  warehouse: Warehouse,
+  onArchive: () => Promise<unknown>,
+  onRestore: () => Promise<unknown>,
+) {
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function run(action: "archive" | "restore") {
+    if (
+      action === "archive" &&
+      !window.confirm(
+        `Archive ${warehouse.name}? Its inventory and history will be preserved.`,
+      )
+    ) {
+      return;
+    }
+    setPending(true);
+    setError(null);
+    try {
+      await (action === "archive" ? onArchive() : onRestore());
+    } catch (err: unknown) {
+      setError(warehouseArchiveError(err));
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return { pending, error, run };
+}
+
 function WarehouseRow({
   warehouse,
   onSave,
+  onArchive,
+  onRestore,
 }: {
   warehouse: Warehouse;
   onSave: (patch: WarehousePatch) => Promise<unknown>;
+  onArchive: () => Promise<unknown>;
+  onRestore: () => Promise<unknown>;
 }) {
   const ed = useWarehouseEditor(warehouse, onSave);
+  const lifecycle = useWarehouseLifecycle(warehouse, onArchive, onRestore);
   return (
     <tr>
       <td className="px-4 py-2.5">
-        <input
-          className="input"
-          value={ed.name}
-          onChange={(e) => ed.setName(e.target.value)}
-        />
+        <div className="flex items-center gap-2">
+          <input
+            className="input"
+            value={ed.name}
+            disabled={!warehouse.is_active}
+            onChange={(e) => ed.setName(e.target.value)}
+          />
+          {!warehouse.is_active && (
+            <span className="badge bg-slate-100 text-slate-600">Archived</span>
+          )}
+        </div>
       </td>
       <td className="px-4 py-2.5">
         <input
@@ -701,6 +822,7 @@ function WarehouseRow({
           className="input"
           min={0}
           value={ed.minInv}
+          disabled={!warehouse.is_active}
           onChange={(e) => ed.setMinInv(Number(e.target.value))}
         />
       </td>
@@ -710,20 +832,55 @@ function WarehouseRow({
           className="input"
           min={1}
           value={ed.maxCap}
+          disabled={!warehouse.is_active}
           onChange={(e) => ed.setMaxCap(Number(e.target.value))}
+        />
+      </td>
+      <td className="px-4 py-2.5">
+        <input
+          type="number"
+          className="input"
+          min={1}
+          step={1}
+          value={ed.minPages}
+          placeholder="Not set"
+          disabled={!warehouse.is_active}
+          onChange={(e) => ed.setMinPages(e.target.value)}
         />
       </td>
       <td className="px-4 py-2.5 text-right">
         {ed.error && (
           <span className="mr-2 text-xs text-rose-600">{ed.error}</span>
         )}
+        {lifecycle.error && (
+          <span className="mr-2 text-xs text-rose-600">{lifecycle.error}</span>
+        )}
         <button
           type="button"
           className="btn-primary"
-          disabled={!ed.dirty || ed.pending}
+          disabled={!warehouse.is_active || !ed.dirty || ed.pending}
           onClick={() => void ed.save()}
         >
           {ed.pending ? "Saving..." : "Save"}
+        </button>
+        <button
+          type="button"
+          className="btn-secondary ml-2"
+          disabled={lifecycle.pending}
+          onClick={() =>
+            void lifecycle.run(warehouse.is_active ? "archive" : "restore")
+          }
+        >
+          {warehouse.is_active ? (
+            <Trash2 className="h-4 w-4" />
+          ) : (
+            <Undo2 className="h-4 w-4" />
+          )}
+          {lifecycle.pending
+            ? "Working..."
+            : warehouse.is_active
+              ? "Archive"
+              : "Restore"}
         </button>
       </td>
     </tr>
@@ -733,18 +890,27 @@ function WarehouseRow({
 function WarehouseCard({
   warehouse,
   onSave,
+  onArchive,
+  onRestore,
 }: {
   warehouse: Warehouse;
   onSave: (patch: WarehousePatch) => Promise<unknown>;
+  onArchive: () => Promise<unknown>;
+  onRestore: () => Promise<unknown>;
 }) {
   const ed = useWarehouseEditor(warehouse, onSave);
+  const lifecycle = useWarehouseLifecycle(warehouse, onArchive, onRestore);
   return (
     <div className="space-y-3 px-4 py-3">
+      {!warehouse.is_active && (
+        <span className="badge bg-slate-100 text-slate-600">Archived</span>
+      )}
       <label className="block">
         <span className="text-xs text-slate-500">Name</span>
         <input
           className="input"
           value={ed.name}
+          disabled={!warehouse.is_active}
           onChange={(e) => ed.setName(e.target.value)}
         />
       </label>
@@ -756,6 +922,7 @@ function WarehouseCard({
             className="input"
             min={0}
             value={ed.minInv}
+            disabled={!warehouse.is_active}
             onChange={(e) => ed.setMinInv(Number(e.target.value))}
           />
         </label>
@@ -766,18 +933,54 @@ function WarehouseCard({
             className="input"
             min={1}
             value={ed.maxCap}
+            disabled={!warehouse.is_active}
             onChange={(e) => ed.setMaxCap(Number(e.target.value))}
+          />
+        </label>
+        <label className="block">
+          <span className="text-xs text-slate-500">Min pages / day</span>
+          <input
+            type="number"
+            className="input"
+            min={1}
+            step={1}
+            value={ed.minPages}
+            placeholder="Not set"
+            disabled={!warehouse.is_active}
+            onChange={(e) => ed.setMinPages(e.target.value)}
           />
         </label>
       </div>
       {ed.error && <p className="text-xs text-rose-600">{ed.error}</p>}
+      {lifecycle.error && (
+        <p className="text-xs text-rose-600">{lifecycle.error}</p>
+      )}
       <button
         type="button"
         className="btn-primary w-full"
-        disabled={!ed.dirty || ed.pending}
+        disabled={!warehouse.is_active || !ed.dirty || ed.pending}
         onClick={() => void ed.save()}
       >
         {ed.pending ? "Saving..." : "Save"}
+      </button>
+      <button
+        type="button"
+        className="btn-secondary w-full"
+        disabled={lifecycle.pending}
+        onClick={() =>
+          void lifecycle.run(warehouse.is_active ? "archive" : "restore")
+        }
+      >
+        {warehouse.is_active ? (
+          <Trash2 className="h-4 w-4" />
+        ) : (
+          <Undo2 className="h-4 w-4" />
+        )}
+        {lifecycle.pending
+          ? "Working..."
+          : warehouse.is_active
+            ? "Archive"
+            : "Restore"}
       </button>
     </div>
   );
@@ -836,6 +1039,7 @@ function UsersSection() {
                     }
                   >
                     <option value="viewer">Viewer</option>
+                    <option value="warehouse_mover">Warehouse mover</option>
                     <option value="operator">Operator</option>
                     <option value="admin">Admin</option>
                   </select>
@@ -947,6 +1151,7 @@ function UserCard({
           }
         >
           <option value="viewer">Viewer</option>
+          <option value="warehouse_mover">Warehouse mover</option>
           <option value="operator">Operator</option>
           <option value="admin">Admin</option>
         </select>

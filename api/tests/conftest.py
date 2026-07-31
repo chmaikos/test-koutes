@@ -54,6 +54,10 @@ def session() -> Generator[Session, None, None]:
         yield s
     finally:
         s.close()
+        # SQLite cannot drop a table while rows reference that same table.
+        # Production uses PostgreSQL, which drops the named self-FK first.
+        with engine.connect() as connection:
+            connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
         Base.metadata.drop_all(engine)
         engine.dispose()
 

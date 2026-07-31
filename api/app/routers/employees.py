@@ -2,7 +2,16 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    HTTPException,
+    Query,
+    Response,
+    UploadFile,
+    status,
+)
 from sqlalchemy import func, select
 
 from app.deps import CurrentUser, DbSession, require_admin
@@ -10,23 +19,35 @@ from app.models.employees import Employee
 from app.models.warehouses import Warehouse
 from app.schemas.employees import (
     EmployeeCreate,
+    EmployeeImportRequest,
+    EmployeeImportResult,
+    EmployeeImportSkip,
     EmployeeOut,
     EmployeePage,
     EmployeeUpdate,
 )
+from app.schemas.requests import XlsxPreviewOut, XlsxPreviewRow, XlsxPreviewSheet
 from app.services.acl import apply_warehouse_filter, can_access
+from app.services.boxes import BoxRuleError
+from app.services.employee_imports import (
+    EmployeeImportError,
+    EmployeeImportRow,
+    import_employees,
+)
+from app.services.warehouses import WarehouseRuleError, ensure_active_warehouse
+from app.services.xlsx_preview import MAX_XLSX_BYTES, preview_xlsx
 
 router = APIRouter(prefix="/employees", tags=["employees"])
 
 
 def _ensure_warehouse(db: DbSession, warehouse_id: int) -> Warehouse:
-    wh = db.get(Warehouse, warehouse_id)
-    if wh is None:
+    try:
+        return ensure_active_warehouse(db, warehouse_id)
+    except WarehouseRuleError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"unknown warehouse_id: {warehouse_id}",
-        )
-    return wh
+            detail=str(exc),
+        ) from exc
 
 
 @router.get("", response_model=EmployeePage)
@@ -72,6 +93,74 @@ def list_employees(
     )
 
 
+@router.post("/import-preview", response_model=XlsxPreviewOut)
+async def preview_employee_import(
+    user: Annotated[CurrentUser, Depends(require_admin)],
+    file: Annotated[UploadFile, File(description="An XLSX employee workbook")],
+) -> XlsxPreviewOut:
+    del user
+    filename = file.filename or "employees.xlsx"
+    if not filename.lower().endswith(".xlsx"):
+        raise HTTPException(status_code=400, detail="only .xlsx files are supported")
+    payload = await file.read(MAX_XLSX_BYTES + 1)
+    try:
+        sheets = preview_xlsx(payload)
+    except BoxRuleError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return XlsxPreviewOut(
+        filename=filename,
+        sheets=[
+            XlsxPreviewSheet(
+                name=sheet.name,
+                max_columns=sheet.max_columns,
+                rows=[
+                    XlsxPreviewRow(row_number=row.row_number, cells=row.cells)
+                    for row in sheet.rows
+                ],
+            )
+            for sheet in sheets
+        ],
+    )
+
+
+@router.post("/import-mapped", response_model=EmployeeImportResult)
+def import_mapped_employees(
+    payload: EmployeeImportRequest,
+    db: DbSession,
+    user: Annotated[CurrentUser, Depends(require_admin)],
+) -> EmployeeImportResult:
+    del user
+    try:
+        outcome = import_employees(
+            db,
+            warehouse_id=payload.warehouse_id,
+            rows=[
+                EmployeeImportRow(
+                    source_row=item.source_row,
+                    full_name=item.full_name,
+                    default_hours_per_day=item.default_hours_per_day,
+                    is_active=item.is_active,
+                    excluded_from_metrics=item.excluded_from_metrics,
+                )
+                for item in payload.items
+            ],
+        )
+    except EmployeeImportError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return EmployeeImportResult(
+        created=[EmployeeOut.model_validate(item) for item in outcome.created],
+        updated=[EmployeeOut.model_validate(item) for item in outcome.updated],
+        skipped=[
+            EmployeeImportSkip(
+                row=item.row,
+                full_name=item.full_name,
+                reason=item.reason,
+            )
+            for item in outcome.skipped
+        ],
+    )
+
+
 @router.post("", response_model=EmployeeOut, status_code=status.HTTP_201_CREATED)
 def create_employee(
     payload: EmployeeCreate,
@@ -102,6 +191,7 @@ def update_employee(
     emp = db.get(Employee, employee_id)
     if emp is None:
         raise HTTPException(status_code=404, detail="employee not found")
+    _ensure_warehouse(db, emp.warehouse_id)
     if payload.warehouse_id is not None and payload.warehouse_id != emp.warehouse_id:
         _ensure_warehouse(db, payload.warehouse_id)
         emp.warehouse_id = payload.warehouse_id
@@ -144,6 +234,7 @@ def delete_employee(
     # which is a no-op today but stays consistent if the rule is tightened.
     if not can_access(user, emp.warehouse_id):
         raise HTTPException(status_code=404, detail="employee not found")
+    _ensure_warehouse(db, emp.warehouse_id)
     emp.is_active = False
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)

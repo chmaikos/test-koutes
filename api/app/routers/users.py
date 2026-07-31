@@ -49,20 +49,24 @@ def update_user(
         # returns None for them); the rows are stored verbatim so demoting
         # them back to operator restores the explicit list.
         requested = sorted(set(payload.warehouse_ids))
+        archived_existing = [w for w in target.warehouses if not w.is_active]
         if requested:
             found = db.scalars(
-                select(Warehouse).where(Warehouse.id.in_(requested))
+                select(Warehouse).where(
+                    Warehouse.id.in_(requested),
+                    Warehouse.is_active.is_(True),
+                )
             ).all()
             found_ids = {w.id for w in found}
             missing = [wid for wid in requested if wid not in found_ids]
             if missing:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"unknown warehouse_ids: {missing}",
+                    detail=f"unknown or archived warehouse_ids: {missing}",
                 )
-            target.warehouses = list(found)
+            target.warehouses = archived_existing + list(found)
         else:
-            target.warehouses = []
+            target.warehouses = archived_existing
     db.commit()
     db.refresh(target)
     return UserOut.model_validate(target)

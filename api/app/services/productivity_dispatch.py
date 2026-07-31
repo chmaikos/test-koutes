@@ -121,7 +121,11 @@ def send_daily_reports(
         )
         return outcome
 
-    warehouses = db.scalars(select(Warehouse).order_by(Warehouse.id)).all()
+    warehouses = db.scalars(
+        select(Warehouse)
+        .where(Warehouse.is_active.is_(True))
+        .order_by(Warehouse.id)
+    ).all()
     if not warehouses:
         return outcome
 

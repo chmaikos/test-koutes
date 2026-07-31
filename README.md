@@ -11,9 +11,38 @@ and threshold alerts (in-app + email via Microsoft Graph).
   ready-to-return, capacity bar, open alerts).
 - Searchable / filterable boxes table with inline status transitions.
 - Full audit trail per box (timeline of events).
-- CSV and XLSX exports honouring the current filters.
+- Audited inbound box orders and return requests with mover approval, delivery /
+  collection tracking, and final receipt acceptance.
+- Returns are linked to a completed inbound order. Users select all or any
+  subset of that order's unreserved boxes currently marked Ready to Return;
+  remaining boxes can be included in later return requests.
+- XLSX imports and manual box creation automatically produce completed receipt
+  batches, so those boxes use the same inbound-linked return workflow. Existing
+  unlinked inventory is grouped into clearly labeled legacy receipt batches by
+  migration.
+- Request-linked boxes cannot be deleted or moved silently. Admin overrides
+  require a reason; forced deletion archives the box and preserves its history,
+  while conflicting active return requests are cancelled with an audit event.
+- Inbound receipt can be entered manually or populated from any `.xlsx`
+  layout by choosing the worksheet, mapping columns, and selecting or skipping
+  source rows. Repeated rows for the same lot and box number are merged, with
+  distinct contents combined into one physical box record.
+- Versioned ERP delivery and return notes stored privately in local RustFS.
+- Employee productivity tracking with positive daily page entries, per-warehouse
+  minimum pages/day settings, single top/bottom performers, and weekly,
+  monthly, and rolling 90-day employee averages. Employees below the configured
+  minimum in all three periods are clearly marked.
+- Admin employee XLSX imports support worksheet/column mapping, row exclusion,
+  and case-insensitive updates of existing warehouse employees.
+- CSV and XLSX inventory exports honouring the current filters, plus
+  productivity reports with employee averages and 90 days of daily-entry
+  detail.
 - Low-inventory and max-capacity alerts in-app and via Graph email.
-- Microsoft 365 SSO with three roles: **Admin**, **Operator**, **Viewer**.
+- Admins can archive empty warehouses after open requests are closed. Archiving
+  preserves inventory and audit history, deactivates the roster, resolves open
+  alerts, and can be reversed from Settings.
+- Microsoft 365 SSO with four roles: **Admin**, **Warehouse Mover**,
+  **Operator**, **Viewer**.
 - Mobile-friendly responsive UI; installable as a PWA on iOS and Android
   (see [Install on iOS / Android](#install-on-ios--android)).
 
@@ -24,6 +53,7 @@ and threshold alerts (in-app + email via Microsoft Graph).
 | Frontend | React 18, Vite, TypeScript, Tailwind, shadcn/ui, TanStack Query, MSAL.js |
 | Backend  | FastAPI, SQLAlchemy 2, Alembic, Pydantic v2, APScheduler, msal    |
 | Database | Postgres 16                                                       |
+| Documents | RustFS (private, S3-compatible object storage)                  |
 | Auth     | Microsoft Entra ID (Authorization Code + PKCE / JWT validation)   |
 | Runtime  | Docker Compose                                                    |
 
@@ -31,7 +61,7 @@ and threshold alerts (in-app + email via Microsoft Graph).
 
 ```bash
 cp .env.example .env
-# Fill in ENTRA_*, LOCAL_JWT_SECRET, BOOTSTRAP_ADMIN_* values, then:
+# Fill in ENTRA_*, LOCAL_JWT_SECRET, BOOTSTRAP_ADMIN_*, and RUSTFS_* values:
 docker compose up --build
 ```
 
@@ -142,22 +172,24 @@ Entra that *this client* may request *this scope* without a consent prompt:
 2. **Client ID**: paste the same Application (client) ID from step 1.
 3. Tick the `access_as_user` scope and **Add**.
 
-### 5. Create the three App Roles
+### 5. Create the four App Roles
 
-The API maps Entra App Roles to its `Admin`, `Operator`, `Viewer` permissions
-purely from the `roles` claim — there's no separate group lookup.
+The API maps Entra App Roles to its `Admin`, `Warehouse Mover`, `Operator`,
+and `Viewer` permissions purely from the `roles` claim — there's no separate
+group lookup.
 
-1. Go to **App roles** -> **+ Create app role** and add three:
+1. Go to **App roles** -> **+ Create app role** and add four:
 
-   | Display name | Allowed member types | Value      |
-   | ------------ | -------------------- | ---------- |
-   | Admin        | Users/Groups         | `Admin`    |
-   | Operator     | Users/Groups         | `Operator` |
-   | Viewer       | Users/Groups         | `Viewer`   |
+   | Display name    | Allowed member types | Value             |
+   | --------------- | -------------------- | ----------------- |
+   | Admin           | Users/Groups         | `Admin`           |
+   | Warehouse Mover | Users/Groups         | `Warehouse_Mover` |
+   | Operator        | Users/Groups         | `Operator`        |
+   | Viewer          | Users/Groups         | `Viewer`          |
 
    The **Value** is what ends up in the token — the API matches it
-   case-insensitively, so `Admin` / `admin` / `ADMIN` all work, but the value
-   must be exactly one of those three words.
+   case-insensitively. The mover value must include the underscore:
+   `Warehouse_Mover`.
 2. Tick *Do you want to enable this app role?* on each, **Apply**.
 
 ### 6. Assign users (or groups) to roles
@@ -168,7 +200,7 @@ App roles are dormant until users are assigned to them via the matching
 1. From the same app, click **Managed application in local directory** at the
    top of the *Overview* page (this opens the enterprise app).
 2. **Users and groups** -> **+ Add user/group**.
-3. Pick a user or group, then **Select a role** -> choose one of the three
+3. Pick a user or group, then **Select a role** -> choose one of the four
    roles and **Assign**.
 4. Repeat for everyone who needs access. Users with **no** role assigned will
    be rejected at sign-in time (the API returns 403 with no `roles` claim).
@@ -387,11 +419,38 @@ Roles come from the `roles` claim on the Entra access token (App Roles assigned
 in the Enterprise App). The API also keeps a local `users` row per user and an
 admin can disable a user (`is_active = false`) without touching Entra.
 
-| Role     | Can read | Can write boxes | Can manage thresholds & users |
-| -------- | -------- | --------------- | ----------------------------- |
-| Viewer   | yes      | no              | no                            |
-| Operator | yes      | yes             | no                            |
-| Admin    | yes      | yes             | yes                           |
+| Role            | Can read | Can write boxes | Can fulfil requests | Can manage settings |
+| --------------- | -------- | --------------- | -------------------- | ------------------- |
+| Viewer          | yes      | no              | no                   | no                  |
+| Operator        | yes      | yes             | no                   | no                  |
+| Warehouse Mover | yes      | no              | yes                  | no                  |
+| Admin           | yes      | yes             | yes                  | yes                 |
+
+Every non-admin role is also restricted by the user's warehouse assignments.
+Any user can submit a request for an assigned warehouse. Movers approve or
+reject requests, attach the corresponding ERP note, and start transport.
+The original requester accepts an inbound delivery; a mover accepts returned
+boxes at the warehouse. Inventory changes only at that final acceptance step.
+
+## ERP delivery and return notes
+
+The ERP remains the system that creates official delivery/return documents.
+This app stores a manually uploaded PDF, JPEG, or PNG plus its ERP reference:
+
+1. A mover approves a submitted request.
+2. The mover generates the delivery or return note in the ERP.
+3. On the request detail page, upload the document and enter its ERP reference.
+4. The applicable current note is required before the request can move to
+   **Delivering** or **Collecting**.
+5. Uploading a replacement marks the previous version non-current but retains
+   it for audit. The RustFS bucket is private; downloads always pass through
+   the API's authentication and warehouse ACL.
+
+Set non-default `RUSTFS_ACCESS_KEY` and `RUSTFS_SECRET_KEY` values in `.env`.
+The Compose stack stores objects in the `rustfs-data` volume and metadata in
+Postgres. Back up **both** `postgres-data` and `rustfs-data` together; restoring
+only one side leaves document metadata or files orphaned. Test a paired restore
+regularly and do not expose RustFS port 9000 outside the trusted network.
 
 ## Development
 

@@ -56,7 +56,7 @@ export function AlertDetailPage() {
   const { id } = useParams<{ id: string }>();
   const alertId = id ? Number(id) : undefined;
   const { data, isLoading, error } = useAlert(alertId);
-  const warehouses = useWarehouses();
+  const warehouses = useWarehouses(true);
   const ack = useAcknowledgeAlert();
   const sendTest = useSendTestAlertEmail();
   const canWrite = useHasRole(["admin", "operator"]);

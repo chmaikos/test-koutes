@@ -74,6 +74,16 @@ export default defineConfig({
             handler: "NetworkOnly",
           },
           {
+            // Binary downloads must always come from the API. Caching these
+            // responses can preserve a partial/stale PDF and bypass the
+            // backend's object-integrity check on later download attempts.
+            urlPattern: ({ url }) =>
+              /\/api\/requests\/\d+\/documents\/\d+\/download$/.test(
+                url.pathname,
+              ) || url.pathname.startsWith("/api/exports/"),
+            handler: "NetworkOnly",
+          },
+          {
             // Read APIs: NetworkFirst keeps the SPA snappy when online and
             // gives us a last-known-good payload offline. Mutations are
             // explicitly excluded -- writes always need the network.
@@ -81,7 +91,7 @@ export default defineConfig({
               url.pathname.startsWith("/api/") && request.method === "GET",
             handler: "NetworkFirst",
             options: {
-              cacheName: "warehouse-api-get",
+              cacheName: "warehouse-api-get-v2",
               networkTimeoutSeconds: 3,
               expiration: {
                 maxEntries: 100,

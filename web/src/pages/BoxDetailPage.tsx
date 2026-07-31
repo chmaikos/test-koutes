@@ -13,6 +13,10 @@ import type { BoxStatus } from "@/api/types";
 import { STATUS_LABEL, StatusBadge } from "@/components/StatusBadge";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useHasRole } from "@/components/RoleGate";
+import {
+  hasRequiredOverrideReason,
+  shouldOfferForceArchive,
+} from "@/pages/boxIntegrity";
 
 // Mirrors the API's linear chain. Each entry is "the next legal step"
 // for that state; admins toggling "Override rules" below get the full
@@ -31,13 +35,17 @@ export function BoxDetailPage() {
   const boxId = id ? Number(id) : undefined;
   const { data: box } = useBox(boxId);
   const events = useBoxEvents(boxId);
-  const warehouses = useWarehouses();
+  const warehouses = useWarehouses(true);
   const update = useUpdateBox();
   const deleteBox = useDeleteBox();
   const canWrite = useHasRole(["admin", "operator"]);
   const isAdmin = useHasRole(["admin"]);
   const [override, setOverride] = useState(false);
+  const [overrideReason, setOverrideReason] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleteConflict, setDeleteConflict] = useState<string | null>(null);
+  const [archiveReason, setArchiveReason] = useState("");
+  const [actionError, setActionError] = useState<string | null>(null);
 
   if (!box) {
     return <p className="text-sm text-slate-500">Loading...</p>;
@@ -52,7 +60,22 @@ export function BoxDetailPage() {
     ? ALL_BOX_STATUSES.filter((s) => s !== box.status)
     : transitions;
   const warehouseSelectDisabled =
-    update.isPending || (!useOverride && box.status === "returned");
+    update.isPending ||
+    box.archived_at !== null ||
+    !hasRequiredOverrideReason(useOverride, overrideReason) ||
+    (!useOverride && box.status === "returned");
+  const currentBoxId = box.id;
+
+  async function performUpdate(
+    patch: Parameters<typeof update.mutateAsync>[0]["patch"],
+  ) {
+    setActionError(null);
+    try {
+      await update.mutateAsync({ id: currentBoxId, patch });
+    } catch (caught) {
+      setActionError(apiError(caught, "The box could not be updated."));
+    }
+  }
 
   return (
     <div className="space-y-6">
@@ -87,8 +110,15 @@ export function BoxDetailPage() {
             {box.contents ?? "—"}
           </Field>
         </dl>
+        {box.archived_at && (
+          <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+            <strong>Archived:</strong>{" "}
+            {new Date(box.archived_at).toLocaleString()}
+            {box.archive_reason ? ` — ${box.archive_reason}` : ""}
+          </div>
+        )}
 
-        {isAdmin && (
+        {isAdmin && !box.archived_at && (
           <div className="flex items-center justify-between border-t border-slate-100 pt-3">
             <label
               className="flex items-center gap-1.5 text-xs text-amber-800"
@@ -103,15 +133,20 @@ export function BoxDetailPage() {
               Override rules (admin)
             </label>
             {useOverride && (
-              <span className="text-xs text-amber-700">
-                Constrained transitions disabled. Audit log will record this as
-                an admin override.
-              </span>
+              <input
+                className="input max-w-sm text-xs"
+                placeholder="Required override reason"
+                maxLength={2000}
+                value={overrideReason}
+                onChange={(event) => setOverrideReason(event.target.value)}
+              />
             )}
           </div>
         )}
 
-        {canWrite && (statusButtons.length > 0 || useOverride) && (
+        {canWrite &&
+          !box.archived_at &&
+          (statusButtons.length > 0 || useOverride) && (
           <div className="flex flex-wrap items-center gap-2 border-t border-slate-100 pt-3">
             <span className="text-xs text-slate-500">Move to:</span>
             {statusButtons.map((s) => (
@@ -119,11 +154,15 @@ export function BoxDetailPage() {
                 type="button"
                 key={s}
                 className="btn-secondary text-xs"
-                disabled={update.isPending}
+                disabled={
+                  update.isPending ||
+                  !hasRequiredOverrideReason(useOverride, overrideReason)
+                }
                 onClick={() =>
-                  update.mutate({
-                    id: box.id,
-                    patch: { status: s, force: useOverride || undefined },
+                  void performUpdate({
+                    status: s,
+                    force: useOverride || undefined,
+                    note: useOverride ? overrideReason.trim() : undefined,
                   })
                 }
               >
@@ -135,22 +174,25 @@ export function BoxDetailPage() {
               value={box.current_warehouse_id}
               disabled={warehouseSelectDisabled}
               onChange={(e) =>
-                update.mutate({
-                  id: box.id,
-                  patch: {
-                    warehouse_id: Number(e.target.value),
-                    force: useOverride || undefined,
-                  },
+                void performUpdate({
+                  warehouse_id: Number(e.target.value),
+                  force: useOverride || undefined,
+                  note: useOverride ? overrideReason.trim() : undefined,
                 })
               }
             >
-              {warehouses.data?.map((w) => (
+              {warehouses.data?.filter((w) => w.is_active).map((w) => (
                 <option key={w.id} value={w.id}>
                   Move to {w.name}
                 </option>
               ))}
             </select>
           </div>
+        )}
+        {actionError && (
+          <p role="alert" className="text-sm text-rose-600">
+            {actionError}
+          </p>
         )}
       </header>
 
@@ -183,14 +225,14 @@ export function BoxDetailPage() {
         </ol>
       </section>
 
-      {isAdmin && (
+      {isAdmin && !box.archived_at && (
         <section className="card card-pad border-rose-200 bg-rose-50/50">
           <h2 className="text-sm font-semibold uppercase tracking-wider text-rose-700">
             Danger zone
           </h2>
           <p className="mt-1 text-sm text-slate-600">
-            Permanently delete this box and its event history. This action
-            cannot be undone.
+            Unlinked boxes can be permanently deleted. A box referenced by a
+            request is protected; an admin may archive it with a reason instead.
           </p>
           <div className="mt-3">
             <button
@@ -202,6 +244,47 @@ export function BoxDetailPage() {
               <Trash2 className="h-4 w-4" /> Delete box
             </button>
           </div>
+          {deleteConflict && (
+            <div className="mt-4 rounded-lg border border-amber-200 bg-white p-3">
+              <p className="text-sm text-amber-900">{deleteConflict}</p>
+              <label className="mt-3 block">
+                <span className="text-xs font-medium text-slate-600">
+                  Archive reason
+                </span>
+                <textarea
+                  className="input mt-1"
+                  rows={3}
+                  maxLength={2000}
+                  value={archiveReason}
+                  onChange={(event) => setArchiveReason(event.target.value)}
+                />
+              </label>
+              <button
+                type="button"
+                className="btn-danger mt-3"
+                disabled={
+                  deleteBox.isPending ||
+                  !hasRequiredOverrideReason(true, archiveReason)
+                }
+                onClick={async () => {
+                  try {
+                    await deleteBox.mutateAsync({
+                      id: box.id,
+                      force: true,
+                      reason: archiveReason.trim(),
+                    });
+                    navigate("/boxes", { replace: true });
+                  } catch (caught) {
+                    setDeleteConflict(
+                      apiError(caught, "The box could not be archived."),
+                    );
+                  }
+                }}
+              >
+                Archive linked box
+              </button>
+            </div>
+          )}
         </section>
       )}
 
@@ -210,9 +293,9 @@ export function BoxDetailPage() {
           title={`Delete box ${box.box_number}?`}
           message={
             <>
-              The box (currently <strong>{STATUS_LABEL[box.status]}</strong> at{" "}
-              <strong>{warehouseName}</strong>) and its full event history will
-              be removed. This cannot be undone.
+              If this box is not referenced by a request, it and its event
+              history will be removed permanently. Request-linked boxes are
+              protected and can be archived after this check.
             </>
           }
           confirmLabel="Delete"
@@ -220,9 +303,22 @@ export function BoxDetailPage() {
           isPending={deleteBox.isPending}
           onCancel={() => setConfirmDelete(false)}
           onConfirm={async () => {
-            await deleteBox.mutateAsync(box.id);
-            setConfirmDelete(false);
-            navigate("/boxes", { replace: true });
+            try {
+              await deleteBox.mutateAsync({ id: box.id });
+              setConfirmDelete(false);
+              navigate("/boxes", { replace: true });
+            } catch (caught) {
+              setConfirmDelete(false);
+              const message = apiError(caught, "The box could not be deleted.");
+              const responseStatus = (
+                caught as { response?: { status?: number } }
+              ).response?.status;
+              if (shouldOfferForceArchive(responseStatus)) {
+                setDeleteConflict(message);
+              } else {
+                setActionError(message);
+              }
+            }
           }}
         />
       )}
@@ -256,7 +352,17 @@ function describeEvent(
       }.`;
     case "returned":
       return `Returned from ${wname(ev.warehouse_id)}.`;
+    case "archived":
+      return `Archived at ${wname(ev.warehouse_id)}.`;
+    case "restored":
+      return `Restored to active inventory at ${wname(ev.to_warehouse_id)}.`;
     default:
       return ev.event_type;
   }
+}
+
+function apiError(error: unknown, fallback: string): string {
+  const detail = (error as { response?: { data?: { detail?: unknown } } })
+    .response?.data?.detail;
+  return typeof detail === "string" ? detail : fallback;
 }

@@ -16,6 +16,7 @@ from sqlalchemy import func, select
 from app.deps import CurrentUser, DbSession, require_admin, require_operator
 from app.events import bus
 from app.models.boxes import Box, BoxEvent
+from app.models.requests import BoxRequestOrigin
 from app.models.users import User, UserRole
 from app.routers._filters import (
     BoxFilters,
@@ -27,6 +28,8 @@ from app.routers._filters import (
 )
 from app.schemas.boxes import (
     BoxCreate,
+    BoxDeleteRequest,
+    BoxDeleteResult,
     BoxEventOut,
     BoxOut,
     BoxUpdate,
@@ -43,12 +46,14 @@ from app.services.boxes import (
     BoxAccessError,
     BoxConflictError,
     BoxRuleError,
+    DeleteOutcome,
     bulk_delete_boxes,
     bulk_update_boxes,
     create_box,
     delete_box,
     update_box,
 )
+from app.services.requests import RequestRuleError, create_completed_receipt
 
 router = APIRouter(prefix="/boxes", tags=["boxes"])
 
@@ -63,12 +68,17 @@ def _rule_error_to_http(exc: BoxRuleError) -> HTTPException:
     return HTTPException(status_code=code, detail=str(exc))
 
 
-def _check_force(payload_force: bool, user: User) -> None:
+def _check_force(payload_force: bool, user: User, reason: str | None = None) -> None:
     """Force-override is admin-only; refuse with 403 otherwise."""
     if payload_force and user.role != UserRole.admin:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="force override requires admin role",
+        )
+    if payload_force and not (reason or "").strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="a reason is required for an admin override",
         )
 
 
@@ -111,15 +121,27 @@ async def create_new_box(
             contents=payload.contents,
             warehouse_id=payload.warehouse_id,
             note=payload.note,
+            commit=False,
         )
-    except BoxRuleError as exc:
+        receipt = create_completed_receipt(
+            db,
+            user=user,
+            warehouse_id=payload.warehouse_id,
+            boxes=[box],
+            origin=BoxRequestOrigin.manual_entry,
+            note="Completed automatically from manual box entry.",
+        )
+    except (BoxRuleError, RequestRuleError) as exc:
+        db.rollback()
         raise _rule_error_to_http(exc) from exc
     await bus.publish(
         "box.updated",
         {"id": box.id, "warehouse_id": box.current_warehouse_id, "status": box.status.value},
     )
     background.add_task(evaluate_safe, db)
-    return BoxOut.model_validate(box)
+    return BoxOut.model_validate(box).model_copy(
+        update={"receipt_request_id": receipt.id}
+    )
 
 
 @router.post("/bulk", response_model=BulkResult)
@@ -134,7 +156,7 @@ async def bulk_update(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="must specify warehouse_id or status",
         )
-    _check_force(payload.force, user)
+    _check_force(payload.force, user, payload.note)
     try:
         outcome = bulk_update_boxes(
             db,
@@ -153,6 +175,8 @@ async def bulk_update(
     affected_warehouses = {b.current_warehouse_id for b in outcome.updated}
     for wid in affected_warehouses:
         await bus.publish("box.updated", {"warehouse_id": wid, "bulk": True})
+    for request_id in outcome.cancelled_request_ids:
+        await bus.publish("request.updated", {"id": request_id})
     if outcome.updated:
         background.add_task(evaluate_safe, db)
 
@@ -162,6 +186,7 @@ async def bulk_update(
             BulkSkip(box_id=s.box_id, box_number=s.box_number, reason=s.reason)
             for s in outcome.skipped
         ],
+        cancelled_request_ids=sorted(outcome.cancelled_request_ids),
     )
 
 
@@ -186,7 +211,8 @@ async def patch_box(
     box = db.get(Box, box_id)
     if box is None or not can_access(user, box.current_warehouse_id):
         raise HTTPException(status_code=404, detail="not found")
-    _check_force(payload.force, user)
+    _check_force(payload.force, user, payload.note)
+    cancelled_request_ids: set[int] = set()
     try:
         box = update_box(
             db,
@@ -198,6 +224,7 @@ async def patch_box(
             new_contents=payload.contents,
             note=payload.note,
             force=payload.force,
+            cancelled_request_ids=cancelled_request_ids,
         )
     except BoxRuleError as exc:
         raise _rule_error_to_http(exc) from exc
@@ -205,8 +232,68 @@ async def patch_box(
         "box.updated",
         {"id": box.id, "warehouse_id": box.current_warehouse_id, "status": box.status.value},
     )
+    for request_id in cancelled_request_ids:
+        await bus.publish("request.updated", {"id": request_id})
     background.add_task(evaluate_safe, db)
     return BoxOut.model_validate(box)
+
+
+async def _perform_single_delete(
+    box_id: int,
+    payload: BoxDeleteRequest,
+    db: DbSession,
+    background: BackgroundTasks,
+    user: User,
+) -> DeleteOutcome:
+    box = db.get(Box, box_id)
+    if box is None or not can_access(user, box.current_warehouse_id):
+        raise HTTPException(status_code=404, detail="not found")
+    _check_force(payload.force, user, payload.reason)
+    try:
+        outcome = delete_box(
+            db,
+            user=user,
+            box=box,
+            force=payload.force,
+            reason=payload.reason,
+        )
+    except BoxRuleError as exc:
+        raise _rule_error_to_http(exc) from exc
+    await bus.publish(
+        "box.deleted",
+        {
+            "id": box_id,
+            "warehouse_id": outcome.warehouse_id,
+            "archived": outcome.archived,
+        },
+    )
+    for request_id in outcome.cancelled_request_ids:
+        await bus.publish("request.updated", {"id": request_id})
+    background.add_task(evaluate_safe, db)
+    return outcome
+
+
+@router.post("/{box_id}/delete", response_model=BoxDeleteResult)
+async def delete_single_box_action(
+    box_id: int,
+    payload: BoxDeleteRequest,
+    db: DbSession,
+    background: BackgroundTasks,
+    user: Annotated[CurrentUser, Depends(require_admin)],
+) -> BoxDeleteResult:
+    """Delete/archive action that reliably carries force metadata in a body."""
+    outcome = await _perform_single_delete(
+        box_id,
+        payload,
+        db,
+        background,
+        user,
+    )
+    return BoxDeleteResult(
+        box_id=outcome.box_id,
+        archived=outcome.archived,
+        cancelled_request_ids=sorted(outcome.cancelled_request_ids),
+    )
 
 
 @router.delete(
@@ -219,15 +306,16 @@ async def delete_single_box(
     db: DbSession,
     background: BackgroundTasks,
     user: Annotated[CurrentUser, Depends(require_admin)],
+    payload: BoxDeleteRequest | None = None,
 ) -> Response:
-    box = db.get(Box, box_id)
-    # require_admin already gates this, but keep ACL consistent in case
-    # the dependency is ever loosened.
-    if box is None or not can_access(user, box.current_warehouse_id):
-        raise HTTPException(status_code=404, detail="not found")
-    warehouse_id = delete_box(db, box=box)
-    await bus.publish("box.deleted", {"id": box_id, "warehouse_id": warehouse_id})
-    background.add_task(evaluate_safe, db)
+    # Backwards-compatible endpoint for clients that already send DELETE.
+    await _perform_single_delete(
+        box_id,
+        payload or BoxDeleteRequest(),
+        db,
+        background,
+        user,
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -238,13 +326,27 @@ async def bulk_delete(
     background: BackgroundTasks,
     user: Annotated[CurrentUser, Depends(require_admin)],
 ) -> BulkDeleteResult:
-    outcome = bulk_delete_boxes(db, box_ids=payload.box_ids)
+    _check_force(payload.force, user, payload.reason)
+    try:
+        outcome = bulk_delete_boxes(
+            db,
+            user=user,
+            box_ids=payload.box_ids,
+            force=payload.force,
+            reason=payload.reason,
+        )
+    except BoxRuleError as exc:
+        raise _rule_error_to_http(exc) from exc
     for wid in outcome.affected_warehouse_ids:
         await bus.publish("box.deleted", {"warehouse_id": wid, "bulk": True})
-    if outcome.deleted_ids:
+    for request_id in outcome.cancelled_request_ids:
+        await bus.publish("request.updated", {"id": request_id})
+    if outcome.deleted_ids or outcome.archived_ids:
         background.add_task(evaluate_safe, db)
     return BulkDeleteResult(
         deleted_ids=outcome.deleted_ids,
+        archived_ids=outcome.archived_ids,
+        cancelled_request_ids=sorted(outcome.cancelled_request_ids),
         skipped=[
             BulkSkip(box_id=s.box_id, box_number=s.box_number, reason=s.reason)
             for s in outcome.skipped

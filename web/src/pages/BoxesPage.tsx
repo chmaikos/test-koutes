@@ -34,9 +34,13 @@ import {
   BulkResultDialog,
   type BulkResultSkipRow,
 } from "@/components/BulkResultDialog";
-import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { ImportBoxesDialog } from "@/components/ImportBoxesDialog";
 import { useHasRole } from "@/components/RoleGate";
+import {
+  deleteActionLabel,
+  hasRequiredOverrideReason,
+} from "@/pages/boxIntegrity";
+import { importResultTitle } from "@/pages/importResults";
 
 // Whitelist for the page-size selector. The API enforces a 1..200
 // range; we expose the four common buckets so operators can quickly
@@ -83,7 +87,7 @@ export function BoxesPage() {
   const [params, setParams] = useSearchParams();
   const canWrite = useHasRole(["admin", "operator"]);
   const isAdmin = useHasRole(["admin"]);
-  const warehouses = useWarehouses();
+  const warehouses = useWarehouses(true);
 
   const filters: BoxFilters = useMemo(() => {
     const out: BoxFilters = {};
@@ -154,6 +158,9 @@ export function BoxesPage() {
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [dialog, setDialog] = useState<DialogState>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleteOverride, setDeleteOverride] = useState(false);
+  const [deleteReason, setDeleteReason] = useState("");
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const bulkUpdate = useBulkUpdateBoxes();
   const bulkDelete = useBulkDeleteBoxes();
@@ -246,7 +253,7 @@ export function BoxesPage() {
             <Search className="pointer-events-none absolute left-2 top-2.5 h-4 w-4 text-slate-400" />
             <input
               className="input pl-8"
-              placeholder="Box # or lot"
+              placeholder="Box #, lot, or contents"
               value={filters.search ?? ""}
               onChange={(e) => setParam("q", e.target.value || undefined)}
             />
@@ -297,7 +304,9 @@ export function BoxesPage() {
       {canWrite && selectedIds.size > 0 && (
         <BulkActionBar
           count={selectedIds.size}
-          warehouses={warehouses.data ?? []}
+          warehouses={(warehouses.data ?? []).filter(
+            (warehouse) => warehouse.is_active,
+          )}
           isPending={bulkUpdate.isPending || bulkDelete.isPending}
           isAdmin={isAdmin}
           onClear={clearSelection}
@@ -309,7 +318,12 @@ export function BoxesPage() {
             setDialog({ kind: "bulk", result });
             clearSelection();
           }}
-          onRequestDelete={() => setConfirmDelete(true)}
+          onRequestDelete={() => {
+            setDeleteOverride(false);
+            setDeleteReason("");
+            setDeleteError(null);
+            setConfirmDelete(true);
+          }}
         />
       )}
 
@@ -515,9 +529,11 @@ export function BoxesPage() {
       )}
       {dialog?.kind === "import" && (
         <BulkResultDialog
-          title="Import result"
+          title={importResultTitle(dialog.result)}
           successLabel="imported"
-          successCount={dialog.result.created.length}
+          successCount={
+            dialog.result.created.length + dialog.result.restored.length
+          }
           skipped={dialog.result.skipped.map<BulkResultSkipRow>((s) => ({
             primary: `Row ${s.row}`,
             secondary: s.box_number ?? undefined,
@@ -528,9 +544,15 @@ export function BoxesPage() {
       )}
       {dialog?.kind === "delete" && (
         <BulkResultDialog
-          title="Delete result"
-          successLabel="deleted"
-          successCount={dialog.result.deleted_ids.length}
+          title={`Delete result${
+            dialog.result.cancelled_request_ids.length
+              ? ` · ${dialog.result.cancelled_request_ids.length} return request(s) cancelled`
+              : ""
+          }`}
+          successLabel="deleted or archived"
+          successCount={
+            dialog.result.deleted_ids.length + dialog.result.archived_ids.length
+          }
           skipped={dialog.result.skipped.map<BulkResultSkipRow>((s) => ({
             primary: s.box_number || `#${s.box_id}`,
             secondary: s.box_number ? `#${s.box_id}` : undefined,
@@ -540,23 +562,89 @@ export function BoxesPage() {
         />
       )}
       {confirmDelete && (
-        <ConfirmDialog
-          title={`Delete ${selectedIds.size} box${
-            selectedIds.size === 1 ? "" : "es"
-          }?`}
-          message="Deleted boxes are removed permanently along with their event history. This cannot be undone."
-          confirmLabel="Delete"
-          destructive
-          isPending={bulkDelete.isPending}
-          onCancel={() => setConfirmDelete(false)}
-          onConfirm={async () => {
-            const ids = Array.from(selectedIds);
-            const result = await bulkDelete.mutateAsync(ids);
-            setConfirmDelete(false);
-            setDialog({ kind: "delete", result });
-            clearSelection();
-          }}
-        />
+        <div className="modal-backdrop z-40">
+          <form
+            className="modal-sheet max-w-md"
+            onSubmit={async (event) => {
+              event.preventDefault();
+              setDeleteError(null);
+              try {
+                const result = await bulkDelete.mutateAsync({
+                  box_ids: Array.from(selectedIds),
+                  force: deleteOverride || undefined,
+                  reason: deleteOverride ? deleteReason.trim() : undefined,
+                });
+                setConfirmDelete(false);
+                setDialog({ kind: "delete", result });
+                clearSelection();
+              } catch (caught) {
+                setDeleteError(apiError(caught, "Bulk delete failed."));
+              }
+            }}
+          >
+            <h2 className="text-lg font-semibold">
+              Delete {selectedIds.size} box
+              {selectedIds.size === 1 ? "" : "es"}?
+            </h2>
+            <p className="mt-2 text-sm text-slate-600">
+              Unlinked boxes are removed permanently. Request-linked boxes are
+              protected and will be skipped unless the archive override is
+              enabled.
+            </p>
+            <label className="mt-4 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                checked={deleteOverride}
+                onChange={(event) => setDeleteOverride(event.target.checked)}
+              />
+              Archive request-linked boxes and cancel conflicting active
+              returns
+            </label>
+            {deleteOverride && (
+              <label className="mt-3 block">
+                <span className="text-xs font-medium text-slate-600">
+                  Required archive reason
+                </span>
+                <textarea
+                  required
+                  className="input mt-1"
+                  rows={3}
+                  maxLength={2000}
+                  value={deleteReason}
+                  onChange={(event) => setDeleteReason(event.target.value)}
+                />
+              </label>
+            )}
+            {deleteError && (
+              <p role="alert" className="mt-3 text-sm text-rose-600">
+                {deleteError}
+              </p>
+            )}
+            <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={bulkDelete.isPending}
+                onClick={() => setConfirmDelete(false)}
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="btn-danger"
+                disabled={
+                  bulkDelete.isPending ||
+                  !hasRequiredOverrideReason(deleteOverride, deleteReason)
+                }
+              >
+                {bulkDelete.isPending
+                  ? "Applying…"
+                  : deleteActionLabel(deleteOverride)}
+              </button>
+            </div>
+          </form>
+        </div>
       )}
     </div>
   );
@@ -640,12 +728,14 @@ function BulkActionBar({
     warehouse_id?: number;
     status?: BoxStatus;
     force?: boolean;
+    note?: string;
   }) => Promise<void>;
   onRequestDelete: () => void;
 }) {
   const [warehouseId, setWarehouseId] = useState<number | "">("");
   const [statusValue, setStatusValue] = useState<BoxStatus | "">("");
   const [override, setOverride] = useState(false);
+  const [overrideReason, setOverrideReason] = useState("");
 
   return (
     <div
@@ -690,12 +780,17 @@ function BulkActionBar({
         <button
           type="button"
           className="btn-primary"
-          disabled={!warehouseId || isPending}
+          disabled={
+            !warehouseId ||
+            isPending ||
+            !hasRequiredOverrideReason(override, overrideReason)
+          }
           onClick={async () => {
             if (!warehouseId) return;
             await onApply({
               warehouse_id: Number(warehouseId),
               force: isAdmin && override ? true : undefined,
+              note: override ? overrideReason.trim() : undefined,
             });
             setWarehouseId("");
           }}
@@ -720,12 +815,17 @@ function BulkActionBar({
         <button
           type="button"
           className="btn-primary"
-          disabled={!statusValue || isPending}
+          disabled={
+            !statusValue ||
+            isPending ||
+            !hasRequiredOverrideReason(override, overrideReason)
+          }
           onClick={async () => {
             if (!statusValue) return;
             await onApply({
               status: statusValue as BoxStatus,
               force: isAdmin && override ? true : undefined,
+              note: override ? overrideReason.trim() : undefined,
             });
             setStatusValue("");
           }}
@@ -734,18 +834,29 @@ function BulkActionBar({
         </button>
       </div>
       {isAdmin && (
-        <label
-          className="flex items-center gap-1.5 text-xs text-amber-800"
-          title="Allow any status change or moving a returned box. Audit log will tag the change as [admin override]."
-        >
-          <input
-            type="checkbox"
-            checked={override}
-            onChange={(e) => setOverride(e.target.checked)}
-            disabled={isPending}
-          />
-          Override rules (admin)
-        </label>
+        <div className="flex flex-col gap-2">
+          <label
+            className="flex items-center gap-1.5 text-xs text-amber-800"
+            title="Allow protected moves/status changes and cancel conflicting active returns."
+          >
+            <input
+              type="checkbox"
+              checked={override}
+              onChange={(e) => setOverride(e.target.checked)}
+              disabled={isPending}
+            />
+            Override request rules (admin)
+          </label>
+          {override && (
+            <input
+              className="input text-xs"
+              placeholder="Required override reason"
+              maxLength={2000}
+              value={overrideReason}
+              onChange={(event) => setOverrideReason(event.target.value)}
+            />
+          )}
+        </div>
       )}
       {isAdmin && (
         <button
@@ -839,6 +950,12 @@ function BoxRow({
       </td>
     </tr>
   );
+}
+
+function apiError(error: unknown, fallback: string): string {
+  const detail = (error as { response?: { data?: { detail?: unknown } } })
+    .response?.data?.detail;
+  return typeof detail === "string" ? detail : fallback;
 }
 
 function BoxCard({

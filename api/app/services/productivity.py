@@ -33,6 +33,7 @@ from sqlalchemy.orm import Session
 
 from app.models.employees import Employee, ProductivityEntry
 from app.models.users import User
+from app.models.warehouses import Warehouse
 from app.services.acl import allowed_warehouse_ids
 
 # Aligns with ``Employee.default_hours_per_day`` default (8). All
@@ -63,6 +64,32 @@ class WarehouseProductivity:
     active_employees: int = 0
     top: list[Performer] = field(default_factory=list)
     bottom: list[Performer] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class EmployeePeriodAverage:
+    """One employee's weighted productivity over a named date range."""
+
+    period_start: date
+    period_end: date
+    total_pages: int = 0
+    total_hours: float = 0.0
+    entry_count: int = 0
+    pages_per_day: float | None = None
+    below_minimum: bool | None = None
+
+
+@dataclass(frozen=True)
+class EmployeeAverages:
+    """Weekly, monthly, and rolling averages for one active employee."""
+
+    employee_id: int
+    employee_name: str
+    excluded_from_metrics: bool
+    weekly: EmployeePeriodAverage
+    monthly: EmployeePeriodAverage
+    three_month: EmployeePeriodAverage
+    consistently_below_minimum: bool = False
 
 
 def _round_hours(value: Decimal | float | int | None) -> float:
@@ -182,6 +209,12 @@ def _summary_for_range(
         base_stmt = base_stmt.where(
             ProductivityEntry.warehouse_id.in_(list(warehouse_ids))
         )
+    elif warehouse_ids is None:
+        base_stmt = base_stmt.where(
+            ProductivityEntry.warehouse_id.in_(
+                select(Warehouse.id).where(Warehouse.is_active.is_(True))
+            )
+        )
     base_stmt = _scope_to_warehouses(
         base_stmt, user, ProductivityEntry.warehouse_id
     ).group_by(ProductivityEntry.warehouse_id)
@@ -218,6 +251,12 @@ def _summary_for_range(
         perf_stmt = perf_stmt.where(
             ProductivityEntry.warehouse_id.in_(list(warehouse_ids))
         )
+    elif warehouse_ids is None:
+        perf_stmt = perf_stmt.where(
+            ProductivityEntry.warehouse_id.in_(
+                select(Warehouse.id).where(Warehouse.is_active.is_(True))
+            )
+        )
     perf_stmt = _scope_to_warehouses(
         perf_stmt, user, ProductivityEntry.warehouse_id
     )
@@ -235,6 +274,12 @@ def _summary_for_range(
     if warehouse_ids:
         active_stmt = active_stmt.where(
             Employee.warehouse_id.in_(list(warehouse_ids))
+        )
+    elif warehouse_ids is None:
+        active_stmt = active_stmt.where(
+            Employee.warehouse_id.in_(
+                select(Warehouse.id).where(Warehouse.is_active.is_(True))
+            )
         )
     active_stmt = _scope_to_warehouses(active_stmt, user, Employee.warehouse_id)
     active_rows = {
@@ -282,7 +327,7 @@ def daily_summary(
     user: User | None = None,
     warehouse_ids: Sequence[int] | None = None,
     on_date: date,
-    top_n: int = 3,
+    top_n: int = 1,
 ) -> dict[int, WarehouseProductivity]:
     """Per-warehouse productivity for a single day."""
     return _summary_for_range(
@@ -302,13 +347,28 @@ def week_bounds(any_day_in_week: date) -> tuple[date, date]:
     return monday, sunday
 
 
+def month_bounds(any_day_in_month: date) -> tuple[date, date]:
+    """Calendar month containing ``any_day_in_month``."""
+    first = any_day_in_month.replace(day=1)
+    if first.month == 12:
+        next_month = first.replace(year=first.year + 1, month=1)
+    else:
+        next_month = first.replace(month=first.month + 1)
+    return first, next_month - timedelta(days=1)
+
+
+def rolling_90_day_bounds(anchor: date) -> tuple[date, date]:
+    """Inclusive 90-day reporting window ending on ``anchor``."""
+    return anchor - timedelta(days=89), anchor
+
+
 def weekly_summary(
     db: Session,
     *,
     user: User | None = None,
     warehouse_ids: Sequence[int] | None = None,
     week_start: date,
-    top_n: int = 3,
+    top_n: int = 1,
 ) -> dict[int, WarehouseProductivity]:
     """Per-warehouse productivity for the ISO week starting on ``week_start``.
 
@@ -327,6 +387,201 @@ def weekly_summary(
     )
 
 
+def monthly_summary(
+    db: Session,
+    *,
+    user: User | None = None,
+    warehouse_ids: Sequence[int] | None = None,
+    month: date,
+    top_n: int = 1,
+) -> dict[int, WarehouseProductivity]:
+    """Per-warehouse productivity for the calendar month containing ``month``."""
+    first, last = month_bounds(month)
+    return _summary_for_range(
+        db,
+        user=user,
+        warehouse_ids=warehouse_ids,
+        start=first,
+        end=last,
+        top_n=top_n,
+    )
+
+
+def rolling_90_day_summary(
+    db: Session,
+    *,
+    user: User | None = None,
+    warehouse_ids: Sequence[int] | None = None,
+    anchor: date,
+    top_n: int = 1,
+) -> dict[int, WarehouseProductivity]:
+    """Per-warehouse productivity for the 90 days ending on ``anchor``."""
+    first, last = rolling_90_day_bounds(anchor)
+    return _summary_for_range(
+        db,
+        user=user,
+        warehouse_ids=warehouse_ids,
+        start=first,
+        end=last,
+        top_n=top_n,
+    )
+
+
+def _employee_period_rows(
+    db: Session,
+    *,
+    user: User | None,
+    warehouse_id: int,
+    start: date,
+    end: date,
+) -> dict[int, tuple[int, float, int]]:
+    stmt: Select = (
+        select(
+            Employee.id,
+            func.coalesce(func.sum(ProductivityEntry.pages), 0),
+            func.coalesce(func.sum(ProductivityEntry.hours_worked), 0),
+            func.count(ProductivityEntry.id),
+        )
+        .join(ProductivityEntry, ProductivityEntry.employee_id == Employee.id)
+        .where(
+            Employee.warehouse_id == warehouse_id,
+            ProductivityEntry.warehouse_id == warehouse_id,
+            Employee.is_active.is_(True),
+            Employee.excluded_from_metrics.is_(False),
+            ProductivityEntry.entry_date >= start,
+            ProductivityEntry.entry_date <= end,
+            ProductivityEntry.excluded_from_metrics.is_(False),
+        )
+        .group_by(Employee.id)
+    )
+    stmt = _scope_to_warehouses(stmt, user, Employee.warehouse_id)
+    return {
+        int(employee_id): (
+            int(pages or 0),
+            float(hours or 0),
+            int(entry_count or 0),
+        )
+        for employee_id, pages, hours, entry_count in db.execute(stmt).all()
+    }
+
+
+def _period_average(
+    rows: dict[int, tuple[int, float, int]],
+    *,
+    employee_id: int,
+    start: date,
+    end: date,
+    minimum: int | None,
+    excluded: bool,
+) -> EmployeePeriodAverage:
+    pages, hours, entry_count = rows.get(employee_id, (0, 0.0, 0))
+    has_data = entry_count > 0 and hours > 0 and not excluded
+    pages_per_day = _round_ppd(pages, hours) if has_data else None
+    below = (
+        pages_per_day < minimum
+        if pages_per_day is not None and minimum is not None
+        else None
+    )
+    return EmployeePeriodAverage(
+        period_start=start,
+        period_end=end,
+        total_pages=pages,
+        total_hours=_round_hours(hours),
+        entry_count=entry_count,
+        pages_per_day=pages_per_day,
+        below_minimum=below,
+    )
+
+
+def employee_averages(
+    db: Session,
+    *,
+    user: User | None,
+    warehouse_id: int,
+    anchor: date,
+    minimum: int | None,
+) -> list[EmployeeAverages]:
+    """Return all active roster rows with three comparable reporting periods."""
+    roster_stmt: Select = select(Employee).where(
+        Employee.warehouse_id == warehouse_id,
+        Employee.is_active.is_(True),
+    )
+    roster_stmt = _scope_to_warehouses(roster_stmt, user, Employee.warehouse_id)
+    employees = db.scalars(roster_stmt.order_by(Employee.full_name)).all()
+
+    week_start, week_end = week_bounds(anchor)
+    month_start, month_end = month_bounds(anchor)
+    three_start, three_end = rolling_90_day_bounds(anchor)
+    weekly_rows = _employee_period_rows(
+        db,
+        user=user,
+        warehouse_id=warehouse_id,
+        start=week_start,
+        end=week_end,
+    )
+    monthly_rows = _employee_period_rows(
+        db,
+        user=user,
+        warehouse_id=warehouse_id,
+        start=month_start,
+        end=month_end,
+    )
+    three_month_rows = _employee_period_rows(
+        db,
+        user=user,
+        warehouse_id=warehouse_id,
+        start=three_start,
+        end=three_end,
+    )
+
+    output: list[EmployeeAverages] = []
+    for employee in employees:
+        excluded = bool(employee.excluded_from_metrics)
+        weekly = _period_average(
+            weekly_rows,
+            employee_id=employee.id,
+            start=week_start,
+            end=week_end,
+            minimum=minimum,
+            excluded=excluded,
+        )
+        monthly = _period_average(
+            monthly_rows,
+            employee_id=employee.id,
+            start=month_start,
+            end=month_end,
+            minimum=minimum,
+            excluded=excluded,
+        )
+        three_month = _period_average(
+            three_month_rows,
+            employee_id=employee.id,
+            start=three_start,
+            end=three_end,
+            minimum=minimum,
+            excluded=excluded,
+        )
+        below_values = (
+            weekly.below_minimum,
+            monthly.below_minimum,
+            three_month.below_minimum,
+        )
+        output.append(
+            EmployeeAverages(
+                employee_id=employee.id,
+                employee_name=employee.full_name,
+                excluded_from_metrics=excluded,
+                weekly=weekly,
+                monthly=monthly,
+                three_month=three_month,
+                consistently_below_minimum=all(
+                    value is True for value in below_values
+                ),
+            )
+        )
+    return output
+
+
 def empty_summary(warehouse_id: int) -> WarehouseProductivity:
     """Zero-valued summary for a warehouse with no entries in the period.
 
@@ -340,10 +595,17 @@ def empty_summary(warehouse_id: int) -> WarehouseProductivity:
 
 __all__ = [
     "HOURS_PER_PRODUCTIVITY_DAY",
+    "EmployeeAverages",
+    "EmployeePeriodAverage",
     "Performer",
     "WarehouseProductivity",
     "daily_summary",
+    "employee_averages",
     "empty_summary",
+    "month_bounds",
+    "monthly_summary",
+    "rolling_90_day_bounds",
+    "rolling_90_day_summary",
     "week_bounds",
     "weekly_summary",
 ]

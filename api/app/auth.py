@@ -24,6 +24,7 @@ _JWKS_TTL_SECONDS = 3600
 
 _ROLE_PRIORITY: dict[str, UserRole] = {
     "admin": UserRole.admin,
+    "warehouse_mover": UserRole.warehouse_mover,
     "operator": UserRole.operator,
     "viewer": UserRole.viewer,
 }
@@ -48,7 +49,12 @@ class TokenClaims:
         self.roles: list[str] = [str(r).lower() for r in roles_claim]
 
     def best_role(self) -> UserRole:
-        for candidate in (UserRole.admin, UserRole.operator, UserRole.viewer):
+        for candidate in (
+            UserRole.admin,
+            UserRole.warehouse_mover,
+            UserRole.operator,
+            UserRole.viewer,
+        ):
             if candidate.value in self.roles:
                 return candidate
         return UserRole.viewer

@@ -71,6 +71,8 @@ function handleEvent(
   switch (event.type) {
     case "box.updated":
       qc.invalidateQueries({ queryKey: ["boxes"] });
+      qc.invalidateQueries({ queryKey: ["return-sources"] });
+      qc.invalidateQueries({ queryKey: ["return-candidates"] });
       qc.invalidateQueries({ queryKey: queryKeys.dashboard });
       if (typeof event.data.id === "number") {
         qc.invalidateQueries({ queryKey: queryKeys.box(event.data.id) });
@@ -84,6 +86,29 @@ function handleEvent(
       qc.invalidateQueries({ queryKey: ["alerts"] });
       qc.invalidateQueries({ queryKey: queryKeys.dashboard });
       break;
+    case "request.created":
+    case "request.updated": {
+      qc.invalidateQueries({ queryKey: ["requests"] });
+      qc.invalidateQueries({ queryKey: ["request-suggestion"] });
+      qc.invalidateQueries({ queryKey: ["return-sources"] });
+      qc.invalidateQueries({ queryKey: ["return-candidates"] });
+      const requestId =
+        typeof event.data.id === "number"
+          ? event.data.id
+          : typeof event.data.request_id === "number"
+            ? event.data.request_id
+            : undefined;
+      if (requestId !== undefined) {
+        qc.invalidateQueries({ queryKey: queryKeys.request(requestId) });
+        qc.invalidateQueries({
+          queryKey: queryKeys.requestEvents(requestId),
+        });
+        qc.invalidateQueries({
+          queryKey: queryKeys.requestDocuments(requestId),
+        });
+      }
+      break;
+    }
     default:
       break;
   }

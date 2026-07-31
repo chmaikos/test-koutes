@@ -87,7 +87,7 @@ function parsePages(value: string): number | null {
   const v = value.trim();
   if (v === "") return null;
   const n = Number(v);
-  if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n)) return null;
+  if (!Number.isFinite(n) || n <= 0 || !Number.isInteger(n)) return null;
   return n;
 }
 
@@ -686,10 +686,10 @@ function RosterRow({
         <td className="px-2 py-2 text-right">
           <InlineNumber
             value={row.pages}
-            placeholder="0"
+            placeholder="1+"
             ariaLabel={`Pages for ${employee.full_name}`}
             inputMode="numeric"
-            min={0}
+            min={1}
             step={1}
             disabled={!canWrite}
             inputRef={registerInput(employee.id, PAGES_COL)}
@@ -831,10 +831,10 @@ function RosterCard({
           Pages
           <InlineNumber
             value={row.pages}
-            placeholder="0"
+            placeholder="1+"
             ariaLabel={`Pages for ${employee.full_name}`}
             inputMode="numeric"
-            min={0}
+            min={1}
             step={1}
             disabled={!canWrite}
             inputRef={registerInput(employee.id, PAGES_COL)}

@@ -15,7 +15,7 @@ from typing import Annotated
 from fastapi import APIRouter, HTTPException, Query, Request
 from sse_starlette.sse import EventSourceResponse
 
-from app.db import SessionLocal
+from app import db as db_module
 from app.deps import resolve_user_from_token
 from app.events import bus
 from app.services.acl import allowed_warehouse_ids
@@ -68,7 +68,10 @@ async def stream(
     # pool (one slot per open tab) and starves every other handler. By
     # closing the session before returning ``EventSourceResponse`` the
     # stream costs zero DB connections while idle.
-    db = SessionLocal()
+    # Resolve the factory at call time so tests and alternate deployments can
+    # replace the configured session factory without this module retaining a
+    # stale import-time reference.
+    db = db_module.SessionLocal()
     try:
         user = await resolve_user_from_token(db, access_token)
         # Refuse the live stream while the bootstrapped admin still has to

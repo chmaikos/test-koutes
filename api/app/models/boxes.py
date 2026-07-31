@@ -50,6 +50,8 @@ class BoxEventType(str, enum.Enum):
     moved = "moved"
     status_changed = "status_changed"
     returned = "returned"
+    archived = "archived"
+    restored = "restored"
 
 
 class Box(Base):
@@ -77,6 +79,11 @@ class Box(Base):
     received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     processing_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     returned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    archived_by_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    archive_reason: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

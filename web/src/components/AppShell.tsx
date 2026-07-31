@@ -12,6 +12,7 @@ import {
   Activity,
   AlertTriangle,
   Boxes as BoxesIcon,
+  ClipboardList,
   Download,
   LayoutDashboard,
   LogOut,
@@ -34,6 +35,7 @@ interface NavItem {
 const NAV_ITEMS: NavItem[] = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard },
   { to: "/boxes", label: "Boxes", icon: BoxesIcon },
+  { to: "/requests", label: "Requests", icon: ClipboardList },
   { to: "/productivity", label: "Productivity", icon: Activity },
   { to: "/alerts", label: "Alerts", icon: AlertTriangle, badgeKey: "alerts" },
   { to: "/exports", label: "Exports", icon: Download },
@@ -51,6 +53,7 @@ const NAV_ITEMS: NavItem[] = [
 function titleForPath(pathname: string): string {
   if (pathname === "/" || pathname === "") return "Dashboard";
   if (pathname.startsWith("/boxes")) return "Boxes";
+  if (pathname.startsWith("/requests")) return "Requests";
   if (pathname.startsWith("/productivity")) return "Productivity";
   if (pathname.startsWith("/alerts")) return "Alerts";
   if (pathname.startsWith("/exports")) return "Exports";
@@ -143,7 +146,7 @@ function DesktopSidebar({
           {me.data?.display_name ?? me.data?.email ?? "..."}
         </div>
         <div className="px-3 text-xs capitalize text-slate-500">
-          {me.data?.role ?? ""}
+          {me.data?.role.replaceAll("_", " ") ?? ""}
         </div>
         <button
           type="button"
@@ -315,7 +318,7 @@ function MobileDrawer({
             {me.data?.display_name ?? me.data?.email ?? "..."}
           </div>
           <div className="px-3 text-xs capitalize text-slate-500">
-            {me.data?.role ?? ""}
+            {me.data?.role.replaceAll("_", " ") ?? ""}
           </div>
           <button
             type="button"
@@ -357,12 +360,7 @@ function MobileBottomNav({
       className="border-t border-slate-200 bg-white pb-[env(safe-area-inset-bottom)] md:hidden"
       aria-label="Primary"
     >
-      <div
-        className="grid"
-        style={{
-          gridTemplateColumns: `repeat(${items.length}, minmax(0, 1fr))`,
-        }}
-      >
+      <div className="flex overflow-x-auto">
         {items.map((item) => {
           const showBadge = item.badgeKey === "alerts" && openAlerts > 0;
           return (
@@ -372,7 +370,7 @@ function MobileBottomNav({
               end={item.to === "/"}
               className={({ isActive }) =>
                 clsx(
-                  "relative flex flex-col items-center justify-center gap-0.5 py-2 text-[11px] font-medium",
+                  "relative flex min-w-[4.5rem] flex-1 flex-col items-center justify-center gap-0.5 py-2 text-[11px] font-medium",
                   isActive ? "text-brand-700" : "text-slate-500",
                 )
               }

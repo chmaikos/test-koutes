@@ -18,6 +18,7 @@ alongside it.
 ## Build
 
 ```bash
+npm test
 npm run build
 ```
 

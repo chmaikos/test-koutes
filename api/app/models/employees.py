@@ -82,7 +82,7 @@ class ProductivityEntry(Base):
         Index(
             "ix_productivity_warehouse_date", "warehouse_id", "entry_date"
         ),
-        CheckConstraint("pages >= 0", name="ck_productivity_pages_nonneg"),
+        CheckConstraint("pages > 0", name="ck_productivity_pages_positive"),
         CheckConstraint(
             "hours_worked > 0", name="ck_productivity_hours_positive"
         ),

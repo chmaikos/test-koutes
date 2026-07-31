@@ -12,7 +12,16 @@ from decimal import Decimal
 import pytest
 
 from app.models.employees import Employee, ProductivityEntry
-from app.services.productivity import daily_summary, week_bounds, weekly_summary
+from app.services.productivity import (
+    daily_summary,
+    employee_averages,
+    month_bounds,
+    monthly_summary,
+    rolling_90_day_bounds,
+    rolling_90_day_summary,
+    week_bounds,
+    weekly_summary,
+)
 
 REF_DATE = date(2026, 5, 13)  # Wednesday
 WEEK_MONDAY = date(2026, 5, 11)
@@ -91,8 +100,8 @@ def test_top_and_bottom_ordering(session, warehouse_with_employees):
     w1 = summary[1]
     top_names = [p.employee_name for p in w1.top]
     bottom_names = [p.employee_name for p in w1.bottom]
-    assert top_names == ["Alice", "Carol", "Bob"]
-    assert bottom_names[0] == "Bob"
+    assert top_names == ["Alice"]
+    assert bottom_names == ["Bob"]
 
 
 def test_tie_break_prefers_more_pages_then_name(session, warehouse_with_employees):
@@ -104,9 +113,58 @@ def test_tie_break_prefers_more_pages_then_name(session, warehouse_with_employee
     _add_entry(session, employee=carol, on=REF_DATE, pages=100, hours=2)
     session.commit()
 
-    summary = daily_summary(session, on_date=REF_DATE)
+    summary = daily_summary(session, on_date=REF_DATE, top_n=3)
     top_names = [p.employee_name for p in summary[1].top]
     assert top_names == ["Carol", "Alice", "Bob"]
+
+
+def test_month_and_rolling_90_day_bounds_and_summaries(
+    session, warehouse_with_employees
+):
+    alice, *_ = warehouse_with_employees
+    _add_entry(session, employee=alice, on=date(2026, 5, 1), pages=20, hours=2)
+    _add_entry(session, employee=alice, on=REF_DATE, pages=30, hours=3)
+    _add_entry(session, employee=alice, on=date(2026, 2, 13), pages=40, hours=4)
+    _add_entry(session, employee=alice, on=date(2026, 2, 12), pages=999, hours=1)
+    session.commit()
+
+    assert month_bounds(REF_DATE) == (date(2026, 5, 1), date(2026, 5, 31))
+    assert rolling_90_day_bounds(REF_DATE) == (
+        date(2026, 2, 13),
+        date(2026, 5, 13),
+    )
+    assert monthly_summary(session, month=REF_DATE)[1].total_pages == 50
+    assert rolling_90_day_summary(session, anchor=REF_DATE)[1].total_pages == 90
+
+
+def test_employee_averages_require_all_three_periods_below_minimum(
+    session, warehouse_with_employees
+):
+    alice, bob, carol, _dave = warehouse_with_employees
+    _add_entry(session, employee=alice, on=REF_DATE, pages=50, hours=8)
+    # Bob has monthly and 90-day data but no entry in the selected ISO week.
+    _add_entry(session, employee=bob, on=date(2026, 5, 1), pages=50, hours=8)
+    carol.excluded_from_metrics = True
+    session.commit()
+
+    rows = employee_averages(
+        session,
+        user=None,
+        warehouse_id=1,
+        anchor=REF_DATE,
+        minimum=100,
+    )
+    by_name = {row.employee_name: row for row in rows}
+
+    assert by_name["Alice"].weekly.pages_per_day == 50
+    assert by_name["Alice"].monthly.below_minimum is True
+    assert by_name["Alice"].three_month.below_minimum is True
+    assert by_name["Alice"].consistently_below_minimum is True
+    assert by_name["Bob"].weekly.pages_per_day is None
+    assert by_name["Bob"].consistently_below_minimum is False
+    assert by_name["Carol"].excluded_from_metrics is True
+    assert by_name["Carol"].weekly.below_minimum is None
+    assert by_name["Carol"].consistently_below_minimum is False
 
 
 def test_inactive_employees_excluded_from_rankings_but_count_in_totals(

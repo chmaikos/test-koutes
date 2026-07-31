@@ -8,12 +8,23 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
+from sqlalchemy import Select, select
 from sqlalchemy.orm import Session
 
 from app.models.boxes import Box, BoxEvent, BoxEventType, BoxStatus
+from app.models.requests import (
+    ACTIVE_REQUEST_STATUSES,
+    BoxRequest,
+    BoxRequestDirection,
+    BoxRequestEvent,
+    BoxRequestEventType,
+    BoxRequestItem,
+    BoxRequestStatus,
+)
 from app.models.users import User
 from app.models.warehouses import Warehouse
 from app.services.acl import can_access
+from app.services.warehouses import WarehouseRuleError, ensure_active_warehouse
 
 # Valid forward transitions: a box walks the chain one step at a time. The
 # physical reality is:
@@ -75,10 +86,75 @@ class BoxAccessError(BoxRuleError):
 
 
 def _ensure_warehouse(db: Session, warehouse_id: int) -> Warehouse:
-    wh = db.get(Warehouse, warehouse_id)
-    if wh is None:
-        raise BoxRuleError(f"warehouse {warehouse_id} does not exist")
-    return wh
+    try:
+        return ensure_active_warehouse(db, warehouse_id)
+    except WarehouseRuleError as exc:
+        raise BoxRuleError(str(exc)) from exc
+
+
+def _referencing_request_ids(db: Session, box_id: int) -> list[int]:
+    return list(
+        db.scalars(
+            select(BoxRequestItem.request_id)
+            .where(BoxRequestItem.box_id == box_id)
+            .distinct()
+            .order_by(BoxRequestItem.request_id)
+        ).all()
+    )
+
+
+def _active_return_request_stmt(box_id: int) -> Select[tuple[BoxRequest]]:
+    return (
+        select(BoxRequest)
+        .where(
+            BoxRequest.id.in_(
+                select(BoxRequestItem.request_id).where(
+                    BoxRequestItem.box_id == box_id
+                )
+            ),
+            BoxRequest.direction == BoxRequestDirection.return_,
+            BoxRequest.status.in_(ACTIVE_REQUEST_STATUSES),
+        )
+        .with_for_update()
+    )
+
+
+def _active_return_requests(db: Session, box_id: int) -> list[BoxRequest]:
+    return list(db.scalars(_active_return_request_stmt(box_id)).all())
+
+
+def _cancel_active_returns(
+    db: Session,
+    *,
+    box_id: int,
+    user: User,
+    reason: str,
+    now: datetime,
+) -> set[int]:
+    cancelled: set[int] = set()
+    note = (
+        f"Cancelled by admin override affecting box #{box_id}. "
+        f"Reason: {reason.strip()}"
+    )
+    for request in _active_return_requests(db, box_id):
+        old_status = request.status
+        request.status = BoxRequestStatus.cancelled
+        request.cancellation_reason = note
+        request.version += 1
+        request.updated_at = now
+        db.add(
+            BoxRequestEvent(
+                request_id=request.id,
+                event_type=BoxRequestEventType.cancelled,
+                from_status=old_status,
+                to_status=BoxRequestStatus.cancelled,
+                user_id=user.id,
+                note=note,
+                occurred_at=now,
+            )
+        )
+        cancelled.add(request.id)
+    return cancelled
 
 
 def create_box(
@@ -90,6 +166,7 @@ def create_box(
     warehouse_id: int,
     contents: str | None = None,
     note: str | None = None,
+    commit: bool = True,
 ) -> Box:
     _ensure_warehouse(db, warehouse_id)
     if not can_access(user, warehouse_id):
@@ -104,8 +181,6 @@ def create_box(
     if contents is not None:
         stripped = contents.strip()
         cleaned_contents = stripped or None
-    from sqlalchemy import select
-
     existing = db.scalar(
         select(Box).where(
             Box.box_number == cleaned_number,
@@ -142,8 +217,97 @@ def create_box(
             note=note,
         )
     )
-    db.commit()
-    db.refresh(box)
+    if commit:
+        db.commit()
+        db.refresh(box)
+    else:
+        db.flush()
+    return box
+
+
+def restore_archived_box(
+    db: Session,
+    *,
+    user: User,
+    box_number: str,
+    lot: str,
+    warehouse_id: int,
+    contents: str | None = None,
+    note: str | None = None,
+    commit: bool = True,
+) -> Box | None:
+    """Reactivate an archived identity, returning ``None`` when none exists."""
+    _ensure_warehouse(db, warehouse_id)
+    if not can_access(user, warehouse_id):
+        raise BoxAccessError(f"no access to warehouse {warehouse_id}")
+    cleaned_number = normalize_box_number(box_number)
+    cleaned_lot = lot.strip()
+    if not cleaned_lot:
+        raise BoxRuleError("lot is required")
+    box = db.scalar(
+        select(Box)
+        .where(
+            Box.box_number == cleaned_number,
+            Box.lot == cleaned_lot,
+        )
+        .with_for_update()
+    )
+    if box is None:
+        return None
+    if box.archived_at is None:
+        raise BoxConflictError(
+            f"box {cleaned_number!r} already exists in lot {cleaned_lot!r}"
+        )
+    if not can_access(user, box.current_warehouse_id):
+        raise BoxAccessError(
+            f"no access to warehouse {box.current_warehouse_id}"
+        )
+    if _active_return_requests(db, box.id):
+        raise BoxConflictError(
+            f"archived box {box.id} still has an active return reservation"
+        )
+
+    now = datetime.now(UTC)
+    old_status = box.status
+    old_warehouse_id = box.current_warehouse_id
+    previous_archive_reason = box.archive_reason
+    cleaned_contents = (contents or "").strip() or None
+    box.current_warehouse_id = warehouse_id
+    box.status = BoxStatus.received
+    box.contents = cleaned_contents
+    box.received_at = now
+    box.processing_completed_at = None
+    box.returned_at = None
+    box.archived_at = None
+    box.archived_by_user_id = None
+    box.archive_reason = None
+    box.updated_by_user_id = user.id
+    box.updated_at = now
+
+    context = (note or "Restored during XLSX import.").strip()
+    if previous_archive_reason:
+        context = (
+            f"{context} Previous archive reason: {previous_archive_reason}"
+        )
+    db.add(
+        BoxEvent(
+            box_id=box.id,
+            warehouse_id=warehouse_id,
+            event_type=BoxEventType.restored,
+            from_status=old_status,
+            to_status=BoxStatus.received,
+            from_warehouse_id=old_warehouse_id,
+            to_warehouse_id=warehouse_id,
+            occurred_at=now,
+            user_id=user.id,
+            note=context,
+        )
+    )
+    if commit:
+        db.commit()
+        db.refresh(box)
+    else:
+        db.flush()
     return box
 
 
@@ -166,6 +330,9 @@ def update_box(
     new_contents: str | None = None,
     note: str | None = None,
     force: bool = False,
+    commit: bool = True,
+    cancelled_request_ids: set[int] | None = None,
+    skip_request_guards: bool = False,
 ) -> Box:
     now = datetime.now(UTC)
     events: list[BoxEvent] = []
@@ -179,6 +346,47 @@ def update_box(
         raise BoxAccessError(
             f"no access to warehouse {box.current_warehouse_id}"
         )
+    _ensure_warehouse(db, box.current_warehouse_id)
+    if box.archived_at is not None:
+        raise BoxConflictError("archived boxes cannot be modified")
+
+    moving = (
+        new_warehouse_id is not None
+        and new_warehouse_id != box.current_warehouse_id
+    )
+    changing_status = new_status is not None and new_status != box.status
+    if moving and new_warehouse_id is not None:
+        _ensure_warehouse(db, new_warehouse_id)
+        if not can_access(user, new_warehouse_id):
+            raise BoxAccessError(
+                f"no access to warehouse {new_warehouse_id}"
+            )
+    if force and (moving or changing_status) and not (note or "").strip():
+        raise BoxRuleError("a reason is required for an admin override")
+    if not skip_request_guards and moving:
+        request_ids = _referencing_request_ids(db, box.id)
+        if request_ids and not force:
+            joined = ", ".join(f"#{request_id}" for request_id in request_ids)
+            raise BoxConflictError(
+                f"box is linked to request(s) {joined}; use an admin override to move it"
+            )
+    if not skip_request_guards and (moving or changing_status):
+        active_returns = _active_return_requests(db, box.id)
+        if active_returns and not force:
+            joined = ", ".join(f"#{request.id}" for request in active_returns)
+            raise BoxConflictError(
+                f"box is reserved by active return request(s) {joined}"
+            )
+        if active_returns and force:
+            cancelled = _cancel_active_returns(
+                db,
+                box_id=box.id,
+                user=user,
+                reason=(note or "").strip(),
+                now=now,
+            )
+            if cancelled_request_ids is not None:
+                cancelled_request_ids.update(cancelled)
 
     if new_lot is not None:
         cleaned_lot = new_lot.strip()
@@ -256,8 +464,11 @@ def update_box(
     box.updated_at = now
     for ev in events:
         db.add(ev)
-    db.commit()
-    db.refresh(box)
+    if commit:
+        db.commit()
+        db.refresh(box)
+    else:
+        db.flush()
     return box
 
 
@@ -277,6 +488,7 @@ class BulkSkipEntry:
 class BulkOutcome:
     updated: list[Box] = field(default_factory=list)
     skipped: list[BulkSkipEntry] = field(default_factory=list)
+    cancelled_request_ids: set[int] = field(default_factory=set)
 
 
 def bulk_update_boxes(
@@ -322,6 +534,7 @@ def bulk_update_boxes(
                 new_warehouse_id=new_warehouse_id,
                 note=note,
                 force=force,
+                cancelled_request_ids=outcome.cancelled_request_ids,
             )
         except BoxRuleError as exc:
             outcome.skipped.append(
@@ -343,24 +556,98 @@ def bulk_update_boxes(
 @dataclass
 class BulkDeleteOutcome:
     deleted_ids: list[int] = field(default_factory=list)
+    archived_ids: list[int] = field(default_factory=list)
+    cancelled_request_ids: set[int] = field(default_factory=set)
     affected_warehouse_ids: set[int] = field(default_factory=set)
     skipped: list[BulkSkipEntry] = field(default_factory=list)
 
 
-def delete_box(db: Session, *, box: Box) -> int:
-    """Hard-delete a box. Returns its current warehouse id so the caller can
-    publish a single SSE update afterwards. Event rows cascade out via the
-    `BoxEvent.box_id` FK (`ondelete="CASCADE"`)."""
+@dataclass(frozen=True)
+class DeleteOutcome:
+    box_id: int
+    warehouse_id: int
+    archived: bool
+    cancelled_request_ids: set[int]
+
+
+def delete_box(
+    db: Session,
+    *,
+    user: User,
+    box: Box,
+    force: bool = False,
+    reason: str | None = None,
+    commit: bool = True,
+) -> DeleteOutcome:
+    """Delete unreferenced inventory or archive a force-deleted linked box."""
     warehouse_id = box.current_warehouse_id
-    db.delete(box)
-    db.commit()
-    return warehouse_id
+    _ensure_warehouse(db, warehouse_id)
+    request_ids = _referencing_request_ids(db, box.id)
+    cancelled_request_ids: set[int] = set()
+    if request_ids:
+        joined = ", ".join(f"#{request_id}" for request_id in request_ids)
+        if not force:
+            raise BoxConflictError(
+                f"box is linked to request(s) {joined}; force delete will archive it"
+            )
+        cleaned_reason = (reason or "").strip()
+        if not cleaned_reason:
+            raise BoxRuleError("a reason is required to archive a linked box")
+        now = datetime.now(UTC)
+        cancelled_request_ids = _cancel_active_returns(
+            db,
+            box_id=box.id,
+            user=user,
+            reason=cleaned_reason,
+            now=now,
+        )
+        if box.archived_at is None:
+            box.archived_at = now
+            box.archived_by_user_id = user.id
+            box.archive_reason = cleaned_reason
+            box.updated_by_user_id = user.id
+            box.updated_at = now
+            db.add(
+                BoxEvent(
+                    box_id=box.id,
+                    warehouse_id=warehouse_id,
+                    event_type=BoxEventType.archived,
+                    from_status=box.status,
+                    to_status=box.status,
+                    from_warehouse_id=warehouse_id,
+                    to_warehouse_id=warehouse_id,
+                    occurred_at=now,
+                    user_id=user.id,
+                    note=f"[admin override] {cleaned_reason}",
+                )
+            )
+        archived = True
+    else:
+        db.delete(box)
+        archived = False
+    if commit:
+        db.commit()
+    else:
+        db.flush()
+    return DeleteOutcome(
+        box_id=box.id,
+        warehouse_id=warehouse_id,
+        archived=archived,
+        cancelled_request_ids=cancelled_request_ids,
+    )
 
 
 def bulk_delete_boxes(
-    db: Session, *, box_ids: list[int]
+    db: Session,
+    *,
+    user: User,
+    box_ids: list[int],
+    force: bool = False,
+    reason: str | None = None,
 ) -> BulkDeleteOutcome:
-    """Hard-delete many boxes, reporting missing ids as skipped."""
+    """Delete or archive many boxes in one transaction."""
+    if force and not (reason or "").strip():
+        raise BoxRuleError("a reason is required for an admin override")
     outcome = BulkDeleteOutcome()
     seen: set[int] = set()
     for box_id in box_ids:
@@ -374,10 +661,31 @@ def bulk_delete_boxes(
                 BulkSkipEntry(box_id=box_id, box_number="", reason="box not found")
             )
             continue
-        outcome.affected_warehouse_ids.add(box.current_warehouse_id)
-        outcome.deleted_ids.append(box.id)
-        db.delete(box)
+        try:
+            result = delete_box(
+                db,
+                user=user,
+                box=box,
+                force=force,
+                reason=reason,
+                commit=False,
+            )
+        except BoxRuleError as exc:
+            outcome.skipped.append(
+                BulkSkipEntry(
+                    box_id=box.id,
+                    box_number=box.box_number,
+                    reason=str(exc),
+                )
+            )
+            continue
+        outcome.affected_warehouse_ids.add(result.warehouse_id)
+        outcome.cancelled_request_ids.update(result.cancelled_request_ids)
+        if result.archived:
+            outcome.archived_ids.append(result.box_id)
+        else:
+            outcome.deleted_ids.append(result.box_id)
 
-    if outcome.deleted_ids:
+    if outcome.deleted_ids or outcome.archived_ids:
         db.commit()
     return outcome

@@ -103,7 +103,15 @@ def _inventory_per_warehouse(db: Session) -> list[_Eval]:
     )
     rows = db.execute(
         select(Warehouse, available_case, unavailable_case)
-        .join(Box, Box.current_warehouse_id == Warehouse.id, isouter=True)
+        .join(
+            Box,
+            and_(
+                Box.current_warehouse_id == Warehouse.id,
+                Box.archived_at.is_(None),
+            ),
+            isouter=True,
+        )
+        .where(Warehouse.is_active.is_(True))
         .group_by(Warehouse.id)
         .order_by(Warehouse.id)
     ).all()
@@ -155,6 +163,7 @@ def _stuck_boxes_per_warehouse(
         select(Box.current_warehouse_id, func.count(Box.id))
         .where(
             Box.status == BoxStatus.received,
+            Box.archived_at.is_(None),
             and_(
                 # received_at is the canonical "started waiting" timestamp;
                 # when missing fall back to created_at so we don't lose

@@ -1,4 +1,4 @@
-export type Role = "admin" | "operator" | "viewer";
+export type Role = "admin" | "warehouse_mover" | "operator" | "viewer";
 
 export type BoxStatus =
   | "received"
@@ -35,7 +35,9 @@ export type BoxEventType =
   | "created"
   | "moved"
   | "status_changed"
-  | "returned";
+  | "returned"
+  | "archived"
+  | "restored";
 
 export interface User {
   id: number;
@@ -66,6 +68,10 @@ export interface Warehouse {
   name: string;
   min_inventory: number;
   max_capacity: number;
+  min_pages_per_day: number | null;
+  is_active: boolean;
+  archived_at: string | null;
+  archived_by_user_id: number | null;
 }
 
 export interface Box {
@@ -78,8 +84,12 @@ export interface Box {
   received_at: string | null;
   processing_completed_at: string | null;
   returned_at: string | null;
+  archived_at: string | null;
+  archived_by_user_id: number | null;
+  archive_reason: string | null;
   created_at: string;
   updated_at: string;
+  receipt_request_id: number | null;
 }
 
 export interface BoxEvent {
@@ -177,6 +187,33 @@ export interface ProductivitySummary {
   avg_pages_per_day: number;
 }
 
+export interface EmployeePeriodAverage {
+  period_start: string;
+  period_end: string;
+  total_pages: number;
+  total_hours: number;
+  entry_count: number;
+  pages_per_day: number | null;
+  below_minimum: boolean | null;
+}
+
+export interface EmployeeAverage {
+  employee_id: number;
+  employee_name: string;
+  excluded_from_metrics: boolean;
+  weekly: EmployeePeriodAverage;
+  monthly: EmployeePeriodAverage;
+  three_month: EmployeePeriodAverage;
+  consistently_below_minimum: boolean;
+}
+
+export interface EmployeeAverages {
+  warehouse_id: number;
+  anchor_date: string;
+  min_pages_per_day: number | null;
+  employees: EmployeeAverage[];
+}
+
 export interface Employee {
   id: number;
   warehouse_id: number;
@@ -186,6 +223,26 @@ export interface Employee {
   excluded_from_metrics: boolean;
   created_at: string;
   updated_at: string;
+}
+
+export interface EmployeeImportItem {
+  source_row: number;
+  full_name: string;
+  default_hours_per_day?: number;
+  is_active?: boolean;
+  excluded_from_metrics?: boolean;
+}
+
+export interface EmployeeImportSkip {
+  row: number;
+  full_name: string;
+  reason: string;
+}
+
+export interface EmployeeImportResult {
+  created: Employee[];
+  updated: Employee[];
+  skipped: EmployeeImportSkip[];
 }
 
 export interface ProductivityEntry {
@@ -269,6 +326,7 @@ export interface BulkBoxUpdate {
   warehouse_id?: number;
   status?: BoxStatus;
   note?: string;
+  force?: boolean;
 }
 
 export interface BulkSkip {
@@ -280,6 +338,7 @@ export interface BulkSkip {
 export interface BulkResult {
   updated: Box[];
   skipped: BulkSkip[];
+  cancelled_request_ids: number[];
 }
 
 export interface ImportSkip {
@@ -290,10 +349,158 @@ export interface ImportSkip {
 
 export interface ImportResult {
   created: Box[];
+  restored: Box[];
   skipped: ImportSkip[];
+  receipt_request_ids: number[];
 }
 
 export interface BulkDeleteResult {
   deleted_ids: number[];
+  archived_ids: number[];
+  cancelled_request_ids: number[];
   skipped: BulkSkip[];
+}
+
+export interface BoxDeleteResult {
+  box_id: number;
+  archived: boolean;
+  cancelled_request_ids: number[];
+}
+
+export type RequestDirection = "inbound" | "return";
+export type RequestOrigin =
+  | "workflow"
+  | "xlsx_import"
+  | "manual_entry"
+  | "legacy_backfill";
+
+export type RequestStatus =
+  | "submitted"
+  | "approved"
+  | "in_transit"
+  | "completed"
+  | "rejected"
+  | "cancelled";
+
+export type RequestDocumentType =
+  | "delivery_note"
+  | "return_note"
+  | "other";
+
+export interface BoxRequestItem {
+  id: number;
+  box_id: number | null;
+  lot: string | null;
+  box_number: string | null;
+  contents: string | null;
+}
+
+export interface RequestDocument {
+  id: number;
+  document_type: RequestDocumentType;
+  erp_reference: string;
+  original_filename: string;
+  content_type: string;
+  size_bytes: number;
+  sha256: string;
+  uploaded_by_user_id: number | null;
+  created_at: string;
+  is_current: boolean;
+}
+
+export interface BoxRequest {
+  id: number;
+  direction: RequestDirection;
+  warehouse_id: number;
+  quantity: number;
+  status: RequestStatus;
+  requester_user_id: number | null;
+  requester_name: string;
+  source_inbound_request_id: number | null;
+  origin: RequestOrigin;
+  suggestion_quantity: number;
+  current_available: number;
+  min_inventory: number;
+  pending_inbound: number;
+  eligible_return: number;
+  actual_received_quantity: number | null;
+  variance_quantity: number | null;
+  rejection_reason: string | null;
+  cancellation_reason: string | null;
+  discrepancy_reason: string | null;
+  submitted_at: string;
+  approved_at: string | null;
+  in_transit_at: string | null;
+  completed_at: string | null;
+  created_at: string;
+  updated_at: string;
+  version: number;
+  items: BoxRequestItem[];
+  documents: RequestDocument[];
+}
+
+export interface RequestEvent {
+  id: number;
+  event_type: string;
+  from_status: RequestStatus | null;
+  to_status: RequestStatus | null;
+  user_id: number | null;
+  user_name: string | null;
+  note: string | null;
+  occurred_at: string;
+}
+
+export interface RequestSuggestion {
+  direction: RequestDirection;
+  warehouse_id: number;
+  current_available: number;
+  min_inventory: number;
+  pending_inbound: number;
+  suggested_quantity: number;
+  eligible_return: number;
+}
+
+export interface ReturnSource {
+  id: number;
+  warehouse_id: number;
+  completed_at: string;
+  origin: RequestOrigin;
+  delivered_quantity: number;
+  eligible_quantity: number;
+}
+
+export interface ReturnCandidate {
+  box_id: number;
+  box_number: string;
+  lot: string;
+  contents: string | null;
+  status: "ready_to_return";
+}
+
+export interface RequestFilters {
+  warehouse_id?: number;
+  direction?: RequestDirection;
+  status?: RequestStatus;
+}
+
+export interface InboundRequestItemInput {
+  lot: string;
+  box_number: string;
+  contents?: string;
+}
+
+export interface XlsxPreviewRow {
+  row_number: number;
+  cells: string[];
+}
+
+export interface XlsxPreviewSheet {
+  name: string;
+  max_columns: number;
+  rows: XlsxPreviewRow[];
+}
+
+export interface XlsxPreview {
+  filename: string;
+  sheets: XlsxPreviewSheet[];
 }

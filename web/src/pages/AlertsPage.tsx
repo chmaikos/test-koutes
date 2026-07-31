@@ -54,7 +54,7 @@ export function AlertsPage() {
   const [onlyOpen, setOnlyOpen] = useState(true);
   const { data, isLoading } = useAlerts(onlyOpen);
   const ack = useAcknowledgeAlert();
-  const warehouses = useWarehouses();
+  const warehouses = useWarehouses(true);
   const canWrite = useHasRole(["admin", "operator"]);
 
   return (

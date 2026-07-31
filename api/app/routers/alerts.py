@@ -54,7 +54,11 @@ def list_recipients(
     rendered alongside the primary list so admins can verify their own
     opt-out doesn't leave the safety net empty.
     """
-    warehouses = db.scalars(select(Warehouse).order_by(Warehouse.id)).all()
+    warehouses = db.scalars(
+        select(Warehouse)
+        .where(Warehouse.is_active.is_(True))
+        .order_by(Warehouse.id)
+    ).all()
     rows = [
         AlertRecipientsRow(
             warehouse_id=w.id,

@@ -10,6 +10,17 @@ from app.models.employees import (
     ProductivityEntry,
     ProductivityReportRun,
 )
+from app.models.requests import (
+    BoxRequest,
+    BoxRequestDirection,
+    BoxRequestDocument,
+    BoxRequestDocumentType,
+    BoxRequestEvent,
+    BoxRequestEventType,
+    BoxRequestItem,
+    BoxRequestOrigin,
+    BoxRequestStatus,
+)
 from app.models.users import User, UserRole
 from app.models.warehouses import Warehouse
 
@@ -25,6 +36,15 @@ __all__ = [
     "Employee",
     "ProductivityEntry",
     "ProductivityReportRun",
+    "BoxRequest",
+    "BoxRequestDirection",
+    "BoxRequestDocument",
+    "BoxRequestDocumentType",
+    "BoxRequestEvent",
+    "BoxRequestEventType",
+    "BoxRequestItem",
+    "BoxRequestOrigin",
+    "BoxRequestStatus",
     "User",
     "UserRole",
     "Warehouse",

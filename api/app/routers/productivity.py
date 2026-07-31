@@ -10,7 +10,11 @@ from sqlalchemy import select
 from app.config import get_settings
 from app.deps import CurrentUser, DbSession, require_operator
 from app.models.employees import Employee, ProductivityEntry
+from app.models.warehouses import Warehouse
 from app.schemas.employees import (
+    EmployeeAverageOut,
+    EmployeeAveragesOut,
+    EmployeePeriodAverageOut,
     PerformerOut,
     ProductivityEntryCreate,
     ProductivityEntryOut,
@@ -20,11 +24,18 @@ from app.schemas.employees import (
 from app.services.acl import apply_warehouse_filter, can_access
 from app.services.productivity import (
     HOURS_PER_PRODUCTIVITY_DAY,
+    EmployeePeriodAverage,
     WarehouseProductivity,
     daily_summary,
+    employee_averages,
+    month_bounds,
+    monthly_summary,
+    rolling_90_day_bounds,
+    rolling_90_day_summary,
     week_bounds,
     weekly_summary,
 )
+from app.services.warehouses import WarehouseRuleError, ensure_active_warehouse
 
 router = APIRouter(prefix="/productivity", tags=["productivity"])
 
@@ -66,6 +77,18 @@ def _to_warehouse_out(summary: WarehouseProductivity) -> WarehouseProductivityOu
         active_employees=summary.active_employees,
         top=[_to_performer_out(p) for p in summary.top],
         bottom=[_to_performer_out(p) for p in summary.bottom],
+    )
+
+
+def _to_period_out(period: EmployeePeriodAverage) -> EmployeePeriodAverageOut:
+    return EmployeePeriodAverageOut(
+        period_start=period.period_start,
+        period_end=period.period_end,
+        total_pages=period.total_pages,
+        total_hours=period.total_hours,
+        entry_count=period.entry_count,
+        pages_per_day=period.pages_per_day,
+        below_minimum=period.below_minimum,
     )
 
 
@@ -111,8 +134,8 @@ def list_entries(
     user: CurrentUser,
     warehouse_id: int | None = Query(default=None, ge=1),
     employee_id: int | None = Query(default=None, ge=1),
-    from_date: date | None = Query(default=None),
-    to_date: date | None = Query(default=None),
+    from_date: date | None = None,
+    to_date: date | None = None,
 ) -> list[ProductivityEntryOut]:
     stmt = select(ProductivityEntry)
     if warehouse_id is not None:
@@ -159,6 +182,10 @@ def upsert_entry(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="cannot log productivity for an inactive employee",
         )
+    try:
+        ensure_active_warehouse(db, emp.warehouse_id)
+    except WarehouseRuleError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     existing = db.scalar(
         select(ProductivityEntry).where(
@@ -216,7 +243,7 @@ def delete_entry(
 def daily_summary_endpoint(
     db: DbSession,
     user: CurrentUser,
-    on_date: date | None = Query(default=None, alias="date"),
+    on_date: Annotated[date | None, Query(alias="date")] = None,
     warehouse_id: int | None = Query(default=None, ge=1),
 ) -> ProductivitySummaryOut:
     """Per-warehouse productivity summary for a single day."""
@@ -235,7 +262,7 @@ def daily_summary_endpoint(
 def weekly_summary_endpoint(
     db: DbSession,
     user: CurrentUser,
-    week_start: date | None = Query(default=None),
+    week_start: date | None = None,
     warehouse_id: int | None = Query(default=None, ge=1),
 ) -> ProductivitySummaryOut:
     """Per-warehouse productivity summary for an ISO week."""
@@ -249,3 +276,81 @@ def weekly_summary_endpoint(
     )
     monday, sunday = week_bounds(anchor)
     return _wrap_summary(summaries, period_start=monday, period_end=sunday)
+
+
+@router.get("/summary/monthly", response_model=ProductivitySummaryOut)
+def monthly_summary_endpoint(
+    db: DbSession,
+    user: CurrentUser,
+    month: date | None = None,
+    warehouse_id: int | None = Query(default=None, ge=1),
+) -> ProductivitySummaryOut:
+    """Per-warehouse productivity summary for a calendar month."""
+    anchor = month or _today_in_app_tz()
+    warehouse_ids = [warehouse_id] if warehouse_id is not None else None
+    summaries = monthly_summary(
+        db,
+        user=user,
+        warehouse_ids=warehouse_ids,
+        month=anchor,
+    )
+    first, last = month_bounds(anchor)
+    return _wrap_summary(summaries, period_start=first, period_end=last)
+
+
+@router.get("/summary/three-month", response_model=ProductivitySummaryOut)
+def three_month_summary_endpoint(
+    db: DbSession,
+    user: CurrentUser,
+    anchor_date: date | None = None,
+    warehouse_id: int | None = Query(default=None, ge=1),
+) -> ProductivitySummaryOut:
+    """Per-warehouse productivity summary for a rolling 90-day window."""
+    anchor = anchor_date or _today_in_app_tz()
+    warehouse_ids = [warehouse_id] if warehouse_id is not None else None
+    summaries = rolling_90_day_summary(
+        db,
+        user=user,
+        warehouse_ids=warehouse_ids,
+        anchor=anchor,
+    )
+    first, last = rolling_90_day_bounds(anchor)
+    return _wrap_summary(summaries, period_start=first, period_end=last)
+
+
+@router.get("/employee-averages", response_model=EmployeeAveragesOut)
+def employee_averages_endpoint(
+    db: DbSession,
+    user: CurrentUser,
+    warehouse_id: int = Query(ge=1),
+    anchor_date: date | None = None,
+) -> EmployeeAveragesOut:
+    """Weekly, monthly, and rolling averages for an active warehouse roster."""
+    warehouse = db.get(Warehouse, warehouse_id)
+    if warehouse is None or not can_access(user, warehouse_id):
+        raise HTTPException(status_code=404, detail="warehouse not found")
+    anchor = anchor_date or _today_in_app_tz()
+    rows = employee_averages(
+        db,
+        user=user,
+        warehouse_id=warehouse_id,
+        anchor=anchor,
+        minimum=warehouse.min_pages_per_day,
+    )
+    return EmployeeAveragesOut(
+        warehouse_id=warehouse_id,
+        anchor_date=anchor,
+        min_pages_per_day=warehouse.min_pages_per_day,
+        employees=[
+            EmployeeAverageOut(
+                employee_id=row.employee_id,
+                employee_name=row.employee_name,
+                excluded_from_metrics=row.excluded_from_metrics,
+                weekly=_to_period_out(row.weekly),
+                monthly=_to_period_out(row.monthly),
+                three_month=_to_period_out(row.three_month),
+                consistently_below_minimum=row.consistently_below_minimum,
+            )
+            for row in rows
+        ],
+    )

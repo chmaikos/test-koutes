@@ -12,9 +12,16 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.boxes import Box
+from app.models.requests import BoxRequestOrigin
 from app.models.users import User
 from app.models.warehouses import Warehouse
-from app.services.boxes import BoxRuleError, create_box, normalize_box_number
+from app.services.boxes import (
+    BoxRuleError,
+    create_box,
+    normalize_box_number,
+    restore_archived_box,
+)
+from app.services.requests import create_completed_receipt
 
 # Hard caps: we do this on the request thread so we want a worst-case bound.
 MAX_FILE_BYTES = 5 * 1024 * 1024
@@ -47,7 +54,88 @@ class ImportSkipEntry:
 @dataclass
 class ImportOutcome:
     created: list[Box] = field(default_factory=list)
+    restored: list[Box] = field(default_factory=list)
     skipped: list[ImportSkipEntry] = field(default_factory=list)
+    receipt_request_ids: list[int] = field(default_factory=list)
+
+
+def _commit_import_receipts(
+    db: Session,
+    *,
+    user: User,
+    outcome: ImportOutcome,
+) -> None:
+    imported_boxes = outcome.created + outcome.restored
+    if not imported_boxes:
+        return
+    boxes_by_warehouse: dict[int, list[Box]] = {}
+    for box in imported_boxes:
+        boxes_by_warehouse.setdefault(box.current_warehouse_id, []).append(box)
+    for warehouse_id, boxes in boxes_by_warehouse.items():
+        receipt = create_completed_receipt(
+            db,
+            user=user,
+            warehouse_id=warehouse_id,
+            boxes=boxes,
+            origin=BoxRequestOrigin.xlsx_import,
+            note="Completed automatically from XLSX box import.",
+            commit=False,
+        )
+        outcome.receipt_request_ids.append(receipt.id)
+    db.commit()
+    for box in imported_boxes:
+        db.refresh(box)
+
+
+def import_mapped_boxes(
+    db: Session,
+    *,
+    user: User,
+    warehouse_id: int,
+    items: list[tuple[str, str, str | None]],
+    restore_archived: bool = False,
+) -> ImportOutcome:
+    outcome = ImportOutcome()
+    for position, (box_number, lot, contents) in enumerate(items, start=1):
+        try:
+            restored = (
+                restore_archived_box(
+                    db,
+                    user=user,
+                    box_number=box_number,
+                    lot=lot,
+                    contents=contents,
+                    warehouse_id=warehouse_id,
+                    note="Explicitly restored during mapped XLSX import.",
+                    commit=False,
+                )
+                if restore_archived
+                else None
+            )
+            box = restored or create_box(
+                db,
+                user=user,
+                box_number=box_number,
+                lot=lot,
+                contents=contents,
+                warehouse_id=warehouse_id,
+                commit=False,
+            )
+        except BoxRuleError as exc:
+            outcome.skipped.append(
+                ImportSkipEntry(
+                    row=position,
+                    box_number=box_number,
+                    reason=str(exc),
+                )
+            )
+            continue
+        if restored is not None:
+            outcome.restored.append(box)
+        else:
+            outcome.created.append(box)
+    _commit_import_receipts(db, user=user, outcome=outcome)
+    return outcome
 
 
 def _normalise_headers(raw: list[object | None]) -> dict[str, int]:
@@ -70,12 +158,22 @@ def _cell_str(cell: object | None) -> str:
     return str(cell).strip()
 
 
+def _mapped_cell(
+    headers: dict[str, int], cells: list[object | None], name: str
+) -> str:
+    idx = headers.get(name)
+    if idx is None or idx >= len(cells):
+        return ""
+    return _cell_str(cells[idx])
+
+
 def import_boxes_xlsx(
     db: Session,
     *,
     user: User,
     file_bytes: bytes,
     default_warehouse_id: int | None = None,
+    restore_archived: bool = False,
 ) -> ImportOutcome:
     if len(file_bytes) > MAX_FILE_BYTES:
         raise BoxRuleError(
@@ -112,14 +210,17 @@ def import_boxes_xlsx(
 
     # Pre-resolve warehouses so we don't hit the DB once per row.
     warehouses_by_id = {
-        w.id: w for w in db.scalars(select(Warehouse)).all()
+        w.id: w
+        for w in db.scalars(
+            select(Warehouse).where(Warehouse.is_active.is_(True))
+        ).all()
     }
     warehouses_by_name = {
         w.name.strip().lower(): w for w in warehouses_by_id.values()
     }
     if default_warehouse_id is not None and default_warehouse_id not in warehouses_by_id:
         raise BoxRuleError(
-            f"default warehouse {default_warehouse_id} does not exist"
+            f"default warehouse {default_warehouse_id} does not exist or is archived"
         )
 
     outcome = ImportOutcome()
@@ -143,18 +244,12 @@ def import_boxes_xlsx(
 
         cells = list(row)
 
-        def get(name: str) -> str:
-            idx = headers.get(name)
-            if idx is None or idx >= len(cells):
-                return ""
-            return _cell_str(cells[idx])
-
-        raw_box_number = get("box_number")
-        lot = get("lot")
-        contents_raw = get("contents")
+        raw_box_number = _mapped_cell(headers, cells, "box_number")
+        lot = _mapped_cell(headers, cells, "lot")
+        contents_raw = _mapped_cell(headers, cells, "contents")
         contents = contents_raw or None
-        wh_id_raw = get("warehouse_id")
-        wh_name_raw = get("warehouse")
+        wh_id_raw = _mapped_cell(headers, cells, "warehouse_id")
+        wh_name_raw = _mapped_cell(headers, cells, "warehouse")
 
         if not raw_box_number:
             outcome.skipped.append(
@@ -246,13 +341,28 @@ def import_boxes_xlsx(
             continue
 
         try:
-            box = create_box(
+            restored = (
+                restore_archived_box(
+                    db,
+                    user=user,
+                    box_number=box_number,
+                    lot=lot,
+                    contents=contents,
+                    warehouse_id=warehouse_id,
+                    note=f"Explicitly restored from XLSX row {offset}.",
+                    commit=False,
+                )
+                if restore_archived
+                else None
+            )
+            box = restored or create_box(
                 db,
                 user=user,
                 box_number=box_number,
                 lot=lot,
                 contents=contents,
                 warehouse_id=warehouse_id,
+                commit=False,
             )
         except BoxRuleError as exc:
             outcome.skipped.append(
@@ -261,6 +371,10 @@ def import_boxes_xlsx(
                 )
             )
             continue
-        outcome.created.append(box)
+        if restored is not None:
+            outcome.restored.append(box)
+        else:
+            outcome.created.append(box)
 
+    _commit_import_receipts(db, user=user, outcome=outcome)
     return outcome

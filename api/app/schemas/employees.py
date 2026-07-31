@@ -51,6 +51,31 @@ class EmployeePage(BaseModel):
     page_size: int
 
 
+class EmployeeImportItem(BaseModel):
+    source_row: int = Field(ge=1)
+    full_name: str = Field(min_length=1, max_length=160)
+    default_hours_per_day: Decimal | None = Field(default=None, gt=0, le=24)
+    is_active: bool | None = None
+    excluded_from_metrics: bool | None = None
+
+
+class EmployeeImportRequest(BaseModel):
+    warehouse_id: int = Field(ge=1)
+    items: list[EmployeeImportItem] = Field(min_length=1, max_length=5000)
+
+
+class EmployeeImportSkip(BaseModel):
+    row: int
+    full_name: str
+    reason: str
+
+
+class EmployeeImportResult(BaseModel):
+    created: list[EmployeeOut]
+    updated: list[EmployeeOut]
+    skipped: list[EmployeeImportSkip]
+
+
 class ProductivityEntryOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -70,7 +95,7 @@ class ProductivityEntryOut(BaseModel):
 class ProductivityEntryCreate(BaseModel):
     employee_id: int = Field(ge=1)
     entry_date: date
-    pages: int = Field(ge=0)
+    pages: int = Field(gt=0)
     hours_worked: Decimal = Field(gt=0, le=24)
     note: str | None = Field(default=None, max_length=500)
     excluded_from_metrics: bool = False
@@ -104,3 +129,30 @@ class ProductivitySummaryOut(BaseModel):
     total_pages: int
     total_hours: float
     avg_pages_per_day: float
+
+
+class EmployeePeriodAverageOut(BaseModel):
+    period_start: date
+    period_end: date
+    total_pages: int
+    total_hours: float
+    entry_count: int
+    pages_per_day: float | None
+    below_minimum: bool | None
+
+
+class EmployeeAverageOut(BaseModel):
+    employee_id: int
+    employee_name: str
+    excluded_from_metrics: bool
+    weekly: EmployeePeriodAverageOut
+    monthly: EmployeePeriodAverageOut
+    three_month: EmployeePeriodAverageOut
+    consistently_below_minimum: bool
+
+
+class EmployeeAveragesOut(BaseModel):
+    warehouse_id: int
+    anchor_date: date
+    min_pages_per_day: int | None
+    employees: list[EmployeeAverageOut]

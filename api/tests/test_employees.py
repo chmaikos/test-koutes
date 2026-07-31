@@ -75,6 +75,68 @@ def test_operator_cannot_create_employee(
     assert resp.status_code == 403
 
 
+def test_admin_import_creates_updates_and_skips_duplicate_rows(client, session):
+    existing = Employee(
+        warehouse_id=1,
+        full_name="Alice Smith",
+        default_hours_per_day=Decimal("8"),
+        is_active=False,
+    )
+    session.add(existing)
+    session.commit()
+
+    response = client.post(
+        "/api/employees/import-mapped",
+        json={
+            "warehouse_id": 1,
+            "items": [
+                {
+                    "source_row": 2,
+                    "full_name": "  alice   smith ",
+                    "default_hours_per_day": 7.5,
+                    "is_active": True,
+                },
+                {
+                    "source_row": 3,
+                    "full_name": "Bob Jones",
+                    "excluded_from_metrics": True,
+                },
+                {"source_row": 4, "full_name": "Bob Jones"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert [item["full_name"] for item in body["updated"]] == ["alice smith"]
+    assert Decimal(body["updated"][0]["default_hours_per_day"]) == Decimal("7.5")
+    assert body["updated"][0]["is_active"] is True
+    assert [item["full_name"] for item in body["created"]] == ["Bob Jones"]
+    assert body["created"][0]["excluded_from_metrics"] is True
+    assert body["skipped"] == [
+        {
+            "row": 4,
+            "full_name": "Bob Jones",
+            "reason": "duplicate employee in workbook",
+        }
+    ]
+
+
+def test_operator_cannot_import_employees(
+    client, make_user, restore_user_override
+):
+    operator = make_user(UserRole.operator)
+    _impersonate(operator)
+    response = client.post(
+        "/api/employees/import-mapped",
+        json={
+            "warehouse_id": 1,
+            "items": [{"source_row": 1, "full_name": "Blocked"}],
+        },
+    )
+    assert response.status_code == 403
+
+
 def test_operator_can_list_employees_in_their_warehouses(
     client, session, make_user, restore_user_override
 ):

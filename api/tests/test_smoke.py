@@ -79,7 +79,12 @@ def test_full_box_lifecycle_and_dashboard(client):
 
 def test_filters_search_and_exports(client):
     payloads = [
-        {"box_number": "100", "lot": "Acme", "warehouse_id": 1},
+        {
+            "box_number": "100",
+            "lot": "Acme",
+            "contents": "Customer invoices",
+            "warehouse_id": 1,
+        },
         {"box_number": "200", "lot": "Globex", "warehouse_id": 2},
         {"box_number": "201", "lot": "Globex", "warehouse_id": 2},
     ]
@@ -96,6 +101,18 @@ def test_filters_search_and_exports(client):
     # search across box_number
     resp = client.get("/api/boxes", params={"search": "201"})
     assert resp.json()["total"] == 1
+
+    # free-text search also covers contents, case-insensitively
+    resp = client.get("/api/boxes", params={"search": "INVOICES"})
+    assert resp.json()["total"] == 1
+    assert resp.json()["items"][0]["box_number"] == "100"
+
+    filtered_csv = client.get(
+        "/api/exports/boxes.csv",
+        params={"search": "customer invoices"},
+    )
+    assert "100" in filtered_csv.content.decode("utf-8-sig")
+    assert "200" not in filtered_csv.content.decode("utf-8-sig")
 
     csv = client.get("/api/exports/boxes.csv", params={"warehouse_id": 2})
     assert csv.status_code == 200
@@ -340,9 +357,23 @@ def test_alerts_low_inventory_resolves(client, session):
 
 
 def test_warehouse_thresholds_admin_only(client):
-    resp = client.patch("/api/warehouses/1", json={"min_inventory": 5, "max_capacity": 50})
+    resp = client.patch(
+        "/api/warehouses/1",
+        json={
+            "min_inventory": 5,
+            "max_capacity": 50,
+            "min_pages_per_day": 120,
+        },
+    )
     assert resp.status_code == 200
     assert resp.json()["min_inventory"] == 5
+    assert resp.json()["min_pages_per_day"] == 120
+
+    cleared = client.patch(
+        "/api/warehouses/1", json={"min_pages_per_day": None}
+    )
+    assert cleared.status_code == 200
+    assert cleared.json()["min_pages_per_day"] is None
 
     bad = client.patch("/api/warehouses/1", json={"min_inventory": 100, "max_capacity": 50})
     assert bad.status_code == 400
@@ -427,7 +458,7 @@ def test_linear_box_status_chain_rejects_skip_ahead(client):
 
     # Walk the chain end-to-end one step at a time; each step succeeds
     # and lands the box on the expected state.
-    for current, nxt in zip(chain, chain[1:]):
+    for current, nxt in zip(chain, chain[1:], strict=False):
         resp = client.patch(
             f"/api/boxes/{box_id}", json={"status": nxt}
         )

@@ -27,6 +27,8 @@ import { ExportsPage } from "@/pages/ExportsPage";
 import { ProductivityPage } from "@/pages/ProductivityPage";
 import { WarehouseProductivityDetailPage } from "@/pages/WarehouseProductivityDetailPage";
 import { SettingsPage } from "@/pages/SettingsPage";
+import { RequestPage } from "@/pages/RequestPage";
+import { RequestDetailPage } from "@/pages/RequestDetailPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -133,6 +135,11 @@ async function bootstrap() {
                     <Route index element={<DashboardPage />} />
                     <Route path="boxes" element={<BoxesPage />} />
                     <Route path="boxes/:id" element={<BoxDetailPage />} />
+                    <Route path="requests" element={<RequestPage />} />
+                    <Route
+                      path="requests/:id"
+                      element={<RequestDetailPage />}
+                    />
                     <Route path="alerts" element={<AlertsPage />} />
                     <Route path="alerts/:id" element={<AlertDetailPage />} />
                     <Route path="productivity" element={<ProductivityPage />} />

@@ -60,9 +60,10 @@
       p-0 sm:items-center sm:p-4;
   }
   .modal-sheet {
-    @apply card w-full rounded-t-xl rounded-b-none p-5
+    @apply card max-h-[100dvh] w-full overflow-y-auto overscroll-contain
+      rounded-t-xl rounded-b-none p-5
       pb-[max(1.25rem,env(safe-area-inset-bottom))]
-      sm:rounded-xl sm:pb-5;
+      sm:max-h-[calc(100dvh-2rem)] sm:rounded-xl sm:pb-5;
   }
 
   .safe-bottom {

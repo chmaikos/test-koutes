@@ -1,6 +1,20 @@
 """Tests for admin force-override and admin-only delete endpoints."""
 from __future__ import annotations
 
+from sqlalchemy.dialects import postgresql
+
+from app.services.boxes import _active_return_request_stmt
+
+
+def test_active_return_lock_query_is_supported_by_postgresql():
+    sql = str(
+        _active_return_request_stmt(49).compile(
+            dialect=postgresql.dialect()
+        )
+    )
+    assert "FOR UPDATE" in sql
+    assert "DISTINCT" not in sql
+
 
 def _create_box(client, *, box_number: str, warehouse_id: int = 1, lot: str = "x") -> int:
     resp = client.post(
@@ -83,10 +97,15 @@ def test_force_lets_admin_move_returned_box(client):
     _advance(client, box_id, "ready_to_return", "returned")
 
     rejected = client.patch(f"/api/boxes/{box_id}", json={"warehouse_id": 2})
-    assert rejected.status_code == 400
+    assert rejected.status_code == 409
 
     forced = client.patch(
-        f"/api/boxes/{box_id}", json={"warehouse_id": 2, "force": True}
+        f"/api/boxes/{box_id}",
+        json={
+            "warehouse_id": 2,
+            "force": True,
+            "note": "Correcting physical location",
+        },
     )
     assert forced.status_code == 200, forced.text
     assert forced.json()["current_warehouse_id"] == 2
@@ -123,6 +142,20 @@ def test_force_default_false_still_enforces_rules(client):
     assert resp.status_code == 400
 
 
+def test_force_override_requires_reason(client):
+    box_id = _create_box(client, box_number="001")
+    move = client.patch(
+        f"/api/boxes/{box_id}",
+        json={"warehouse_id": 2, "force": True},
+    )
+    assert move.status_code == 400
+    archive = client.post(
+        f"/api/boxes/{box_id}/delete",
+        json={"force": True},
+    )
+    assert archive.status_code == 400
+
+
 # ---------------------------------------------------------------------------
 # force override on bulk
 # ---------------------------------------------------------------------------
@@ -138,15 +171,17 @@ def test_bulk_force_overrides_returned(client):
         json={"box_ids": [active, returned], "warehouse_id": 2},
     )
     body = without_force.json()
-    assert {b["id"] for b in body["updated"]} == {active}
-    assert len(body["skipped"]) == 1
-
-    # Move the active one back so we have something to re-move forcibly.
-    client.patch(f"/api/boxes/{active}", json={"warehouse_id": 1})
+    assert body["updated"] == []
+    assert {skip["box_id"] for skip in body["skipped"]} == {active, returned}
 
     forced = client.post(
         "/api/boxes/bulk",
-        json={"box_ids": [active, returned], "warehouse_id": 3, "force": True},
+        json={
+            "box_ids": [active, returned],
+            "warehouse_id": 3,
+            "force": True,
+            "note": "Correcting physical locations",
+        },
     )
     assert forced.status_code == 200, forced.text
     forced_body = forced.json()
@@ -179,15 +214,29 @@ def test_bulk_force_requires_admin(client, make_user):
 # ---------------------------------------------------------------------------
 
 
-def test_admin_can_delete_box_and_history_vanishes(client):
+def test_linked_box_requires_force_and_is_archived(client):
     box_id = _create_box(client, box_number="001")
     _advance(client, box_id, "ready_to_return")
 
-    resp = client.delete(f"/api/boxes/{box_id}")
-    assert resp.status_code == 204
+    resp = client.post(f"/api/boxes/{box_id}/delete", json={})
+    assert resp.status_code == 409
 
-    assert client.get(f"/api/boxes/{box_id}").status_code == 404
-    assert client.get(f"/api/boxes/{box_id}/events").status_code == 404
+    archived = client.post(
+        f"/api/boxes/{box_id}/delete",
+        json={"force": True, "reason": "Duplicate physical record"},
+    )
+    assert archived.status_code == 200
+    assert archived.json()["archived"] is True
+    detail = client.get(f"/api/boxes/{box_id}")
+    assert detail.status_code == 200
+    assert detail.json()["archived_at"] is not None
+    assert detail.json()["archive_reason"] == "Duplicate physical record"
+    events = client.get(f"/api/boxes/{box_id}/events").json()
+    assert events[0]["event_type"] == "archived"
+    listed_ids = {
+        item["id"] for item in client.get("/api/boxes").json()["items"]
+    }
+    assert box_id not in listed_ids
 
 
 def test_delete_missing_returns_404(client):
@@ -217,17 +266,21 @@ def test_bulk_delete_with_missing_id(client):
 
     resp = client.post(
         "/api/boxes/bulk-delete",
-        json={"box_ids": [a, 999_999, b]},
+        json={
+            "box_ids": [a, 999_999, b],
+            "force": True,
+            "reason": "Duplicate imported records",
+        },
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert sorted(body["deleted_ids"]) == sorted([a, b])
+    assert body["deleted_ids"] == []
+    assert sorted(body["archived_ids"]) == sorted([a, b])
     assert len(body["skipped"]) == 1
     assert body["skipped"][0]["box_id"] == 999_999
 
-    # Both real boxes are gone.
-    assert client.get(f"/api/boxes/{a}").status_code == 404
-    assert client.get(f"/api/boxes/{b}").status_code == 404
+    assert client.get(f"/api/boxes/{a}").json()["archived_at"] is not None
+    assert client.get(f"/api/boxes/{b}").json()["archived_at"] is not None
 
 
 def test_bulk_delete_requires_admin(client, make_user):
@@ -251,9 +304,15 @@ def test_bulk_delete_requires_admin(client, make_user):
 def test_bulk_delete_dedupes_ids(client):
     a = _create_box(client, box_number="001")
     resp = client.post(
-        "/api/boxes/bulk-delete", json={"box_ids": [a, a, a]}
+        "/api/boxes/bulk-delete",
+        json={
+            "box_ids": [a, a, a],
+            "force": True,
+            "reason": "Duplicate record",
+        },
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert body["deleted_ids"] == [a]
+    assert body["deleted_ids"] == []
+    assert body["archived_ids"] == [a]
     assert body["skipped"] == []

@@ -139,6 +139,7 @@ def require_role(*roles: UserRole):
 
 require_admin = require_role(UserRole.admin)
 require_operator = require_role(UserRole.admin, UserRole.operator)
+require_warehouse_mover = require_role(UserRole.admin, UserRole.warehouse_mover)
 
 
 def require_credentials_set(user: CurrentUser) -> User:

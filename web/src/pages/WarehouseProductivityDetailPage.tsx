@@ -4,16 +4,20 @@ import { Link, Navigate, useParams, useSearchParams } from "react-router-dom";
 import { Activity, ArrowLeft } from "lucide-react";
 import { useHasRole } from "@/components/RoleGate";
 import {
+  useEmployeeAverages,
   useProductivityDailySummary,
+  useProductivityMonthlySummary,
+  useProductivityThreeMonthSummary,
   useProductivityWeeklySummary,
   useWarehouses,
 } from "@/api/hooks";
 import type { WarehouseProductivity } from "@/api/types";
+import { EmployeeAveragesTable } from "@/components/productivity/EmployeeAveragesTable";
 import { PerformersTable } from "@/components/productivity/PerformersTable";
 import { RosterEntryGrid } from "@/components/productivity/RosterEntryGrid";
 import { isoWeekStart, todayStr } from "@/components/productivity/dates";
 
-type Tab = "today" | "week";
+type Tab = "today" | "week" | "month" | "three-month";
 
 export function WarehouseProductivityDetailPage() {
   const { warehouseId: warehouseIdParam } = useParams();
@@ -25,11 +29,13 @@ export function WarehouseProductivityDetailPage() {
 
   const [date, setDate] = useState<string>(initialDate);
   const [tab, setTab] = useState<Tab>(
-    initialTab === "week" ? "week" : "today",
+    ["today", "week", "month", "three-month"].includes(initialTab)
+      ? initialTab
+      : "today",
   );
 
   const canWrite = useHasRole(["admin", "operator"]);
-  const { data: warehouses } = useWarehouses();
+  const { data: warehouses } = useWarehouses(true);
   const warehouse = useMemo(
     () => warehouses?.find((w) => w.id === warehouseId),
     [warehouses, warehouseId],
@@ -40,11 +46,20 @@ export function WarehouseProductivityDetailPage() {
     warehouseId,
     isoWeekStart(date),
   );
+  const monthlyQuery = useProductivityMonthlySummary(warehouseId, date);
+  const threeMonthQuery = useProductivityThreeMonthSummary(warehouseId, date);
+  const averagesQuery = useEmployeeAverages(warehouseId, date);
 
-  const summary: WarehouseProductivity | undefined =
+  const activeQuery =
     tab === "today"
-      ? dailyQuery.data?.warehouses.find((w) => w.warehouse_id === warehouseId)
-      : weeklyQuery.data?.warehouses.find((w) => w.warehouse_id === warehouseId);
+      ? dailyQuery
+      : tab === "week"
+        ? weeklyQuery
+        : tab === "month"
+          ? monthlyQuery
+          : threeMonthQuery;
+  const summary: WarehouseProductivity | undefined =
+    activeQuery.data?.warehouses.find((w) => w.warehouse_id === warehouseId);
 
   // Keep the query string in sync so refreshing the page or sharing the URL
   // lands you on the same date + tab you were looking at.
@@ -114,6 +129,24 @@ export function WarehouseProductivityDetailPage() {
         >
           This week
         </TabButton>
+        <TabButton
+          active={tab === "month"}
+          onClick={() => {
+            setTab("month");
+            updateParams({ tab: "month" });
+          }}
+        >
+          This month
+        </TabButton>
+        <TabButton
+          active={tab === "three-month"}
+          onClick={() => {
+            setTab("three-month");
+            updateParams({ tab: "three-month" });
+          }}
+        >
+          3 months
+        </TabButton>
       </div>
 
       <section className="card overflow-hidden">
@@ -153,6 +186,11 @@ export function WarehouseProductivityDetailPage() {
           title="Bottom performers"
           performers={summary?.bottom ?? []}
           emptyHint=""
+        />
+
+        <EmployeeAveragesTable
+          data={averagesQuery.data}
+          isLoading={averagesQuery.isLoading}
         />
 
         <RosterEntryGrid

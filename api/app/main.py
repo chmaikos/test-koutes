@@ -19,6 +19,7 @@ from app.routers import (
     exports,
     imports,
     productivity,
+    requests,
     stream,
     users,
     warehouses,
@@ -95,6 +96,7 @@ api_router.include_router(alerts.router, dependencies=gated)
 api_router.include_router(dashboard.router, dependencies=gated)
 api_router.include_router(employees.router, dependencies=gated)
 api_router.include_router(productivity.router, dependencies=gated)
+api_router.include_router(requests.router, dependencies=gated)
 api_router.include_router(exports.router, dependencies=gated)
 # The SSE stream takes its access token via `?access_token=` (EventSource cannot
 # set headers), so it does its own auth + credentials-must-change check inline

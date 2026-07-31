@@ -6,6 +6,8 @@ import type {
   AlertRecipients,
   AlertTestEmailResult,
   Box,
+  BoxDeleteResult,
+  BoxRequest,
   BoxEvent,
   BoxFilters,
   BulkBoxUpdate,
@@ -13,18 +15,32 @@ import type {
   BulkResult,
   DashboardSummary,
   Employee,
+  EmployeeAverages,
+  EmployeeImportItem,
+  EmployeeImportResult,
   ImportResult,
+  InboundRequestItemInput,
   Page,
   ProductivityEntry,
   ProductivitySummary,
+  RequestDirection,
+  RequestDocument,
+  RequestDocumentType,
+  RequestEvent,
+  RequestFilters,
+  RequestSuggestion,
+  ReturnCandidate,
+  ReturnSource,
   User,
   Warehouse,
+  XlsxPreview,
 } from "@/api/types";
 
 export const queryKeys = {
   me: ["me"] as const,
   dashboard: ["dashboard"] as const,
-  warehouses: ["warehouses"] as const,
+  warehouses: (includeInactive = false) =>
+    ["warehouses", includeInactive] as const,
   users: ["users"] as const,
   alerts: (open: boolean) => ["alerts", open] as const,
   alert: (id: number) => ["alert", id] as const,
@@ -33,6 +49,19 @@ export const queryKeys = {
   boxEvents: (id: number) => ["box-events", id] as const,
   boxes: (filters: BoxFilters, page: number, pageSize: number) =>
     ["boxes", filters, page, pageSize] as const,
+  requests: (filters: RequestFilters, page: number, pageSize: number) =>
+    ["requests", filters, page, pageSize] as const,
+  request: (id: number) => ["request", id] as const,
+  requestEvents: (id: number) => ["request-events", id] as const,
+  requestDocuments: (id: number) => ["request-documents", id] as const,
+  requestSuggestion: (
+    warehouseId: number | undefined,
+    direction: RequestDirection,
+  ) => ["request-suggestion", warehouseId ?? null, direction] as const,
+  returnSources: (warehouseId: number | undefined) =>
+    ["return-sources", warehouseId ?? null] as const,
+  returnCandidates: (sourceInboundRequestId: number | undefined) =>
+    ["return-candidates", sourceInboundRequestId ?? null] as const,
   employees: (
     warehouseId?: number,
     includeInactive?: boolean,
@@ -52,6 +81,12 @@ export const queryKeys = {
     ["productivity-daily", warehouseId ?? null, date ?? null] as const,
   productivityWeekly: (warehouseId?: number, weekStart?: string) =>
     ["productivity-weekly", warehouseId ?? null, weekStart ?? null] as const,
+  productivityMonthly: (warehouseId?: number, month?: string) =>
+    ["productivity-monthly", warehouseId ?? null, month ?? null] as const,
+  productivityThreeMonth: (warehouseId?: number, anchorDate?: string) =>
+    ["productivity-three-month", warehouseId ?? null, anchorDate ?? null] as const,
+  employeeAverages: (warehouseId: number, anchorDate?: string) =>
+    ["employee-averages", warehouseId, anchorDate ?? null] as const,
 };
 
 export interface ProductivityEntryFilters {
@@ -78,11 +113,30 @@ export function useDashboard() {
   });
 }
 
-export function useWarehouses() {
+export function useWarehouses(includeInactive = false) {
   return useQuery({
-    queryKey: queryKeys.warehouses,
-    queryFn: async () => (await api.get<Warehouse[]>("/warehouses")).data,
+    queryKey: queryKeys.warehouses(includeInactive),
+    queryFn: async () =>
+      (
+        await api.get<Warehouse[]>(
+          `/warehouses${buildQueryString({
+            include_inactive: includeInactive,
+          })}`,
+        )
+      ).data,
   });
+}
+
+function invalidateWarehouseState(qc: ReturnType<typeof useQueryClient>) {
+  qc.invalidateQueries({ queryKey: ["warehouses"] });
+  qc.invalidateQueries({ queryKey: queryKeys.dashboard });
+  qc.invalidateQueries({ queryKey: queryKeys.users });
+  qc.invalidateQueries({ queryKey: queryKeys.alertRecipients });
+  qc.invalidateQueries({ queryKey: ["productivity-daily"] });
+  qc.invalidateQueries({ queryKey: ["productivity-weekly"] });
+  qc.invalidateQueries({ queryKey: ["productivity-monthly"] });
+  qc.invalidateQueries({ queryKey: ["productivity-three-month"] });
+  qc.invalidateQueries({ queryKey: ["employee-averages"] });
 }
 
 export function useUpdateWarehouse() {
@@ -90,11 +144,15 @@ export function useUpdateWarehouse() {
   return useMutation({
     mutationFn: async (input: {
       id: number;
-      patch: Partial<Pick<Warehouse, "name" | "min_inventory" | "max_capacity">>;
+      patch: Partial<
+        Pick<
+          Warehouse,
+          "name" | "min_inventory" | "max_capacity" | "min_pages_per_day"
+        >
+      >;
     }) => (await api.patch<Warehouse>(`/warehouses/${input.id}`, input.patch)).data,
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: queryKeys.warehouses });
-      qc.invalidateQueries({ queryKey: queryKeys.dashboard });
+      invalidateWarehouseState(qc);
     },
   });
 }
@@ -106,11 +164,29 @@ export function useCreateWarehouse() {
       name: string;
       min_inventory?: number;
       max_capacity?: number;
+      min_pages_per_day?: number | null;
     }) => (await api.post<Warehouse>("/warehouses", input)).data,
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: queryKeys.warehouses });
-      qc.invalidateQueries({ queryKey: queryKeys.dashboard });
+      invalidateWarehouseState(qc);
     },
+  });
+}
+
+export function useArchiveWarehouse() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (warehouseId: number) =>
+      (await api.delete<Warehouse>(`/warehouses/${warehouseId}`)).data,
+    onSuccess: () => invalidateWarehouseState(qc),
+  });
+}
+
+export function useRestoreWarehouse() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (warehouseId: number) =>
+      (await api.post<Warehouse>(`/warehouses/${warehouseId}/restore`)).data,
+    onSuccess: () => invalidateWarehouseState(qc),
   });
 }
 
@@ -140,7 +216,7 @@ export function useUpdateUser() {
       qc.invalidateQueries({ queryKey: queryKeys.alertRecipients });
       // ACL changes can flip what the affected user (or the admin themselves
       // when adjusting their own row) sees; refresh warehouse-scoped views.
-      qc.invalidateQueries({ queryKey: queryKeys.warehouses });
+      qc.invalidateQueries({ queryKey: ["warehouses"] });
       qc.invalidateQueries({ queryKey: queryKeys.dashboard });
     },
   });
@@ -240,6 +316,8 @@ export function useCreateBox() {
       qc.invalidateQueries({ queryKey: ["boxes"] });
       qc.invalidateQueries({ queryKey: queryKeys.dashboard });
       qc.invalidateQueries({ queryKey: ["alerts"] });
+      qc.invalidateQueries({ queryKey: ["requests"] });
+      qc.invalidateQueries({ queryKey: ["return-sources"] });
     },
   });
 }
@@ -264,6 +342,9 @@ export function useUpdateBox() {
       qc.invalidateQueries({ queryKey: queryKeys.boxEvents(data.id) });
       qc.invalidateQueries({ queryKey: queryKeys.dashboard });
       qc.invalidateQueries({ queryKey: ["alerts"] });
+      qc.invalidateQueries({ queryKey: ["requests"] });
+      qc.invalidateQueries({ queryKey: ["return-sources"] });
+      qc.invalidateQueries({ queryKey: ["return-candidates"] });
     },
   });
 }
@@ -271,14 +352,25 @@ export function useUpdateBox() {
 export function useDeleteBox() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (id: number) => {
-      await api.delete(`/boxes/${id}`);
-      return id;
+    mutationFn: async (input: {
+      id: number;
+      force?: boolean;
+      reason?: string;
+    }) => {
+      return (
+        await api.post<BoxDeleteResult>(`/boxes/${input.id}/delete`, {
+          force: !!input.force,
+          reason: input.reason,
+        })
+      ).data;
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["boxes"] });
       qc.invalidateQueries({ queryKey: queryKeys.dashboard });
       qc.invalidateQueries({ queryKey: ["alerts"] });
+      qc.invalidateQueries({ queryKey: ["requests"] });
+      qc.invalidateQueries({ queryKey: ["return-sources"] });
+      qc.invalidateQueries({ queryKey: ["return-candidates"] });
     },
   });
 }
@@ -286,13 +378,19 @@ export function useDeleteBox() {
 export function useBulkDeleteBoxes() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (box_ids: number[]) =>
-      (await api.post<BulkDeleteResult>("/boxes/bulk-delete", { box_ids }))
-        .data,
+    mutationFn: async (input: {
+      box_ids: number[];
+      force?: boolean;
+      reason?: string;
+    }) =>
+      (await api.post<BulkDeleteResult>("/boxes/bulk-delete", input)).data,
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["boxes"] });
       qc.invalidateQueries({ queryKey: queryKeys.dashboard });
       qc.invalidateQueries({ queryKey: ["alerts"] });
+      qc.invalidateQueries({ queryKey: ["requests"] });
+      qc.invalidateQueries({ queryKey: ["return-sources"] });
+      qc.invalidateQueries({ queryKey: ["return-candidates"] });
     },
   });
 }
@@ -306,6 +404,8 @@ export function useBulkUpdateBoxes() {
       qc.invalidateQueries({ queryKey: ["boxes"] });
       qc.invalidateQueries({ queryKey: queryKeys.dashboard });
       qc.invalidateQueries({ queryKey: ["alerts"] });
+      qc.invalidateQueries({ queryKey: ["requests"] });
+      qc.invalidateQueries({ queryKey: ["return-sources"] });
       qc.invalidateQueries({ queryKey: ["box"] });
       qc.invalidateQueries({ queryKey: ["box-events"] });
     },
@@ -318,11 +418,15 @@ export function useImportBoxes() {
     mutationFn: async (input: {
       file: File;
       warehouse_id?: number;
+      restore_archived?: boolean;
     }) => {
       const form = new FormData();
       form.append("file", input.file);
       if (input.warehouse_id !== undefined) {
         form.append("warehouse_id", String(input.warehouse_id));
+      }
+      if (input.restore_archived) {
+        form.append("restore_archived", "true");
       }
       return (
         await api.post<ImportResult>("/boxes/import", form, {
@@ -334,6 +438,308 @@ export function useImportBoxes() {
       qc.invalidateQueries({ queryKey: ["boxes"] });
       qc.invalidateQueries({ queryKey: queryKeys.dashboard });
       qc.invalidateQueries({ queryKey: ["alerts"] });
+      qc.invalidateQueries({ queryKey: ["requests"] });
+      qc.invalidateQueries({ queryKey: ["return-sources"] });
+    },
+  });
+}
+
+export function usePreviewBoxImportXlsx() {
+  return useMutation({
+    mutationFn: async (input: { file: File }) => {
+      const form = new FormData();
+      form.append("file", input.file);
+      return (
+        await api.post<XlsxPreview>("/boxes/import-preview", form, {
+          headers: { "Content-Type": "multipart/form-data" },
+        })
+      ).data;
+    },
+  });
+}
+
+export function useImportMappedBoxes() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: {
+      warehouse_id: number;
+      items: InboundRequestItemInput[];
+      restore_archived?: boolean;
+    }) =>
+      (await api.post<ImportResult>("/boxes/import-mapped", input)).data,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["boxes"] });
+      qc.invalidateQueries({ queryKey: queryKeys.dashboard });
+      qc.invalidateQueries({ queryKey: ["alerts"] });
+      qc.invalidateQueries({ queryKey: ["requests"] });
+      qc.invalidateQueries({ queryKey: ["return-sources"] });
+    },
+  });
+}
+
+// --- box order / return requests ------------------------------------------
+
+export function useRequests(
+  filters: RequestFilters,
+  page: number,
+  pageSize: number,
+) {
+  return useQuery({
+    queryKey: queryKeys.requests(filters, page, pageSize),
+    queryFn: async () =>
+      (
+        await api.get<Page<BoxRequest>>(
+          `/requests${buildQueryString({
+            ...filters,
+            page,
+            page_size: pageSize,
+          })}`,
+        )
+      ).data,
+    placeholderData: (prev) => prev,
+  });
+}
+
+export function useRequest(id: number | undefined) {
+  return useQuery({
+    queryKey: id ? queryKeys.request(id) : ["request", "noop"],
+    queryFn: async () => (await api.get<BoxRequest>(`/requests/${id}`)).data,
+    enabled: !!id,
+  });
+}
+
+export function useRequestEvents(id: number | undefined) {
+  return useQuery({
+    queryKey: id ? queryKeys.requestEvents(id) : ["request-events", "noop"],
+    queryFn: async () =>
+      (await api.get<RequestEvent[]>(`/requests/${id}/events`)).data,
+    enabled: !!id,
+  });
+}
+
+export function useRequestDocuments(id: number | undefined) {
+  return useQuery({
+    queryKey: id
+      ? queryKeys.requestDocuments(id)
+      : ["request-documents", "noop"],
+    queryFn: async () =>
+      (await api.get<RequestDocument[]>(`/requests/${id}/documents`)).data,
+    enabled: !!id,
+  });
+}
+
+export function useRequestSuggestion(
+  warehouseId: number | undefined,
+  direction: RequestDirection,
+) {
+  return useQuery({
+    queryKey: queryKeys.requestSuggestion(warehouseId, direction),
+    queryFn: async () =>
+      (
+        await api.get<RequestSuggestion>(
+          `/requests/suggestion${buildQueryString({
+            warehouse_id: warehouseId,
+            direction,
+          })}`,
+        )
+      ).data,
+    enabled: warehouseId !== undefined,
+  });
+}
+
+export function useReturnSources(warehouseId: number | undefined) {
+  return useQuery({
+    queryKey: queryKeys.returnSources(warehouseId),
+    queryFn: async () =>
+      (
+        await api.get<ReturnSource[]>(
+          `/requests/return-sources${buildQueryString({
+            warehouse_id: warehouseId,
+          })}`,
+        )
+      ).data,
+    enabled: warehouseId !== undefined,
+  });
+}
+
+export function useReturnCandidates(
+  sourceInboundRequestId: number | undefined,
+) {
+  return useQuery({
+    queryKey: queryKeys.returnCandidates(sourceInboundRequestId),
+    queryFn: async () =>
+      (
+        await api.get<ReturnCandidate[]>(
+          `/requests/${sourceInboundRequestId}/return-candidates`,
+        )
+      ).data,
+    enabled: sourceInboundRequestId !== undefined,
+  });
+}
+
+function invalidateRequestQueries(
+  qc: ReturnType<typeof useQueryClient>,
+  id?: number,
+) {
+  qc.invalidateQueries({ queryKey: ["requests"] });
+  qc.invalidateQueries({ queryKey: ["request-suggestion"] });
+  qc.invalidateQueries({ queryKey: ["return-sources"] });
+  qc.invalidateQueries({ queryKey: ["return-candidates"] });
+  if (id !== undefined) {
+    qc.invalidateQueries({ queryKey: queryKeys.request(id) });
+    qc.invalidateQueries({ queryKey: queryKeys.requestEvents(id) });
+    qc.invalidateQueries({ queryKey: queryKeys.requestDocuments(id) });
+  }
+}
+
+export function useCreateRequest() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (
+      input:
+        | {
+            direction: "inbound";
+            warehouse_id: number;
+            quantity: number;
+          }
+        | {
+            direction: "return";
+            warehouse_id: number;
+            quantity: number;
+            source_inbound_request_id: number;
+            box_ids: number[];
+          },
+    ) => (await api.post<BoxRequest>("/requests", input)).data,
+    onSuccess: (data) => invalidateRequestQueries(qc, data.id),
+  });
+}
+
+type RequestActionInput =
+  | {
+      id: number;
+      expectedVersion: number;
+      action: "approve" | "start-transit";
+    }
+  | {
+      id: number;
+      expectedVersion: number;
+      action: "reject";
+      body: { reason: string };
+    }
+  | {
+      id: number;
+      expectedVersion: number;
+      action: "cancel";
+      body: { reason?: string };
+    }
+  | {
+      id: number;
+      expectedVersion: number;
+      action: "complete";
+      body: {
+        inbound_items?: InboundRequestItemInput[];
+        discrepancy_reason?: string;
+      };
+    };
+
+export function useRequestAction() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: RequestActionInput) => {
+      const body = {
+        ...("body" in input ? input.body : {}),
+        expected_version: input.expectedVersion,
+      };
+      return (
+        await api.post<BoxRequest>(
+          `/requests/${input.id}/${input.action}`,
+          body,
+        )
+      ).data;
+    },
+    onSuccess: (data) => {
+      invalidateRequestQueries(qc, data.id);
+      qc.invalidateQueries({ queryKey: ["boxes"] });
+      qc.invalidateQueries({ queryKey: queryKeys.dashboard });
+    },
+  });
+}
+
+export function useUploadRequestDocument() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: {
+      requestId: number;
+      file: File;
+      documentType: RequestDocumentType;
+      erpReference: string;
+    }) => {
+      const form = new FormData();
+      form.append("file", input.file);
+      form.append("document_type", input.documentType);
+      form.append("erp_reference", input.erpReference);
+      return (
+        await api.post<RequestDocument>(
+          `/requests/${input.requestId}/documents`,
+          form,
+          { headers: { "Content-Type": "multipart/form-data" } },
+        )
+      ).data;
+    },
+    onSuccess: (_data, input) => invalidateRequestQueries(qc, input.requestId),
+  });
+}
+
+export function usePreviewInboundXlsx() {
+  return useMutation({
+    mutationFn: async (input: { requestId: number; file: File }) => {
+      const form = new FormData();
+      form.append("file", input.file);
+      return (
+        await api.post<XlsxPreview>(
+          `/requests/${input.requestId}/inbound-xlsx-preview`,
+          form,
+          { headers: { "Content-Type": "multipart/form-data" } },
+        )
+      ).data;
+    },
+  });
+}
+
+export function useDownloadRequestDocument() {
+  return useMutation({
+    mutationFn: async (input: {
+      requestId: number;
+      documentId: number;
+      filename: string;
+    }) => {
+      // Use POST so an older installed service worker cannot satisfy the
+      // download from its generic GET API cache.
+      const response = await api.post<Blob>(
+        `/requests/${input.requestId}/documents/${input.documentId}/download`,
+        null,
+        {
+          responseType: "blob",
+          headers: { "Cache-Control": "no-cache" },
+        },
+      );
+      const responseContentType = response.headers["content-type"];
+      const contentType =
+        typeof responseContentType === "string"
+          ? responseContentType
+          : response.data.type || "application/octet-stream";
+      const blob = new Blob([response.data], { type: contentType });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = input.filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      // Revoking synchronously can invalidate the blob while the browser's
+      // download/PDF viewer is still consuming it, producing a blank or
+      // truncated file. Keep it alive long enough for the download to start.
+      window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
     },
   });
 }
@@ -348,6 +754,9 @@ function invalidateProductivity(qc: ReturnType<typeof useQueryClient>) {
   qc.invalidateQueries({ queryKey: ["productivity-entries"] });
   qc.invalidateQueries({ queryKey: ["productivity-daily"] });
   qc.invalidateQueries({ queryKey: ["productivity-weekly"] });
+  qc.invalidateQueries({ queryKey: ["productivity-monthly"] });
+  qc.invalidateQueries({ queryKey: ["productivity-three-month"] });
+  qc.invalidateQueries({ queryKey: ["employee-averages"] });
   qc.invalidateQueries({ queryKey: queryKeys.dashboard });
 }
 
@@ -429,6 +838,36 @@ export function useDeleteEmployee() {
   });
 }
 
+export function usePreviewEmployeeImport() {
+  return useMutation({
+    mutationFn: async (file: File) => {
+      const data = new FormData();
+      data.append("file", file);
+      return (
+        await api.post<XlsxPreview>("/employees/import-preview", data, {
+          headers: { "Content-Type": "multipart/form-data" },
+        })
+      ).data;
+    },
+  });
+}
+
+export function useImportMappedEmployees() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: {
+      warehouse_id: number;
+      items: EmployeeImportItem[];
+    }) =>
+      (await api.post<EmployeeImportResult>("/employees/import-mapped", input))
+        .data,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["employees"] });
+      invalidateProductivity(qc);
+    },
+  });
+}
+
 export function useProductivityEntries(filters: ProductivityEntryFilters) {
   return useQuery({
     queryKey: queryKeys.productivityEntries(filters),
@@ -499,6 +938,60 @@ export function useProductivityWeeklySummary(
           `/productivity/summary/weekly${buildQueryString({
             warehouse_id: warehouseId,
             week_start: weekStart,
+          })}`,
+        )
+      ).data,
+    refetchInterval: 60_000,
+  });
+}
+
+export function useProductivityMonthlySummary(
+  warehouseId?: number,
+  month?: string,
+) {
+  return useQuery({
+    queryKey: queryKeys.productivityMonthly(warehouseId, month),
+    queryFn: async () =>
+      (
+        await api.get<ProductivitySummary>(
+          `/productivity/summary/monthly${buildQueryString({
+            warehouse_id: warehouseId,
+            month,
+          })}`,
+        )
+      ).data,
+    refetchInterval: 60_000,
+  });
+}
+
+export function useProductivityThreeMonthSummary(
+  warehouseId?: number,
+  anchorDate?: string,
+) {
+  return useQuery({
+    queryKey: queryKeys.productivityThreeMonth(warehouseId, anchorDate),
+    queryFn: async () =>
+      (
+        await api.get<ProductivitySummary>(
+          `/productivity/summary/three-month${buildQueryString({
+            warehouse_id: warehouseId,
+            anchor_date: anchorDate,
+          })}`,
+        )
+      ).data,
+    refetchInterval: 60_000,
+  });
+}
+
+export function useEmployeeAverages(warehouseId: number, anchorDate?: string) {
+  return useQuery({
+    queryKey: queryKeys.employeeAverages(warehouseId, anchorDate),
+    queryFn: async () =>
+      (
+        await api.get<EmployeeAverages>(
+          `/productivity/employee-averages${buildQueryString({
+            warehouse_id: warehouseId,
+            anchor_date: anchorDate,
           })}`,
         )
       ).data,

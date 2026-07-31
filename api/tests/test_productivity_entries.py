@@ -166,6 +166,19 @@ def test_create_entry_negative_pages_rejected(client, employee_w1):
     assert resp.status_code == 422
 
 
+def test_create_entry_zero_pages_rejected(client, employee_w1):
+    resp = client.post(
+        "/api/productivity/entries",
+        json={
+            "employee_id": employee_w1.id,
+            "entry_date": "2026-05-10",
+            "pages": 0,
+            "hours_worked": 4.0,
+        },
+    )
+    assert resp.status_code == 422
+
+
 def test_inactive_employee_rejected(client, session, employee_w1):
     employee_w1.is_active = False
     session.commit()
