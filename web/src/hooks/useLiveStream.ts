@@ -109,6 +109,9 @@ function handleEvent(
       }
       break;
     }
+    case "notification.created":
+      qc.invalidateQueries({ queryKey: ["notifications"] });
+      break;
     default:
       break;
   }

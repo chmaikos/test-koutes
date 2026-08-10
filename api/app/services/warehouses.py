@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.models.alerts import Alert
 from app.models.boxes import ACTIVE_STATUSES, Box
 from app.models.employees import Employee
-from app.models.requests import ACTIVE_REQUEST_STATUSES, BoxRequest
+from app.models.requests import BLOCKING_REQUEST_STATUSES, BoxRequest
 from app.models.users import User
 from app.models.warehouses import Warehouse
 
@@ -86,7 +86,7 @@ def archive_warehouse(
         db.scalar(
             select(func.count(BoxRequest.id)).where(
                 BoxRequest.warehouse_id == warehouse_id,
-                BoxRequest.status.in_(ACTIVE_REQUEST_STATUSES),
+                BoxRequest.status.in_(BLOCKING_REQUEST_STATUSES),
             )
         )
         or 0

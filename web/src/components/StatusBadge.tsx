@@ -2,6 +2,7 @@ import clsx from "clsx";
 import type { BoxStatus } from "@/api/types";
 
 const STATUS_LABELS: Record<BoxStatus, string> = {
+  quarantined: "Quarantined",
   received: "Received",
   processing: "Processing",
   incomplete: "Incomplete",
@@ -14,6 +15,7 @@ const STATUS_LABELS: Record<BoxStatus, string> = {
 // (packaged) -> slate (gone). The classes intentionally avoid red because
 // `incomplete` is a normal pipeline state, not an error.
 const STATUS_CLASSES: Record<BoxStatus, string> = {
+  quarantined: "bg-amber-100 text-amber-800",
   received: "bg-sky-100 text-sky-700",
   processing: "bg-indigo-100 text-indigo-700",
   incomplete: "bg-amber-100 text-amber-800",

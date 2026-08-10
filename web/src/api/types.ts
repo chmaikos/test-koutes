@@ -1,6 +1,7 @@
 export type Role = "admin" | "warehouse_mover" | "operator" | "viewer";
 
 export type BoxStatus =
+  | "quarantined"
   | "received"
   | "processing"
   | "incomplete"
@@ -10,6 +11,7 @@ export type BoxStatus =
 // Ordered to match the API's linear status chain so dropdowns and other
 // "advance to next status" affordances render in the natural sequence.
 export const ALL_BOX_STATUSES: BoxStatus[] = [
+  "quarantined",
   "received",
   "processing",
   "incomplete",
@@ -48,6 +50,7 @@ export interface User {
   role_override: boolean;
   is_active: boolean;
   email_alerts_enabled: boolean;
+  email_requests_enabled: boolean;
   last_login_at: string | null;
   username: string | null;
   is_local: boolean;
@@ -69,6 +72,16 @@ export interface Warehouse {
   min_inventory: number;
   max_capacity: number;
   min_pages_per_day: number | null;
+  lead_time_days: number;
+  safety_stock_percent: number;
+  history_30_weight: number;
+  history_90_weight: number;
+  forecast_adjustment: number | null;
+  receipt_mode: "auto_complete" | "admin_review";
+  require_erp_document: boolean;
+  quarantine_imports: boolean;
+  quarantine_manual_receipts: boolean;
+  two_person_approval_threshold: number | null;
   is_active: boolean;
   archived_at: string | null;
   archived_by_user_id: number | null;
@@ -92,6 +105,11 @@ export interface Box {
   receipt_request_id: number | null;
 }
 
+export interface StagedReceiptResult {
+  outcome: "staged";
+  staged_receipt_id: number;
+}
+
 export interface BoxEvent {
   id: number;
   box_id: number;
@@ -104,6 +122,7 @@ export interface BoxEvent {
   occurred_at: string;
   user_id: number | null;
   note: string | null;
+  metadata: Record<string, unknown>;
 }
 
 export interface Alert {
@@ -273,6 +292,7 @@ export interface WarehouseSummary {
   //   unavailable = incomplete + ready_to_return (vs `max_capacity`)
   available_boxes: number;
   unavailable_boxes: number;
+  quarantined_boxes: number;
   // Subset of `unavailable_boxes`: how many boxes are physically
   // packaged for return right now.
   ready_to_return_boxes: number;
@@ -352,6 +372,7 @@ export interface ImportResult {
   restored: Box[];
   skipped: ImportSkip[];
   receipt_request_ids: number[];
+  staged_receipt_ids: number[];
 }
 
 export interface BulkDeleteResult {
@@ -370,14 +391,20 @@ export interface BoxDeleteResult {
 export type RequestDirection = "inbound" | "return";
 export type RequestOrigin =
   | "workflow"
+  | "backorder"
+  | "return_reselection"
   | "xlsx_import"
   | "manual_entry"
   | "legacy_backfill";
 
 export type RequestStatus =
+  | "draft"
   | "submitted"
   | "approved"
+  | "preparing"
+  | "ready_for_transport"
   | "in_transit"
+  | "awaiting_confirmation"
   | "completed"
   | "rejected"
   | "cancelled";
@@ -386,6 +413,23 @@ export type RequestDocumentType =
   | "delivery_note"
   | "return_note"
   | "other";
+export type RequestPriority = "low" | "normal" | "high" | "urgent";
+export type RequestQueue =
+  | "unassigned"
+  | "due_today"
+  | "overdue"
+  | "ready_for_transport"
+  | "awaiting_confirmation"
+  | "pending_receipt_review";
+export type RequestSortField =
+  | "created_at"
+  | "updated_at"
+  | "priority"
+  | "requested_date"
+  | "sla_deadline"
+  | "scheduled_window_start"
+  | "status"
+  | "assignment";
 
 export interface BoxRequestItem {
   id: number;
@@ -408,6 +452,88 @@ export interface RequestDocument {
   is_current: boolean;
 }
 
+export interface RequestAttachment {
+  id: number;
+  original_filename: string;
+  content_type: string;
+  size_bytes: number;
+  sha256: string;
+  uploaded_by_user_id: number | null;
+  created_at: string;
+}
+
+export interface RequestComment {
+  id: number;
+  author_user_id: number | null;
+  author_name: string;
+  body: string;
+  created_at: string;
+}
+
+export interface RequestAssignee {
+  id: number;
+  display_name: string;
+  email: string;
+  role: "admin" | "warehouse_mover";
+}
+
+export type RequestDiscrepancyType =
+  | "missing"
+  | "unexpected"
+  | "damaged"
+  | "wrong_lot"
+  | "wrong_contents"
+  | "rejected";
+
+export interface RequestDiscrepancyPhoto {
+  id: number;
+  original_filename: string;
+  content_type: string;
+  size_bytes: number;
+  sha256: string;
+  uploaded_by_user_id: number | null;
+  created_at: string;
+}
+
+export interface RequestDiscrepancy {
+  id: number;
+  request_item_id: number | null;
+  box_id: number | null;
+  discrepancy_type: RequestDiscrepancyType;
+  quantity: number | null;
+  notes: string | null;
+  created_by_user_id: number | null;
+  created_at: string;
+  photos: RequestDiscrepancyPhoto[];
+}
+
+export interface RequestDiscrepancyInput {
+  discrepancy_type: RequestDiscrepancyType;
+  request_item_id?: number;
+  box_id?: number;
+  quantity?: number;
+  notes?: string;
+}
+
+export type RequestExceptionKind =
+  | "hold"
+  | "reschedule"
+  | "failed_delivery";
+
+export interface RequestException {
+  id: number;
+  exception_kind: RequestExceptionKind;
+  reason: string;
+  revised_window_start: string | null;
+  revised_window_end: string | null;
+  resume_target: RequestStatus;
+  created_by_user_id: number | null;
+  created_at: string;
+  resolved_by_user_id: number | null;
+  resolved_at: string | null;
+  resolution: string | null;
+}
+
 export interface BoxRequest {
   id: number;
   direction: RequestDirection;
@@ -416,27 +542,74 @@ export interface BoxRequest {
   status: RequestStatus;
   requester_user_id: number | null;
   requester_name: string;
+  priority: RequestPriority;
+  requested_date: string | null;
+  scheduled_window_start: string | null;
+  scheduled_window_end: string | null;
+  sla_deadline: string | null;
+  assigned_mover_user_id: number | null;
+  assigned_mover_name: string | null;
+  destination_contact: string | null;
+  internal_location: string | null;
+  special_handling_instructions: string | null;
   source_inbound_request_id: number | null;
+  parent_request_id: number | null;
+  root_request_id: number | null;
+  child_request_ids: number[];
   origin: RequestOrigin;
   suggestion_quantity: number;
   current_available: number;
   min_inventory: number;
   pending_inbound: number;
   eligible_return: number;
+  recommendation_snapshot?: RequestSuggestion | null;
   actual_received_quantity: number | null;
   variance_quantity: number | null;
   rejection_reason: string | null;
   cancellation_reason: string | null;
   discrepancy_reason: string | null;
+  receipt_restore_archived: boolean;
+  receipt_quarantine: boolean;
+  receipt_document_required: boolean;
   submitted_at: string;
   approved_at: string | null;
+  approved_by_user_id: number | null;
+  preparing_at: string | null;
+  preparing_by_user_id: number | null;
+  ready_for_transport_at: string | null;
+  ready_for_transport_by_user_id: number | null;
   in_transit_at: string | null;
+  in_transit_by_user_id: number | null;
+  awaiting_confirmation_at: string | null;
+  awaiting_confirmation_by_user_id: number | null;
   completed_at: string | null;
+  completed_by_user_id: number | null;
   created_at: string;
   updated_at: string;
   version: number;
   items: BoxRequestItem[];
   documents: RequestDocument[];
+  discrepancies: RequestDiscrepancy[];
+  comments: RequestComment[];
+  attachments: RequestAttachment[];
+  operational_exceptions: RequestException[];
+  current_exception: RequestException | null;
+  permissions: {
+    can_assign: boolean;
+    can_schedule: boolean;
+    can_comment: boolean;
+    can_attach: boolean;
+    can_prepare: boolean;
+    can_mark_ready: boolean;
+    can_start_transit: boolean;
+    can_mark_arrived: boolean;
+    can_confirm: boolean;
+    can_hold: boolean;
+    can_resume: boolean;
+    can_reschedule: boolean;
+    can_report_failed: boolean;
+    can_retry: boolean;
+  };
 }
 
 export interface RequestEvent {
@@ -447,17 +620,142 @@ export interface RequestEvent {
   user_id: number | null;
   user_name: string | null;
   note: string | null;
+  metadata: Record<string, unknown>;
   occurred_at: string;
+}
+
+export type RequestIssueSeverity = "critical" | "high" | "medium" | "low";
+
+export interface RequestReconciliationIssue {
+  issue_key: string;
+  issue_type: string;
+  severity: RequestIssueSeverity;
+  request_id: number;
+  box_id: number | null;
+  warehouse_id: number;
+  warehouse_name: string;
+  assigned_mover_user_id: number | null;
+  assigned_mover_name: string | null;
+  request_status: RequestStatus;
+  title: string;
+  detail: string;
+  occurred_at: string;
+  due_at: string | null;
+  request_path: string;
+  box_path: string | null;
+}
+
+export interface RequestReconciliation {
+  items: RequestReconciliationIssue[];
+  total: number;
+  page: number;
+  page_size: number;
+  generated_at: string;
+  summary: {
+    total: number;
+    critical: number;
+    high: number;
+    medium: number;
+    low: number;
+    by_type: Record<string, number>;
+  };
+}
+
+export interface RequestDurationMetric {
+  supported: boolean;
+  average_seconds: number | null;
+  sample_size: number;
+}
+
+export interface RequestRateMetric {
+  numerator: number;
+  denominator: number;
+  rate: number | null;
+}
+
+export interface RequestThroughput {
+  id: number | null;
+  name: string;
+  completed_requests: number;
+  completed_quantity: number;
+}
+
+export interface RequestAnalytics {
+  generated_at: string;
+  from_at: string | null;
+  to_at: string | null;
+  total_requests: number;
+  completed_requests: number;
+  approval_duration: RequestDurationMetric;
+  preparation_duration: RequestDurationMetric;
+  transport_duration: RequestDurationMetric;
+  acceptance_duration: RequestDurationMetric;
+  on_time: RequestRateMetric;
+  discrepancy: RequestRateMetric;
+  shortage: RequestRateMetric;
+  overage: RequestRateMetric;
+  rejection_reasons: { reason: string; count: number }[];
+  cancellation_reasons: { reason: string; count: number }[];
+  throughput_by_warehouse: RequestThroughput[];
+  throughput_by_mover: RequestThroughput[];
+}
+
+export interface RequestReportFilters {
+  warehouse_id?: number;
+  assigned_mover_user_id?: number;
+  from_at?: string;
+  to_at?: string;
+  severity?: RequestIssueSeverity;
+  issue_type?: string;
 }
 
 export interface RequestSuggestion {
   direction: RequestDirection;
   warehouse_id: number;
+  analysis_as_of: string;
   current_available: number;
   min_inventory: number;
+  max_capacity: number;
+  current_occupied: number;
+  baseline_gap: number;
+  minimum_gap: number;
   pending_inbound: number;
+  pending_backorder: number;
+  scheduled_inbound: number;
+  scheduled_return: number;
+  history_window_30_start: string;
+  history_window_90_start: string;
+  history_window_end: string;
+  history_30_quantity: number;
+  history_90_quantity: number;
+  history_30_daily_rate: number;
+  history_90_daily_rate: number;
+  history_30_weight: number;
+  history_90_weight: number;
+  normalized_30_weight: number;
+  normalized_90_weight: number;
+  sample_size: number;
+  history_days: number;
+  confidence: "insufficient" | "low" | "medium" | "high" | "not_applicable";
+  weighted_daily_rate: number;
+  daily_demand_forecast: number;
+  lead_time_days: number;
+  lead_time_demand: number;
+  safety_stock_percent: number;
+  safety_stock_quantity: number;
+  forecast_adjustment: number | null;
+  adjustment_quantity: number;
+  target_inventory: number;
+  capacity_limit: number;
+  capacity_available: number;
+  capacity_cap_applied: boolean;
+  fallback_used: boolean;
+  fallback_reason: string | null;
   suggested_quantity: number;
   eligible_return: number;
+  consumption_definition: string;
+  formula: string;
+  explanation: string;
 }
 
 export interface ReturnSource {
@@ -481,12 +779,47 @@ export interface RequestFilters {
   warehouse_id?: number;
   direction?: RequestDirection;
   status?: RequestStatus;
+  priority?: RequestPriority;
+  origin?: RequestOrigin;
+  assigned_mover_user_id?: number;
+  queue?: RequestQueue;
+  search?: string;
+  sort_by?: RequestSortField;
+  sort_dir?: "asc" | "desc";
+}
+
+export interface Notification {
+  id: number;
+  request_id: number | null;
+  warehouse_id: number;
+  kind: string;
+  title: string;
+  body: string;
+  deep_link: string;
+  read_at: string | null;
+  created_at: string;
+}
+
+export interface NotificationPage {
+  items: Notification[];
+  total: number;
+  unread: number;
+  page: number;
+  page_size: number;
 }
 
 export interface InboundRequestItemInput {
   lot: string;
   box_number: string;
   contents?: string;
+}
+
+export interface RequestConflict {
+  message: string;
+  request_id: number;
+  latest_version: number;
+  latest_status: RequestStatus;
+  relevant_events: RequestEvent[];
 }
 
 export interface XlsxPreviewRow {
@@ -503,4 +836,66 @@ export interface XlsxPreviewSheet {
 export interface XlsxPreview {
   filename: string;
   sheets: XlsxPreviewSheet[];
+}
+
+export type XlsxMappingUseCase = "box_import" | "inbound_acceptance";
+export type XlsxLotSource = "fixed" | "column";
+
+export interface XlsxColumnRef {
+  index: number;
+  header: string;
+}
+
+export interface XlsxColumnMappings {
+  box_number: XlsxColumnRef;
+  lot?: XlsxColumnRef;
+  contents?: XlsxColumnRef;
+}
+
+export interface XlsxMappingTemplate {
+  id: number;
+  owner_user_id: number;
+  owner_name: string;
+  warehouse_id: number | null;
+  use_case: XlsxMappingUseCase;
+  name: string;
+  sheet_pattern: string;
+  filename_fingerprint: string;
+  header_fingerprint: string;
+  column_mappings: XlsxColumnMappings;
+  lot_source: XlsxLotSource;
+  fixed_lot: string | null;
+  row_start: number;
+  include_rows_by_default: boolean;
+  usage_count: number;
+  last_used_at: string | null;
+  created_at: string;
+  updated_at: string;
+  is_owner: boolean;
+  is_shared: boolean;
+}
+
+export interface XlsxMappingTemplateInput {
+  use_case: XlsxMappingUseCase;
+  name: string;
+  warehouse_id: number | null;
+  sheet_pattern: string;
+  filename: string;
+  headers: string[];
+  column_mappings: XlsxColumnMappings;
+  lot_source: XlsxLotSource;
+  fixed_lot?: string | null;
+  row_start: number;
+  include_rows_by_default: boolean;
+}
+
+export type XlsxMappingTemplateUpdate = Partial<
+  Omit<XlsxMappingTemplateInput, "use_case">
+>;
+
+export interface XlsxMappingSuggestion {
+  template: XlsxMappingTemplate;
+  confidence: number;
+  explanation: string;
+  exact_header_match: boolean;
 }

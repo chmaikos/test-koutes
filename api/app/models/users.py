@@ -85,6 +85,11 @@ class User(Base):
     email_alerts_enabled: Mapped[bool] = mapped_column(
         Boolean, default=True, nullable=False
     )
+    # Request workflow email is independently configurable. In-app request
+    # notifications are always created and cannot be disabled here.
+    email_requests_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, nullable=False
+    )
 
     warehouses: Mapped[list[Warehouse]] = relationship(
         secondary=user_warehouse_access, lazy="selectin"

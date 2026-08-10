@@ -14,10 +14,12 @@ from fastapi import (
 from sqlalchemy import func, select
 
 from app.deps import CurrentUser, DbSession, require_admin, require_operator
-from app.events import bus
-from app.models.boxes import Box, BoxEvent
-from app.models.requests import BoxRequestOrigin
+from app.events import bus, publish_notification_event
+from app.models.boxes import Box, BoxEvent, BoxStatus
+from app.models.notifications import RequestNotificationKind
+from app.models.requests import BoxRequest, BoxRequestItem, BoxRequestOrigin
 from app.models.users import User, UserRole
+from app.models.warehouses import Warehouse
 from app.routers._filters import (
     BoxFilters,
     BoxSort,
@@ -38,8 +40,12 @@ from app.schemas.boxes import (
     BulkDeleteResult,
     BulkResult,
     BulkSkip,
+    QuarantineBulkAction,
+    QuarantineBulkResult,
+    StagedReceiptResult,
 )
 from app.schemas.common import Page
+from app.schemas.requests import InboundBoxItem
 from app.services.acl import apply_warehouse_filter, can_access
 from app.services.alerts import evaluate_safe
 from app.services.boxes import (
@@ -53,13 +59,20 @@ from app.services.boxes import (
     delete_box,
     update_box,
 )
-from app.services.requests import RequestRuleError, create_completed_receipt
+from app.services.request_notifications import enqueue_request_event
+from app.services.requests import (
+    RequestAccessError,
+    RequestRuleError,
+    create_completed_receipt,
+    create_staged_receipt,
+    receipt_requires_review,
+)
 
 router = APIRouter(prefix="/boxes", tags=["boxes"])
 
 
-def _rule_error_to_http(exc: BoxRuleError) -> HTTPException:
-    if isinstance(exc, BoxAccessError):
+def _rule_error_to_http(exc: BoxRuleError | RequestRuleError) -> HTTPException:
+    if isinstance(exc, (BoxAccessError, RequestAccessError)):
         code = status.HTTP_403_FORBIDDEN
     elif isinstance(exc, BoxConflictError):
         code = status.HTTP_409_CONFLICT
@@ -105,14 +118,47 @@ def list_boxes(
     )
 
 
-@router.post("", response_model=BoxOut, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=BoxOut | StagedReceiptResult,
+    status_code=status.HTTP_201_CREATED,
+)
 async def create_new_box(
     payload: BoxCreate,
     db: DbSession,
     background: BackgroundTasks,
     user: Annotated[CurrentUser, Depends(require_operator)],
-) -> BoxOut:
+) -> BoxOut | StagedReceiptResult:
     try:
+        warehouse = db.get(Warehouse, payload.warehouse_id)
+        if warehouse is None or not warehouse.is_active:
+            raise BoxRuleError("warehouse not found or archived")
+        if receipt_requires_review(
+            warehouse,
+            BoxRequestOrigin.manual_entry,
+            quantity=1,
+        ):
+            staged = create_staged_receipt(
+                db,
+                user=user,
+                warehouse_id=payload.warehouse_id,
+                items=[
+                    InboundBoxItem(
+                        box_number=payload.box_number,
+                        lot=payload.lot,
+                        contents=payload.contents,
+                    )
+                ],
+                origin=BoxRequestOrigin.manual_entry,
+            )
+            await bus.publish(
+                "request.created", {"id": staged.id, "staged": True}
+            )
+            await publish_notification_event(
+                warehouse_id=staged.warehouse_id,
+                request_id=staged.id,
+            )
+            return StagedReceiptResult(staged_receipt_id=staged.id)
         box = create_box(
             db,
             user=user,
@@ -187,6 +233,153 @@ async def bulk_update(
             for s in outcome.skipped
         ],
         cancelled_request_ids=sorted(outcome.cancelled_request_ids),
+    )
+
+
+def _quarantine_request_ids(db: DbSession, box_id: int) -> list[int]:
+    return list(
+        db.scalars(
+            select(BoxRequestItem.request_id)
+            .where(BoxRequestItem.box_id == box_id)
+            .distinct()
+        ).all()
+    )
+
+
+@router.post("/quarantine/release", response_model=QuarantineBulkResult)
+async def release_quarantined_boxes(
+    payload: QuarantineBulkAction,
+    db: DbSession,
+    background: BackgroundTasks,
+    user: Annotated[CurrentUser, Depends(require_admin)],
+) -> QuarantineBulkResult:
+    updated: list[Box] = []
+    skipped: list[BulkSkip] = []
+    request_ids: set[int] = set()
+    for box_id in dict.fromkeys(payload.box_ids):
+        box = db.scalar(select(Box).where(Box.id == box_id).with_for_update())
+        if box is None or box.archived_at is not None:
+            skipped.append(BulkSkip(box_id=box_id, box_number="", reason="box not found"))
+            continue
+        if box.status != BoxStatus.quarantined:
+            skipped.append(
+                BulkSkip(
+                    box_id=box.id,
+                    box_number=box.box_number,
+                    reason="box is not quarantined",
+                )
+            )
+            continue
+        linked = _quarantine_request_ids(db, box.id)
+        try:
+            update_box(
+                db,
+                user=user,
+                box=box,
+                new_status=BoxStatus.received,
+                note=payload.reason,
+                force=True,
+                commit=False,
+            )
+        except BoxRuleError as exc:
+            skipped.append(
+                BulkSkip(box_id=box.id, box_number=box.box_number, reason=str(exc))
+            )
+            continue
+        request_ids.update(linked)
+        updated.append(box)
+    for request_id in request_ids:
+        request = db.get(BoxRequest, request_id)
+        if request is not None:
+            enqueue_request_event(
+                db,
+                request=request,
+                kind=RequestNotificationKind.quarantine_released,
+                event_token=f"quarantine-released:{','.join(map(str, sorted(payload.box_ids)))}",
+                detail=payload.reason,
+            )
+    db.commit()
+    for request_id in request_ids:
+        request = db.get(BoxRequest, request_id)
+        if request is not None:
+            await publish_notification_event(
+                warehouse_id=request.warehouse_id,
+                request_id=request_id,
+            )
+    for warehouse_id in {box.current_warehouse_id for box in updated}:
+        await bus.publish("box.updated", {"warehouse_id": warehouse_id, "bulk": True})
+    if updated:
+        background.add_task(evaluate_safe, db)
+    return QuarantineBulkResult(
+        updated=[BoxOut.model_validate(box) for box in updated],
+        skipped=skipped,
+        request_ids=sorted(request_ids),
+    )
+
+
+@router.post("/quarantine/reject", response_model=QuarantineBulkResult)
+async def reject_quarantined_boxes(
+    payload: QuarantineBulkAction,
+    db: DbSession,
+    background: BackgroundTasks,
+    user: Annotated[CurrentUser, Depends(require_admin)],
+) -> QuarantineBulkResult:
+    archived_ids: list[int] = []
+    skipped: list[BulkSkip] = []
+    request_ids: set[int] = set()
+    warehouse_ids: set[int] = set()
+    for box_id in dict.fromkeys(payload.box_ids):
+        box = db.scalar(select(Box).where(Box.id == box_id).with_for_update())
+        if box is None or box.archived_at is not None:
+            skipped.append(BulkSkip(box_id=box_id, box_number="", reason="box not found"))
+            continue
+        if box.status != BoxStatus.quarantined:
+            skipped.append(
+                BulkSkip(
+                    box_id=box.id,
+                    box_number=box.box_number,
+                    reason="box is not quarantined",
+                )
+            )
+            continue
+        linked = _quarantine_request_ids(db, box.id)
+        warehouse_ids.add(box.current_warehouse_id)
+        result = delete_box(
+            db,
+            user=user,
+            box=box,
+            force=bool(linked),
+            reason=payload.reason,
+            commit=False,
+        )
+        request_ids.update(linked)
+        archived_ids.append(result.box_id)
+    for request_id in request_ids:
+        request = db.get(BoxRequest, request_id)
+        if request is not None:
+            enqueue_request_event(
+                db,
+                request=request,
+                kind=RequestNotificationKind.quarantine_rejected,
+                event_token=f"quarantine-rejected:{','.join(map(str, sorted(payload.box_ids)))}",
+                detail=payload.reason,
+            )
+    db.commit()
+    for request_id in request_ids:
+        request = db.get(BoxRequest, request_id)
+        if request is not None:
+            await publish_notification_event(
+                warehouse_id=request.warehouse_id,
+                request_id=request_id,
+            )
+    for warehouse_id in warehouse_ids:
+        await bus.publish("box.deleted", {"warehouse_id": warehouse_id, "bulk": True})
+    if archived_ids:
+        background.add_task(evaluate_safe, db)
+    return QuarantineBulkResult(
+        archived_ids=archived_ids,
+        skipped=skipped,
+        request_ids=sorted(request_ids),
     )
 
 

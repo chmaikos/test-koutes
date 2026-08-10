@@ -4,6 +4,7 @@ import enum
 from datetime import datetime
 
 from sqlalchemy import (
+    JSON,
     DateTime,
     Enum,
     ForeignKey,
@@ -19,6 +20,7 @@ from app.db import Base
 
 
 class BoxStatus(str, enum.Enum):
+    quarantined = "quarantined"
     received = "received"
     processing = "processing"
     incomplete = "incomplete"
@@ -42,7 +44,14 @@ UNAVAILABLE_STATUSES: tuple[BoxStatus, ...] = (
     BoxStatus.incomplete,
     BoxStatus.ready_to_return,
 )
-ACTIVE_STATUSES: tuple[BoxStatus, ...] = AVAILABLE_STATUSES + UNAVAILABLE_STATUSES
+OCCUPYING_STATUSES: tuple[BoxStatus, ...] = (
+    BoxStatus.quarantined,
+    *AVAILABLE_STATUSES,
+    *UNAVAILABLE_STATUSES,
+)
+# Kept as a compatibility alias for callers that use "active" to mean a box
+# that has not physically left the warehouse.
+ACTIVE_STATUSES: tuple[BoxStatus, ...] = OCCUPYING_STATUSES
 
 
 class BoxEventType(str, enum.Enum):
@@ -102,6 +111,12 @@ class BoxEvent(Base):
     __tablename__ = "box_events"
     __table_args__ = (
         Index("ix_box_events_warehouse_occurred", "warehouse_id", "occurred_at"),
+        Index(
+            "ix_box_events_warehouse_type_occurred",
+            "warehouse_id",
+            "event_type",
+            "occurred_at",
+        ),
         Index("ix_box_events_box_occurred", "box_id", "occurred_at"),
     )
 
@@ -134,6 +149,9 @@ class BoxEvent(Base):
         ForeignKey("users.id", ondelete="SET NULL")
     )
     note: Mapped[str | None] = mapped_column(Text)
+    event_metadata: Mapped[dict[str, object]] = mapped_column(
+        "metadata", JSON, nullable=False, default=dict, server_default="{}"
+    )
 
 
 # helper imported by routers/services
@@ -144,5 +162,6 @@ __all__ = [
     "BoxStatus",
     "ACTIVE_STATUSES",
     "AVAILABLE_STATUSES",
+    "OCCUPYING_STATUSES",
     "UNAVAILABLE_STATUSES",
 ]

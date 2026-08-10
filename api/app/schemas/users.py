@@ -19,6 +19,7 @@ class UserOut(BaseModel):
     role_override: bool
     is_active: bool
     email_alerts_enabled: bool = True
+    email_requests_enabled: bool = True
     last_login_at: datetime | None = None
     username: str | None = None
     is_local: bool = False
@@ -56,4 +57,9 @@ class UserUpdate(BaseModel):
     is_active: bool | None = None
     role_override: bool | None = None
     email_alerts_enabled: bool | None = None
+    email_requests_enabled: bool | None = None
     warehouse_ids: list[int] | None = None
+
+
+class UserPreferencesUpdate(BaseModel):
+    email_requests_enabled: bool

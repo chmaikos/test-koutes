@@ -54,6 +54,7 @@ const DEFAULT_PAGE_SIZE: PageSize = 25;
 // admins who need to leapfrog still have the bulk action bar's
 // "Override rules" affordance plus the box detail page.
 const NEXT_STATUS: Record<BoxStatus, BoxStatus[]> = {
+  quarantined: [],
   received: ["processing"],
   processing: ["incomplete"],
   incomplete: ["ready_to_return"],

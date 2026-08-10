@@ -18,11 +18,13 @@ from app.routers import (
     employees,
     exports,
     imports,
+    notifications,
     productivity,
     requests,
     stream,
     users,
     warehouses,
+    xlsx_mapping_templates,
 )
 from app.services.local_admin import ensure_local_admin
 
@@ -97,7 +99,9 @@ api_router.include_router(dashboard.router, dependencies=gated)
 api_router.include_router(employees.router, dependencies=gated)
 api_router.include_router(productivity.router, dependencies=gated)
 api_router.include_router(requests.router, dependencies=gated)
+api_router.include_router(notifications.router, dependencies=gated)
 api_router.include_router(exports.router, dependencies=gated)
+api_router.include_router(xlsx_mapping_templates.router, dependencies=gated)
 # The SSE stream takes its access token via `?access_token=` (EventSource cannot
 # set headers), so it does its own auth + credentials-must-change check inline
 # instead of going through the Authorization-header gate.

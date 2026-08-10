@@ -2,41 +2,57 @@ import { useState, type FormEvent, type ReactNode } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
   ArrowLeft,
+  AlertTriangle,
+  CalendarClock,
   Check,
   Download,
   FileText,
   FileSpreadsheet,
   PackageCheck,
+  Pause,
   Play,
   Plus,
   Trash2,
   Upload,
+  RotateCcw,
   X,
 } from "lucide-react";
 import {
   useDownloadRequestDocument,
+  useDownloadDiscrepancyPhoto,
   useMe,
   useRequest,
   useRequestAction,
   useRequestDocuments,
   useRequestEvents,
-  usePreviewBoxImportXlsx,
-  usePreviewInboundXlsx,
+  useReturnCandidates,
+  useSubmitFollowUpDraft,
   useUploadRequestDocument,
+  useUploadDiscrepancyPhoto,
   useWarehouses,
 } from "@/api/hooks";
 import type {
   BoxRequest,
   InboundRequestItemInput,
+  RequestConflict,
+  RequestDiscrepancyInput,
   RequestDocument,
   RequestDocumentType,
-  XlsxPreviewSheet,
 } from "@/api/types";
+import { ExcelRowMapper } from "@/components/ExcelRowMapper";
 import {
   REQUEST_DIRECTION_LABEL,
   RequestStatusBadge,
 } from "@/components/RequestStatusBadge";
 import { requestPermissions } from "@/pages/requestPermissions";
+import {
+  RequestCoordinationPanel,
+  RequestDiscussionPanel,
+} from "@/components/RequestCoordination";
+import {
+  canRetryRequestConflict,
+  conflictDetail,
+} from "@/pages/requestConflict";
 import {
   deliveryVariance,
   groupInboundItems,
@@ -44,6 +60,13 @@ import {
 } from "@/pages/xlsxMapping";
 
 type ReasonDialog = "reject" | "cancel" | null;
+type OperationalDialog =
+  | "hold"
+  | "resume"
+  | "reschedule"
+  | "failed"
+  | "retry"
+  | null;
 
 export function RequestDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -55,8 +78,14 @@ export function RequestDetailPage() {
   const me = useMe();
   const action = useRequestAction();
   const [reasonDialog, setReasonDialog] = useState<ReasonDialog>(null);
+  const [operationalDialog, setOperationalDialog] =
+    useState<OperationalDialog>(null);
   const [showCompletion, setShowCompletion] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [conflict, setConflict] = useState<{
+    input: Parameters<typeof action.mutateAsync>[0];
+    detail: RequestConflict;
+  } | null>(null);
 
   if (requestQuery.isLoading) {
     return <p className="text-sm text-slate-500">Loading…</p>;
@@ -80,6 +109,15 @@ export function RequestDetailPage() {
     canUpload,
     canCancel,
     canComplete,
+    canPrepare,
+    canMarkReady,
+    canStartTransit,
+    canMarkArrived,
+    canHold,
+    canResume,
+    canReschedule,
+    canReportFailed,
+    canRetry,
   } = requestPermissions(request, me.data);
   const visibleDocuments = documents.data ?? request.documents;
   const requiredDocumentType: RequestDocumentType =
@@ -96,8 +134,14 @@ export function RequestDetailPage() {
     setActionError(null);
     try {
       await action.mutateAsync(input);
+      setConflict(null);
       return true;
     } catch (caught) {
+      const detail = conflictDetail(caught);
+      if (detail) {
+        setConflict({ input, detail });
+        await requestQuery.refetch();
+      }
       setActionError(apiError(caught, "The request could not be updated."));
       return false;
     }
@@ -125,6 +169,23 @@ export function RequestDetailPage() {
                   Reverses inbound order #{request.source_inbound_request_id}
                 </Link>
               )}
+            {request.parent_request_id !== null && (
+              <Link
+                to={`/requests/${request.parent_request_id}`}
+                className="mt-1 block text-sm text-brand-700 hover:underline"
+              >
+                Follow-up to request #{request.parent_request_id}
+              </Link>
+            )}
+            {request.child_request_ids.map((childId) => (
+              <Link
+                key={childId}
+                to={`/requests/${childId}`}
+                className="mt-1 block text-sm text-brand-700 hover:underline"
+              >
+                Generated follow-up #{childId}
+              </Link>
+            ))}
           </div>
           <RequestStatusBadge
             status={request.status}
@@ -150,12 +211,41 @@ export function RequestDetailPage() {
 
         <InventorySnapshot request={request} />
 
+        {["xlsx_import", "manual_entry"].includes(request.origin) &&
+          request.status === "submitted" && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+              <strong>Pending self-receipt review.</strong> The mapped items are
+              staged only; no physical boxes or capacity changes exist until an
+              administrator finalizes this receipt.
+              {request.receipt_document_required && !hasRequiredDocument && (
+                <span className="block">
+                  Upload a current ERP delivery note before finalization.
+                </span>
+              )}
+            </div>
+          )}
+
         {(request.rejection_reason || request.cancellation_reason) && (
           <div className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">
             <strong>
               {request.rejection_reason ? "Rejection reason:" : "Cancellation reason:"}
             </strong>{" "}
             {request.rejection_reason ?? request.cancellation_reason}
+          </div>
+        )}
+        {request.current_exception && (
+          <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
+            <strong>
+              {request.current_exception.exception_kind === "hold"
+                ? "Operational hold"
+                : "Failed transport"}
+            </strong>
+            <span className="block">{request.current_exception.reason}</span>
+            <span className="mt-1 block text-xs">
+              Resume target: {humanize(request.current_exception.resume_target)}
+              {" · "}
+              opened {formatDate(request.current_exception.created_at)}
+            </span>
           </div>
         )}
         {request.variance_quantity !== null &&
@@ -172,14 +262,17 @@ export function RequestDetailPage() {
             </div>
           )}
 
-        {(canMove || canCancel || canComplete) && (
+        {(canMove || canCancel || canComplete || canResume || canRetry) && (
           <div className="flex flex-wrap gap-2 border-t border-slate-100 pt-3">
             {canApprove && (
               <>
                 <button
                   type="button"
                   className="btn-primary"
-                  disabled={action.isPending}
+                  disabled={
+                    action.isPending ||
+                    (request.receipt_document_required && !hasRequiredDocument)
+                  }
                   onClick={() =>
                     void perform({
                       id: request.id,
@@ -188,7 +281,10 @@ export function RequestDetailPage() {
                     })
                   }
                 >
-                  <Check className="h-4 w-4" /> Approve
+                  <Check className="h-4 w-4" />{" "}
+                  {["xlsx_import", "manual_entry"].includes(request.origin)
+                    ? "Finalize receipt"
+                    : "Approve"}
                 </button>
                 <button
                   type="button"
@@ -203,7 +299,45 @@ export function RequestDetailPage() {
                 </button>
               </>
             )}
-            {canMove && request.status === "approved" && (
+            {canPrepare && (
+              <button
+                type="button"
+                className="btn-primary"
+                disabled={action.isPending}
+                onClick={() =>
+                  void perform({
+                    id: request.id,
+                    expectedVersion: request.version,
+                    action: "prepare",
+                  })
+                }
+              >
+                <Play className="h-4 w-4" />{" "}
+                {request.direction === "inbound"
+                  ? "Prepare inbound"
+                  : "Prepare return"}
+              </button>
+            )}
+            {canMarkReady && (
+              <button
+                type="button"
+                className="btn-primary"
+                disabled={action.isPending}
+                onClick={() =>
+                  void perform({
+                    id: request.id,
+                    expectedVersion: request.version,
+                    action: "mark-ready",
+                  })
+                }
+              >
+                <PackageCheck className="h-4 w-4" />{" "}
+                {request.direction === "inbound"
+                  ? "Ready for dispatch"
+                  : "Ready for collection"}
+              </button>
+            )}
+            {canStartTransit && (
               <button
                 type="button"
                 className="btn-primary"
@@ -227,6 +361,25 @@ export function RequestDetailPage() {
                   : "Start collection"}
               </button>
             )}
+            {canMarkArrived && (
+              <button
+                type="button"
+                className="btn-primary"
+                disabled={action.isPending}
+                onClick={() =>
+                  void perform({
+                    id: request.id,
+                    expectedVersion: request.version,
+                    action: "mark-arrived",
+                  })
+                }
+              >
+                <PackageCheck className="h-4 w-4" />{" "}
+                {request.direction === "inbound"
+                  ? "Mark delivered"
+                  : "Mark collected"}
+              </button>
+            )}
             {canComplete && (
               <button
                 type="button"
@@ -239,8 +392,58 @@ export function RequestDetailPage() {
               >
                 <PackageCheck className="h-4 w-4" />{" "}
                 {request.direction === "inbound"
-                  ? "Accept delivery"
-                  : "Accept return"}
+                  ? "Confirm delivery"
+                  : "Confirm warehouse receipt"}
+              </button>
+            )}
+            {canHold && (
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={action.isPending}
+                onClick={() => setOperationalDialog("hold")}
+              >
+                <Pause className="h-4 w-4" /> Hold
+              </button>
+            )}
+            {canResume && (
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={action.isPending}
+                onClick={() => setOperationalDialog("resume")}
+              >
+                <Play className="h-4 w-4" /> Resume
+              </button>
+            )}
+            {canReschedule && (
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={action.isPending}
+                onClick={() => setOperationalDialog("reschedule")}
+              >
+                <CalendarClock className="h-4 w-4" /> Reschedule
+              </button>
+            )}
+            {canReportFailed && (
+              <button
+                type="button"
+                className="btn-secondary text-rose-700"
+                disabled={action.isPending}
+                onClick={() => setOperationalDialog("failed")}
+              >
+                <AlertTriangle className="h-4 w-4" /> Report failed transport
+              </button>
+            )}
+            {canRetry && (
+              <button
+                type="button"
+                className="btn-primary"
+                disabled={action.isPending}
+                onClick={() => setOperationalDialog("retry")}
+              >
+                <RotateCcw className="h-4 w-4" /> Retry transport
               </button>
             )}
             {canCancel && (
@@ -263,16 +466,41 @@ export function RequestDetailPage() {
             {actionError}
           </p>
         )}
+        {conflict && (
+          <VersionConflict
+            detail={conflict.detail}
+            current={request}
+            pending={action.isPending}
+            onRetry={() =>
+              void perform({
+                ...conflict.input,
+                expectedVersion: request.version,
+              })
+            }
+          />
+        )}
       </header>
+
+      {request.status === "draft" && (
+        <DraftSubmission request={request} />
+      )}
+
+      <RequestCoordinationPanel request={request} />
 
       {request.items.length > 0 && (
         <ItemsSection request={request} warehouseName={warehouseName} />
       )}
+      {request.discrepancies.length > 0 && (
+        <DiscrepanciesSection request={request} />
+      )}
+
+      <RequestDiscussionPanel request={request} />
 
       <div className="grid gap-5 lg:grid-cols-2">
         <Timeline
           events={events.data ?? []}
           loading={events.isLoading}
+          direction={request.direction}
         />
         <DocumentsSection
           requestId={request.id}
@@ -280,6 +508,8 @@ export function RequestDetailPage() {
           documents={visibleDocuments}
           loading={documents.isLoading}
           canUpload={canUpload}
+          requestVersion={request.version}
+          requestStatus={request.status}
         />
       </div>
 
@@ -308,13 +538,82 @@ export function RequestDetailPage() {
           }}
         />
       )}
+      {operationalDialog && (
+        <OperationalExceptionDialog
+          kind={operationalDialog}
+          request={request}
+          pending={action.isPending}
+          error={actionError}
+          onClose={() => setOperationalDialog(null)}
+          onSubmit={async ({ reason, windowStart, windowEnd }) => {
+            const base = {
+              id: request.id,
+              expectedVersion: request.version,
+            };
+            const ok =
+              operationalDialog === "hold"
+                ? await perform({
+                    ...base,
+                    action: "hold",
+                    body: { reason },
+                  })
+                : operationalDialog === "resume"
+                  ? await perform({
+                      ...base,
+                      action: "resume",
+                      body: { resolution: reason },
+                    })
+                  : operationalDialog === "retry"
+                    ? await perform({
+                        ...base,
+                        action: "retry-transport",
+                        body: { resolution: reason },
+                      })
+                    : operationalDialog === "reschedule"
+                      ? await perform({
+                          ...base,
+                          action: "reschedule",
+                          body: {
+                            reason,
+                            revised_window_start: new Date(
+                              windowStart,
+                            ).toISOString(),
+                            revised_window_end: new Date(windowEnd).toISOString(),
+                          },
+                        })
+                      : await perform({
+                          ...base,
+                          action: "report-failed-delivery",
+                          body: {
+                            reason,
+                            ...(windowStart && windowEnd
+                              ? {
+                                  revised_window_start: new Date(
+                                    windowStart,
+                                  ).toISOString(),
+                                  revised_window_end: new Date(
+                                    windowEnd,
+                                  ).toISOString(),
+                                }
+                              : {}),
+                          },
+                        });
+            if (ok) setOperationalDialog(null);
+          }}
+        />
+      )}
       {showCompletion && (
         <CompletionDialog
           request={request}
           pending={action.isPending}
           error={actionError}
           onClose={() => setShowCompletion(false)}
-          onSubmit={async (items, discrepancyReason) => {
+          onSubmit={async (
+            items,
+            discrepancyReason,
+            collectedBoxIds,
+            discrepancies,
+          ) => {
             const ok = await perform({
               id: request.id,
               expectedVersion: request.version,
@@ -324,8 +623,15 @@ export function RequestDetailPage() {
                   ? {
                       inbound_items: items,
                       discrepancy_reason: discrepancyReason || undefined,
+                      discrepancies,
+                      idempotency_key: crypto.randomUUID(),
                     }
-                  : {},
+                  : {
+                      collected_box_ids: collectedBoxIds,
+                      discrepancies,
+                      discrepancy_reason: discrepancyReason || undefined,
+                      idempotency_key: crypto.randomUUID(),
+                    },
             });
             if (ok) setShowCompletion(false);
           }}
@@ -417,12 +723,163 @@ function ItemsSection({
   );
 }
 
+function DraftSubmission({ request }: { request: BoxRequest }) {
+  const candidates = useReturnCandidates(
+    request.source_inbound_request_id ?? undefined,
+  );
+  const submit = useSubmitFollowUpDraft();
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [error, setError] = useState<string | null>(null);
+  return (
+    <section className="card card-pad space-y-3">
+      <h2 className="font-semibold">Reselect boxes for this follow-up</h2>
+      <p className="text-sm text-slate-600">
+        This draft does not reserve inventory. Select exactly {request.quantity}{" "}
+        currently eligible box(es) to submit it.
+      </p>
+      <div className="grid gap-2 sm:grid-cols-2">
+        {(candidates.data ?? []).map((box) => (
+          <label
+            key={box.box_id}
+            className="flex items-center gap-2 rounded border border-slate-200 p-3"
+          >
+            <input
+              type="checkbox"
+              checked={selected.has(box.box_id)}
+              onChange={() =>
+                setSelected((current) => {
+                  const next = new Set(current);
+                  if (next.has(box.box_id)) next.delete(box.box_id);
+                  else next.add(box.box_id);
+                  return next;
+                })
+              }
+            />
+            <span className="font-mono">{box.box_number}</span>
+            <span className="text-xs text-slate-500">{box.lot}</span>
+          </label>
+        ))}
+      </div>
+      {error && <p className="text-sm text-rose-600">{error}</p>}
+      <button
+        type="button"
+        className="btn-primary"
+        disabled={selected.size !== request.quantity || submit.isPending}
+        onClick={async () => {
+          setError(null);
+          try {
+            await submit.mutateAsync({
+              requestId: request.id,
+              expectedVersion: request.version,
+              boxIds: [...selected],
+            });
+          } catch (caught) {
+            setError(apiError(caught, "The draft could not be submitted."));
+          }
+        }}
+      >
+        Submit follow-up
+      </button>
+    </section>
+  );
+}
+
+function DiscrepanciesSection({ request }: { request: BoxRequest }) {
+  const upload = useUploadDiscrepancyPhoto();
+  const download = useDownloadDiscrepancyPhoto();
+  const [files, setFiles] = useState<Record<number, File | undefined>>({});
+  const [error, setError] = useState<string | null>(null);
+  return (
+    <section className="card overflow-hidden">
+      <header className="border-b border-slate-100 px-5 py-3">
+        <h2 className="font-semibold">Fulfillment discrepancies</h2>
+      </header>
+      <div className="divide-y divide-slate-100">
+        {request.discrepancies.map((item) => (
+          <div key={item.id} className="space-y-2 px-5 py-3 text-sm">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="badge bg-amber-100 text-amber-800">
+                {humanize(item.discrepancy_type)}
+              </span>
+              {item.quantity && <span>Quantity: {item.quantity}</span>}
+              {item.box_id && (
+                <Link to={`/boxes/${item.box_id}`} className="text-brand-700">
+                  Box #{item.box_id}
+                </Link>
+              )}
+            </div>
+            {item.notes && <p className="text-slate-600">{item.notes}</p>}
+            {item.photos.map((photo) => (
+              <button
+                key={photo.id}
+                type="button"
+                className="btn-ghost text-xs"
+                disabled={download.isPending}
+                onClick={() =>
+                  download.mutate({
+                    requestId: request.id,
+                    discrepancyId: item.id,
+                    photoId: photo.id,
+                    filename: photo.original_filename,
+                  })
+                }
+              >
+                <Download className="h-3.5 w-3.5" />
+                {photo.original_filename}
+              </button>
+            ))}
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                type="file"
+                accept="image/jpeg,image/png"
+                className="input max-w-sm"
+                onChange={(event) =>
+                  setFiles((current) => ({
+                    ...current,
+                    [item.id]: event.target.files?.[0],
+                  }))
+                }
+              />
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={!files[item.id] || upload.isPending}
+                onClick={async () => {
+                  const file = files[item.id];
+                  if (!file) return;
+                  setError(null);
+                  try {
+                    await upload.mutateAsync({
+                      requestId: request.id,
+                      discrepancyId: item.id,
+                      expectedVersion: request.version,
+                      file,
+                    });
+                    setFiles((current) => ({ ...current, [item.id]: undefined }));
+                  } catch (caught) {
+                    setError(apiError(caught, "Photo upload failed."));
+                  }
+                }}
+              >
+                Upload photo
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+      {error && <p className="px-5 py-3 text-sm text-rose-600">{error}</p>}
+    </section>
+  );
+}
+
 function Timeline({
   events,
   loading,
+  direction,
 }: {
   events: import("@/api/types").RequestEvent[];
   loading: boolean;
+  direction: BoxRequest["direction"];
 }) {
   return (
     <section className="card card-pad">
@@ -441,7 +898,7 @@ function Timeline({
               <div className="relative mt-1 h-3 w-3 flex-none rounded-full border-2 border-white bg-brand-500 ring-1 ring-brand-200" />
               <div className="min-w-0">
                 <p className="text-sm font-medium text-slate-800">
-                  {eventLabel(event)}
+                  {eventLabel(event, direction)}
                 </p>
                 <p className="text-xs text-slate-500">
                   {formatDate(event.occurred_at)}
@@ -467,12 +924,16 @@ function DocumentsSection({
   documents,
   loading,
   canUpload,
+  requestVersion,
+  requestStatus,
 }: {
   requestId: number;
   direction: BoxRequest["direction"];
   documents: RequestDocument[];
   loading: boolean;
   canUpload: boolean;
+  requestVersion: number;
+  requestStatus: BoxRequest["status"];
 }) {
   const upload = useUploadRequestDocument();
   const download = useDownloadRequestDocument();
@@ -495,6 +956,7 @@ function DocumentsSection({
         file,
         documentType,
         erpReference: erpReference.trim(),
+        expectedVersion: requestVersion,
       });
       setFile(null);
       setFileKey((value) => value + 1);
@@ -607,9 +1069,15 @@ function DocumentsSection({
             />
           </label>
           {error && (
-            <p role="alert" className="text-sm text-rose-600">
+            <div role="alert" className="rounded border border-rose-200 bg-rose-50 p-2 text-sm text-rose-700">
               {error}
-            </p>
+              {conflictDetail(upload.error) && (
+                <p className="mt-1 text-xs">
+                  Latest server state: {humanize(conflictDetail(upload.error)!.latest_status)}
+                  {" · "}version {conflictDetail(upload.error)!.latest_version}. Your file and fields were preserved; review the refreshed request and submit again only if it is still {humanize(requestStatus)}.
+                </p>
+              )}
+            </div>
           )}
           <button
             type="submit"
@@ -622,6 +1090,146 @@ function DocumentsSection({
         </form>
       )}
     </section>
+  );
+}
+
+function OperationalExceptionDialog({
+  kind,
+  request,
+  pending,
+  error,
+  onClose,
+  onSubmit,
+}: {
+  kind: Exclude<OperationalDialog, null>;
+  request: BoxRequest;
+  pending: boolean;
+  error: string | null;
+  onClose: () => void;
+  onSubmit: (value: {
+    reason: string;
+    windowStart: string;
+    windowEnd: string;
+  }) => Promise<void>;
+}) {
+  const [reason, setReason] = useState("");
+  const [windowStart, setWindowStart] = useState(
+    localDateInput(request.scheduled_window_start),
+  );
+  const [windowEnd, setWindowEnd] = useState(
+    localDateInput(request.scheduled_window_end),
+  );
+  const needsWindow = kind === "reschedule";
+  const maySetWindow = needsWindow || kind === "failed";
+  const title = {
+    hold: "Place request on hold",
+    resume: "Resume request",
+    reschedule: "Reschedule transport",
+    failed: "Report failed transport",
+    retry: "Retry transport",
+  }[kind];
+  const reasonLabel =
+    kind === "resume" || kind === "retry" ? "Resolution" : "Reason";
+  const windowValid =
+    !needsWindow ||
+    (!!windowStart &&
+      !!windowEnd &&
+      new Date(windowEnd).getTime() > new Date(windowStart).getTime());
+  const optionalWindowValid =
+    kind !== "failed" ||
+    ((!windowStart && !windowEnd) ||
+      (!!windowStart &&
+        !!windowEnd &&
+        new Date(windowEnd).getTime() > new Date(windowStart).getTime()));
+
+  return (
+    <div className="modal-backdrop">
+      <div className="modal-sheet max-w-lg" role="dialog" aria-modal="true">
+        <h2 className="text-lg font-semibold">{title}</h2>
+        <form
+          className="mt-4 space-y-4"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (windowValid && optionalWindowValid) {
+              void onSubmit({
+                reason: reason.trim(),
+                windowStart,
+                windowEnd,
+              });
+            }
+          }}
+        >
+          <label className="block">
+            <span className="text-xs text-slate-500">{reasonLabel}</span>
+            <textarea
+              autoFocus
+              required
+              rows={3}
+              maxLength={2000}
+              className="input"
+              value={reason}
+              onChange={(event) => setReason(event.target.value)}
+            />
+          </label>
+          {maySetWindow && (
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="block">
+                <span className="text-xs text-slate-500">
+                  Revised window start {kind === "failed" ? "(optional)" : ""}
+                </span>
+                <input
+                  type="datetime-local"
+                  required={needsWindow}
+                  className="input"
+                  value={windowStart}
+                  onChange={(event) => setWindowStart(event.target.value)}
+                />
+              </label>
+              <label className="block">
+                <span className="text-xs text-slate-500">
+                  Revised window end {kind === "failed" ? "(optional)" : ""}
+                </span>
+                <input
+                  type="datetime-local"
+                  required={needsWindow}
+                  className="input"
+                  value={windowEnd}
+                  onChange={(event) => setWindowEnd(event.target.value)}
+                />
+              </label>
+            </div>
+          )}
+          {(!windowValid || !optionalWindowValid) && (
+            <p className="text-sm text-rose-600">
+              Enter both window values with the end after the start.
+            </p>
+          )}
+          {error && <p className="text-sm text-rose-600">{error}</p>}
+          <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+            <button
+              type="button"
+              className="btn-secondary"
+              disabled={pending}
+              onClick={onClose}
+            >
+              Close
+            </button>
+            <button
+              type="submit"
+              className={kind === "failed" ? "btn-danger" : "btn-primary"}
+              disabled={
+                pending ||
+                !reason.trim() ||
+                !windowValid ||
+                !optionalWindowValid
+              }
+            >
+              {pending ? "Working…" : title}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
   );
 }
 
@@ -704,6 +1312,190 @@ function ReasonActionDialog({
   );
 }
 
+function VersionConflict({
+  detail,
+  current,
+  pending,
+  onRetry,
+}: {
+  detail: RequestConflict;
+  current: BoxRequest;
+  pending: boolean;
+  onRetry: () => void;
+}) {
+  const stillValid = canRetryRequestConflict(current, detail);
+  return (
+    <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
+      <strong>This request changed while you were editing.</strong>
+      <p className="mt-1">
+        Server: {humanize(detail.latest_status)}, version {detail.latest_version}.
+        Your open form and unsaved values were preserved.
+      </p>
+      {detail.relevant_events.length > 0 && (
+        <p className="mt-1 text-xs">
+          Latest activity: {eventLabel(detail.relevant_events[0])}
+          {" · "}
+          {formatDate(detail.relevant_events[0].occurred_at)}
+        </p>
+      )}
+      {stillValid ? (
+        <button
+          type="button"
+          className="btn-secondary mt-2"
+          disabled={pending}
+          onClick={onRetry}
+        >
+          Retry against version {current.version}
+        </button>
+      ) : (
+        <p className="mt-2 text-xs font-medium">
+          The action is no longer valid in the latest status. Review the request
+          before continuing.
+        </p>
+      )}
+    </div>
+  );
+}
+
+function DiscrepancyEditor({
+  value,
+  onChange,
+  items = [],
+}: {
+  value: RequestDiscrepancyInput[];
+  onChange: (value: RequestDiscrepancyInput[]) => void;
+  items?: BoxRequest["items"];
+}) {
+  return (
+    <div className="space-y-2 rounded-lg border border-slate-200 p-3">
+      <div className="flex items-center justify-between gap-2">
+        <div>
+          <h3 className="text-sm font-medium">Line discrepancies</h3>
+          <p className="text-xs text-slate-500">
+            Record damage, wrong lot/contents, rejected, missing, or unexpected boxes.
+          </p>
+        </div>
+        <button
+          type="button"
+          className="btn-secondary"
+          onClick={() =>
+            onChange([
+              ...value,
+              { discrepancy_type: "damaged", quantity: 1, notes: "" },
+            ])
+          }
+        >
+          <Plus className="h-4 w-4" /> Add
+        </button>
+      </div>
+      {value.map((entry, index) => (
+        <div key={index} className="grid gap-2 sm:grid-cols-4">
+          <select
+            className="input"
+            value={entry.discrepancy_type}
+            onChange={(event) =>
+              onChange(
+                value.map((candidate, candidateIndex) =>
+                  candidateIndex === index
+                    ? {
+                        ...candidate,
+                        discrepancy_type: event.target
+                          .value as RequestDiscrepancyInput["discrepancy_type"],
+                      }
+                    : candidate,
+                ),
+              )
+            }
+          >
+            {["missing", "unexpected", "damaged", "wrong_lot", "wrong_contents", "rejected"].map(
+              (type) => (
+                <option key={type} value={type}>
+                  {humanize(type)}
+                </option>
+              ),
+            )}
+          </select>
+          <select
+            className="input"
+            value={entry.request_item_id ?? ""}
+            onChange={(event) => {
+              const item = items.find(
+                (candidate) => candidate.id === Number(event.target.value),
+              );
+              onChange(
+                value.map((candidate, candidateIndex) =>
+                  candidateIndex === index
+                    ? {
+                        ...candidate,
+                        request_item_id: item?.id,
+                        box_id: item?.box_id ?? undefined,
+                      }
+                    : candidate,
+                ),
+              );
+            }}
+          >
+            <option value="">Aggregate / no box</option>
+            {items.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.box_number ?? `Item ${item.id}`}
+              </option>
+            ))}
+          </select>
+          <input
+            type="number"
+            min={1}
+            max={5000}
+            className="input"
+            value={entry.quantity ?? ""}
+            placeholder="Quantity"
+            onChange={(event) =>
+              onChange(
+                value.map((candidate, candidateIndex) =>
+                  candidateIndex === index
+                    ? {
+                        ...candidate,
+                        quantity: event.target.value
+                          ? Number(event.target.value)
+                          : undefined,
+                      }
+                    : candidate,
+                ),
+              )
+            }
+          />
+          <div className="flex gap-2">
+            <input
+              className="input"
+              value={entry.notes ?? ""}
+              placeholder="Notes"
+              onChange={(event) =>
+                onChange(
+                  value.map((candidate, candidateIndex) =>
+                    candidateIndex === index
+                      ? { ...candidate, notes: event.target.value }
+                      : candidate,
+                  ),
+                )
+              }
+            />
+            <button
+              type="button"
+              className="btn-ghost text-rose-600"
+              aria-label="Remove discrepancy"
+              onClick={() =>
+                onChange(value.filter((_, candidateIndex) => candidateIndex !== index))
+              }
+            >
+              <Trash2 className="h-4 w-4" />
+            </button>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function CompletionDialog({
   request,
   pending,
@@ -718,6 +1510,8 @@ function CompletionDialog({
   onSubmit: (
     items: InboundRequestItemInput[],
     discrepancyReason?: string,
+    collectedBoxIds?: number[],
+    discrepancies?: RequestDiscrepancyInput[],
   ) => Promise<void>;
 }) {
   const inbound = request.direction === "inbound";
@@ -732,6 +1526,17 @@ function CompletionDialog({
   );
   const [showExcelMapper, setShowExcelMapper] = useState(false);
   const [discrepancyReason, setDiscrepancyReason] = useState("");
+  const [lineDiscrepancies, setLineDiscrepancies] = useState<
+    RequestDiscrepancyInput[]
+  >([]);
+  const [collectedBoxIds, setCollectedBoxIds] = useState<Set<number>>(
+    () =>
+      new Set(
+        request.items.flatMap((item) =>
+          item.box_id === null ? [] : [item.box_id],
+        ),
+      ),
+  );
   const actualCount = groupInboundItems(
     rows.filter((row) => row.box_number.trim() && row.lot.trim()),
   ).length;
@@ -773,6 +1578,8 @@ function CompletionDialog({
                   contents: row.contents?.trim() || undefined,
                 })),
                 hasMismatch ? discrepancyReason.trim() || undefined : undefined,
+                undefined,
+                lineDiscrepancies,
               );
             }}
           >
@@ -803,6 +1610,8 @@ function CompletionDialog({
               </div>
               {showExcelMapper && (
                 <ExcelRowMapper
+                  useCase="inbound_acceptance"
+                  warehouseId={request.warehouse_id}
                   requestId={request.id}
                   quantity={request.quantity}
                   onApply={(mappedRows) => {
@@ -914,6 +1723,10 @@ function CompletionDialog({
                 />
               </label>
             )}
+            <DiscrepancyEditor
+              value={lineDiscrepancies}
+              onChange={setLineDiscrepancies}
+            />
             {error && (
               <p role="alert" className="text-sm text-rose-600">
                 {error}
@@ -936,12 +1749,68 @@ function CompletionDialog({
             />
           </form>
         ) : (
-          <div className="mt-3 space-y-4">
+          <form
+            className="mt-3 space-y-4"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void onSubmit(
+                [],
+                discrepancyReason.trim() || undefined,
+                [...collectedBoxIds],
+                lineDiscrepancies,
+              );
+            }}
+          >
             <p className="text-sm text-slate-600">
-              Confirm that all {request.quantity} boxes in this return request
-              reached their destination. This marks the request and its boxes as
-              completed.
+              Select the boxes actually collected. Unselected reservations are
+              released and moved into a non-reserving follow-up draft.
             </p>
+            <div className="space-y-2">
+              {request.items.map((item) => (
+                <label
+                  key={item.id}
+                  className="flex items-center gap-3 rounded border border-slate-200 p-3"
+                >
+                  <input
+                    type="checkbox"
+                    checked={
+                      item.box_id !== null && collectedBoxIds.has(item.box_id)
+                    }
+                    disabled={item.box_id === null}
+                    onChange={() => {
+                      if (item.box_id === null) return;
+                      setCollectedBoxIds((current) => {
+                        const next = new Set(current);
+                        if (next.has(item.box_id!)) next.delete(item.box_id!);
+                        else next.add(item.box_id!);
+                        return next;
+                      });
+                    }}
+                  />
+                  <span className="font-mono">{item.box_number ?? `#${item.box_id}`}</span>
+                  <span className="text-sm text-slate-500">{item.lot}</span>
+                </label>
+              ))}
+            </div>
+            <p className="text-sm font-medium">
+              {collectedBoxIds.size} of {request.quantity} collected
+            </p>
+            <label className="block">
+              <span className="text-xs text-slate-500">
+                Partial collection notes (optional)
+              </span>
+              <textarea
+                className="input"
+                rows={2}
+                value={discrepancyReason}
+                onChange={(event) => setDiscrepancyReason(event.target.value)}
+              />
+            </label>
+            <DiscrepancyEditor
+              value={lineDiscrepancies}
+              onChange={setLineDiscrepancies}
+              items={request.items}
+            />
             {error && (
               <p role="alert" className="text-sm text-rose-600">
                 {error}
@@ -949,10 +1818,15 @@ function CompletionDialog({
             )}
             <DialogButtons
               pending={pending}
+              disabled={collectedBoxIds.size === 0}
               onClose={onClose}
-              onConfirm={() => onSubmit([])}
+              confirmLabel={
+                collectedBoxIds.size === request.quantity
+                  ? "Accept return"
+                  : "Accept partial return"
+              }
             />
-          </div>
+          </form>
         )}
       </div>
     </div>
@@ -997,430 +1871,6 @@ function DeliveryVarianceSummary({
       </div>
     </div>
   );
-}
-
-export function ExcelRowMapper({
-  requestId,
-  quantity,
-  onApply,
-}: {
-  requestId?: number;
-  quantity?: number;
-  onApply: (rows: InboundRequestItemInput[]) => void;
-}) {
-  const requestPreview = usePreviewInboundXlsx();
-  const boxImportPreview = usePreviewBoxImportXlsx();
-  const preview = requestId === undefined ? boxImportPreview : requestPreview;
-  const [file, setFile] = useState<File | null>(null);
-  const [sheetName, setSheetName] = useState("");
-  const [boxColumn, setBoxColumn] = useState<number | undefined>();
-  const [lotSource, setLotSource] = useState<"fixed" | "column">("fixed");
-  const [lotColumn, setLotColumn] = useState<number | undefined>();
-  const [fixedLot, setFixedLot] = useState("");
-  const [contentsColumn, setContentsColumn] = useState<number | undefined>();
-  const [selectedRows, setSelectedRows] = useState<Set<number>>(new Set());
-  const [error, setError] = useState<string | null>(null);
-
-  const sheet = preview.data?.sheets.find(
-    (candidate) => candidate.name === sheetName,
-  );
-  const selectedMappedRows: InboundRequestItemInput[] = sheet
-    ? sheet.rows
-        .filter((row) => selectedRows.has(row.row_number))
-        .map((row) => ({
-          box_number:
-            boxColumn === undefined ? "" : (row.cells[boxColumn] ?? "").trim(),
-          lot:
-            lotSource === "fixed"
-              ? fixedLot.trim()
-              : lotColumn === undefined
-                ? ""
-                : (row.cells[lotColumn] ?? "").trim(),
-          contents:
-            contentsColumn === undefined
-              ? undefined
-              : (row.cells[contentsColumn] ?? "").trim() || undefined,
-        }))
-    : [];
-  const groupedSelectionCount = groupInboundItems(
-    selectedMappedRows.filter((row) => row.box_number && row.lot),
-  ).length;
-
-  function resetMapping(nextSheetName: string, rowNumbers: number[]) {
-    setSheetName(nextSheetName);
-    setBoxColumn(undefined);
-    setLotColumn(undefined);
-    setContentsColumn(undefined);
-    setSelectedRows(new Set(rowNumbers));
-    setError(null);
-  }
-
-  async function loadWorkbook() {
-    if (!file) return;
-    setError(null);
-    try {
-      const result =
-        requestId === undefined
-          ? await boxImportPreview.mutateAsync({ file })
-          : await requestPreview.mutateAsync({ requestId, file });
-      const firstSheet = result.sheets[0];
-      resetMapping(
-        firstSheet?.name ?? "",
-        firstSheet?.rows.map((row) => row.row_number) ?? [],
-      );
-    } catch (caught) {
-      setError(apiError(caught, "Could not read the workbook."));
-    }
-  }
-
-  function toggleRow(rowNumber: number) {
-    setSelectedRows((current) => {
-      const next = new Set(current);
-      if (next.has(rowNumber)) next.delete(rowNumber);
-      else next.add(rowNumber);
-      return next;
-    });
-  }
-
-  function applyMapping() {
-    if (!sheet || boxColumn === undefined) {
-      setError("Choose the column containing the box number.");
-      return;
-    }
-    if (lotSource === "fixed" && !fixedLot.trim()) {
-      setError("Enter the lot value to apply to the selected rows.");
-      return;
-    }
-    if (lotSource === "column" && lotColumn === undefined) {
-      setError("Choose the column containing the lot.");
-      return;
-    }
-    if (
-      lotSource === "column" &&
-      lotColumn === boxColumn
-    ) {
-      setError("Box number and lot must use different columns.");
-      return;
-    }
-    if (selectedRows.size === 0) {
-      setError("Select at least one workbook row.");
-      return;
-    }
-
-    const mapped: InboundRequestItemInput[] = [];
-    for (const row of sheet.rows) {
-      if (!selectedRows.has(row.row_number)) continue;
-      const boxNumber = (row.cells[boxColumn] ?? "").trim();
-      const lot =
-        lotSource === "fixed"
-          ? fixedLot.trim()
-          : (row.cells[lotColumn!] ?? "").trim();
-      if (!boxNumber || !lot) {
-        setError(
-          `Excel row ${row.row_number} is missing a mapped box number or lot.`,
-        );
-        return;
-      }
-      if (!/^\d+$/.test(boxNumber)) {
-        setError(
-          `Excel row ${row.row_number} has a non-numeric mapped box number.`,
-        );
-        return;
-      }
-      const contents =
-        contentsColumn === undefined
-          ? ""
-          : (row.cells[contentsColumn] ?? "").trim();
-      mapped.push({
-        box_number: boxNumber,
-        lot,
-        contents: contents || undefined,
-      });
-    }
-    const grouped = groupInboundItems(mapped);
-    const oversized = grouped.find((item) => (item.contents?.length ?? 0) > 200);
-    if (oversized) {
-      setError(
-        `Combined contents for box ${oversized.box_number} exceed 200 characters.`,
-      );
-      return;
-    }
-    setError(null);
-    onApply(grouped);
-  }
-
-  return (
-    <div className="mt-4 space-y-4 border-t border-slate-200 pt-4">
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
-        <label className="block flex-1">
-          <span className="text-xs text-slate-500">Excel workbook</span>
-          <input
-            type="file"
-            accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            className="input file:mr-3 file:border-0 file:bg-transparent file:text-sm"
-            onChange={(event) => {
-              setFile(event.target.files?.[0] ?? null);
-              setError(null);
-            }}
-          />
-        </label>
-        <button
-          type="button"
-          className="btn-secondary"
-          disabled={!file || preview.isPending}
-          onClick={() => void loadWorkbook()}
-        >
-          <Upload className="h-4 w-4" />
-          {preview.isPending ? "Reading…" : "Preview workbook"}
-        </button>
-      </div>
-
-      {preview.data && sheet && (
-        <>
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-            <label className="block">
-              <span className="text-xs text-slate-500">Worksheet</span>
-              <select
-                className="input"
-                value={sheetName}
-                onChange={(event) => {
-                  const nextSheet = preview.data?.sheets.find(
-                    (candidate) => candidate.name === event.target.value,
-                  );
-                  resetMapping(
-                    event.target.value,
-                    nextSheet?.rows.map((row) => row.row_number) ?? [],
-                  );
-                }}
-              >
-                {preview.data.sheets.map((candidate) => (
-                  <option key={candidate.name} value={candidate.name}>
-                    {candidate.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <ColumnSelect
-              label="Box number column"
-              sheet={sheet}
-              value={boxColumn}
-              required
-              onChange={setBoxColumn}
-            />
-            <label className="block">
-              <span className="text-xs text-slate-500">Lot source</span>
-              <select
-                className="input"
-                value={lotSource}
-                onChange={(event) =>
-                  setLotSource(event.target.value as "fixed" | "column")
-                }
-              >
-                <option value="fixed">One fixed lot value</option>
-                <option value="column">Workbook column</option>
-              </select>
-            </label>
-            {lotSource === "fixed" ? (
-              <label className="block">
-                <span className="text-xs text-slate-500">Fixed lot</span>
-                <input
-                  className="input"
-                  placeholder="For example PR100"
-                  maxLength={64}
-                  value={fixedLot}
-                  onChange={(event) => setFixedLot(event.target.value)}
-                />
-              </label>
-            ) : (
-              <ColumnSelect
-                label="Lot column"
-                sheet={sheet}
-                value={lotColumn}
-                required
-                onChange={setLotColumn}
-              />
-            )}
-            <ColumnSelect
-              label="Contents column (optional)"
-              sheet={sheet}
-              value={contentsColumn}
-              onChange={setContentsColumn}
-            />
-          </div>
-
-          <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-600">
-            <span>
-              All rows are included initially. Uncheck headers and extra data
-              to exclude them. Repeated box numbers are merged.
-            </span>
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                className="text-brand-700 underline hover:text-brand-800"
-                onClick={() =>
-                  setSelectedRows(
-                    new Set(sheet.rows.map((row) => row.row_number)),
-                  )
-                }
-              >
-                Include all
-              </button>
-              <button
-                type="button"
-                className="text-slate-600 underline hover:text-slate-800"
-                onClick={() => setSelectedRows(new Set())}
-              >
-                Exclude all
-              </button>
-              <span className="font-medium tabular-nums">
-                {selectedRows.size} rows → {groupedSelectionCount} unique boxes
-              </span>
-            </div>
-          </div>
-          {quantity !== undefined && (
-            <DeliveryVarianceSummary
-              ordered={quantity}
-              actual={groupedSelectionCount}
-            />
-          )}
-
-          <div className="max-h-80 overflow-auto rounded-lg border border-slate-200 bg-white">
-            <table className="min-w-full border-collapse text-xs">
-              <thead className="sticky top-0 z-10 bg-slate-100 text-left text-slate-600">
-                <tr>
-                  <th className="w-16 border-b px-2 py-2">Included</th>
-                  <th className="w-14 border-b px-2 py-2">Row</th>
-                  {Array.from({ length: sheet.max_columns }, (_, index) => (
-                    <th
-                      key={index}
-                      className="min-w-32 border-b border-l px-2 py-2"
-                    >
-                      Column {excelColumnName(index)}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {sheet.rows.map((row) => {
-                  const checked = selectedRows.has(row.row_number);
-                  return (
-                    <tr
-                      key={row.row_number}
-                      className={checked ? "bg-brand-50" : "hover:bg-slate-50"}
-                    >
-                      <td className="border-b px-2 py-1.5 text-center">
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          aria-label={`Use Excel row ${row.row_number}`}
-                          onChange={() => toggleRow(row.row_number)}
-                        />
-                      </td>
-                      <td className="border-b px-2 py-1.5 font-mono text-slate-500">
-                        {row.row_number}
-                      </td>
-                      {Array.from(
-                        { length: sheet.max_columns },
-                        (_, columnIndex) => (
-                          <td
-                            key={columnIndex}
-                            className={`max-w-64 truncate border-b border-l px-2 py-1.5 ${
-                              columnIndex === boxColumn ||
-                              columnIndex === lotColumn ||
-                              columnIndex === contentsColumn
-                                ? "bg-amber-50"
-                                : ""
-                            }`}
-                            title={row.cells[columnIndex] ?? ""}
-                          >
-                            {row.cells[columnIndex] || "—"}
-                          </td>
-                        ),
-                      )}
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-
-          <div className="flex justify-end">
-            <button
-              type="button"
-              className="btn-primary"
-              disabled={
-                selectedRows.size === 0 || groupedSelectionCount === 0
-              }
-              onClick={applyMapping}
-            >
-              Apply mapping and review
-            </button>
-          </div>
-        </>
-      )}
-
-      {error && (
-        <p role="alert" className="text-sm text-rose-600">
-          {error}
-        </p>
-      )}
-    </div>
-  );
-}
-
-function ColumnSelect({
-  label,
-  sheet,
-  value,
-  required = false,
-  onChange,
-}: {
-  label: string;
-  sheet: XlsxPreviewSheet;
-  value: number | undefined;
-  required?: boolean;
-  onChange: (value: number | undefined) => void;
-}) {
-  return (
-    <label className="block">
-      <span className="text-xs text-slate-500">{label}</span>
-      <select
-        className="input"
-        value={value ?? ""}
-        onChange={(event) =>
-          onChange(
-            event.target.value === "" ? undefined : Number(event.target.value),
-          )
-        }
-      >
-        <option value="">{required ? "Choose a column" : "Do not import"}</option>
-        {Array.from({ length: sheet.max_columns }, (_, index) => {
-          const examples = sheet.rows
-            .map((row) => row.cells[index])
-            .filter(Boolean)
-            .slice(0, 3)
-            .join(" · ");
-          return (
-            <option key={index} value={index}>
-              {excelColumnName(index)}
-              {examples ? ` — ${examples.slice(0, 70)}` : ""}
-            </option>
-          );
-        })}
-      </select>
-    </label>
-  );
-}
-
-function excelColumnName(index: number): string {
-  let value = index + 1;
-  let name = "";
-  while (value > 0) {
-    value -= 1;
-    name = String.fromCharCode(65 + (value % 26)) + name;
-    value = Math.floor(value / 26);
-  }
-  return name;
 }
 
 function DialogButtons({
@@ -1470,7 +1920,31 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 
 function eventLabel(
   event: import("@/api/types").RequestEvent,
+  direction?: BoxRequest["direction"],
 ): string {
+  if (direction) {
+    const label = {
+      preparation_started:
+        direction === "inbound" ? "Preparing inbound" : "Preparing return",
+      ready_for_transport:
+        direction === "inbound"
+          ? "Ready for dispatch"
+          : "Ready for collection",
+      in_transit: direction === "inbound" ? "Delivering" : "Collecting",
+      awaiting_confirmation:
+        direction === "inbound"
+          ? "Delivered · awaiting requester confirmation"
+          : "Collected · awaiting warehouse confirmation",
+      failed_delivery:
+        direction === "inbound" ? "Delivery attempt failed" : "Collection attempt failed",
+      transport_retry:
+        direction === "inbound" ? "Delivery retry prepared" : "Collection retry prepared",
+    }[event.event_type];
+    if (label) return label;
+  }
+  if (event.from_status === event.to_status) {
+    return humanize(event.event_type);
+  }
   if (event.from_status && event.to_status) {
     return `${humanize(event.from_status)} → ${humanize(event.to_status)}`;
   }
@@ -1494,6 +1968,13 @@ function formatDate(value: string | null): string {
   return value ? new Date(value).toLocaleString() : "—";
 }
 
+function localDateInput(value: string | null): string {
+  if (!value) return "";
+  const date = new Date(value);
+  const offset = date.getTimezoneOffset() * 60_000;
+  return new Date(date.getTime() - offset).toISOString().slice(0, 16);
+}
+
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -1503,5 +1984,14 @@ function formatBytes(bytes: number): string {
 function apiError(error: unknown, fallback: string): string {
   const detail = (error as { response?: { data?: { detail?: unknown } } })
     ?.response?.data?.detail;
-  return typeof detail === "string" ? detail : fallback;
+  if (typeof detail === "string") return detail;
+  if (
+    detail &&
+    typeof detail === "object" &&
+    "message" in detail &&
+    typeof detail.message === "string"
+  ) {
+    return detail.message;
+  }
+  return fallback;
 }

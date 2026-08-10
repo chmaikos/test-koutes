@@ -12,6 +12,7 @@ from sqlalchemy import Select, select
 from sqlalchemy.orm import Session
 
 from app.models.boxes import Box, BoxEvent, BoxEventType, BoxStatus
+from app.models.notifications import RequestNotificationKind
 from app.models.requests import (
     ACTIVE_REQUEST_STATUSES,
     BoxRequest,
@@ -21,9 +22,10 @@ from app.models.requests import (
     BoxRequestItem,
     BoxRequestStatus,
 )
-from app.models.users import User
+from app.models.users import User, UserRole
 from app.models.warehouses import Warehouse
 from app.services.acl import can_access
+from app.services.request_notifications import enqueue_request_event
 from app.services.warehouses import WarehouseRuleError, ensure_active_warehouse
 
 # Valid forward transitions: a box walks the chain one step at a time. The
@@ -38,6 +40,7 @@ from app.services.warehouses import WarehouseRuleError, ensure_active_warehouse
 # so we never lose intermediate audit rows. Admins still get the bypass via
 # the force flag enforced in the router.
 _ALLOWED_TRANSITIONS: dict[BoxStatus, set[BoxStatus]] = {
+    BoxStatus.quarantined: {BoxStatus.received},
     BoxStatus.received: {BoxStatus.processing},
     BoxStatus.processing: {BoxStatus.incomplete},
     BoxStatus.incomplete: {BoxStatus.ready_to_return},
@@ -151,7 +154,21 @@ def _cancel_active_returns(
                 user_id=user.id,
                 note=note,
                 occurred_at=now,
+                event_metadata={
+                    "admin_override": True,
+                    "cancelled_reservation": True,
+                    "box_id": box_id,
+                    "override_reason": reason.strip(),
+                    "operation": "reservation_cancelled",
+                },
             )
+        )
+        enqueue_request_event(
+            db,
+            request=request,
+            kind=RequestNotificationKind.reservation_cancelled,
+            event_token=f"reservation-cancelled:{request.version}",
+            detail=note,
         )
         cancelled.add(request.id)
     return cancelled
@@ -166,6 +183,7 @@ def create_box(
     warehouse_id: int,
     contents: str | None = None,
     note: str | None = None,
+    initial_status: BoxStatus = BoxStatus.received,
     commit: bool = True,
 ) -> Box:
     _ensure_warehouse(db, warehouse_id)
@@ -197,7 +215,7 @@ def create_box(
         lot=cleaned_lot,
         contents=cleaned_contents,
         current_warehouse_id=warehouse_id,
-        status=BoxStatus.received,
+        status=initial_status,
         received_at=now,
         updated_by_user_id=user.id,
     )
@@ -209,7 +227,7 @@ def create_box(
             warehouse_id=warehouse_id,
             event_type=BoxEventType.created,
             from_status=None,
-            to_status=BoxStatus.received,
+            to_status=initial_status,
             from_warehouse_id=None,
             to_warehouse_id=warehouse_id,
             occurred_at=now,
@@ -234,6 +252,7 @@ def restore_archived_box(
     warehouse_id: int,
     contents: str | None = None,
     note: str | None = None,
+    restored_status: BoxStatus = BoxStatus.received,
     commit: bool = True,
 ) -> Box | None:
     """Reactivate an archived identity, returning ``None`` when none exists."""
@@ -273,7 +292,7 @@ def restore_archived_box(
     previous_archive_reason = box.archive_reason
     cleaned_contents = (contents or "").strip() or None
     box.current_warehouse_id = warehouse_id
-    box.status = BoxStatus.received
+    box.status = restored_status
     box.contents = cleaned_contents
     box.received_at = now
     box.processing_completed_at = None
@@ -295,7 +314,7 @@ def restore_archived_box(
             warehouse_id=warehouse_id,
             event_type=BoxEventType.restored,
             from_status=old_status,
-            to_status=BoxStatus.received,
+            to_status=restored_status,
             from_warehouse_id=old_warehouse_id,
             to_warehouse_id=warehouse_id,
             occurred_at=now,
@@ -355,6 +374,14 @@ def update_box(
         and new_warehouse_id != box.current_warehouse_id
     )
     changing_status = new_status is not None and new_status != box.status
+    if (
+        changing_status
+        and (box.status == BoxStatus.quarantined or new_status == BoxStatus.quarantined)
+        and user.role != UserRole.admin
+    ):
+        raise BoxAccessError("quarantine changes require admin role")
+    request_ids: list[int] = []
+    cancelled: set[int] = set()
     if moving and new_warehouse_id is not None:
         _ensure_warehouse(db, new_warehouse_id)
         if not can_access(user, new_warehouse_id):
@@ -363,8 +390,9 @@ def update_box(
             )
     if force and (moving or changing_status) and not (note or "").strip():
         raise BoxRuleError("a reason is required for an admin override")
-    if not skip_request_guards and moving:
+    if not skip_request_guards and (moving or changing_status):
         request_ids = _referencing_request_ids(db, box.id)
+    if not skip_request_guards and moving:
         if request_ids and not force:
             joined = ", ".join(f"#{request_id}" for request_id in request_ids)
             raise BoxConflictError(
@@ -424,6 +452,13 @@ def update_box(
                 occurred_at=now,
                 user_id=user.id,
                 note=audit_note,
+                event_metadata={
+                    "admin_override": force,
+                    "override_reason": (note or "").strip() or None,
+                    "operation": "forced_move" if force else "move",
+                    "linked_request_ids": request_ids,
+                    "cancelled_request_ids": sorted(cancelled),
+                },
             )
         )
         box.current_warehouse_id = new_warehouse_id
@@ -454,6 +489,13 @@ def update_box(
                 occurred_at=now,
                 user_id=user.id,
                 note=audit_note,
+                event_metadata={
+                    "admin_override": force,
+                    "override_reason": (note or "").strip() or None,
+                    "operation": "forced_status_change" if force else "status_change",
+                    "linked_request_ids": request_ids,
+                    "cancelled_request_ids": sorted(cancelled),
+                },
             )
         )
 
@@ -619,6 +661,13 @@ def delete_box(
                     occurred_at=now,
                     user_id=user.id,
                     note=f"[admin override] {cleaned_reason}",
+                    event_metadata={
+                        "admin_override": True,
+                        "override_reason": cleaned_reason,
+                        "operation": "linked_box_archive",
+                        "linked_request_ids": request_ids,
+                        "cancelled_request_ids": sorted(cancelled_request_ids),
+                    },
                 )
             )
         archived = True

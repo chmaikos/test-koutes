@@ -20,19 +20,35 @@ import type {
   EmployeeImportResult,
   ImportResult,
   InboundRequestItemInput,
+  NotificationPage,
   Page,
   ProductivityEntry,
   ProductivitySummary,
   RequestDirection,
+  RequestAssignee,
+  RequestAttachment,
+  RequestComment,
+  RequestDiscrepancy,
+  RequestDiscrepancyInput,
+  RequestDiscrepancyPhoto,
   RequestDocument,
   RequestDocumentType,
   RequestEvent,
   RequestFilters,
+  RequestAnalytics,
+  RequestReconciliation,
+  RequestReportFilters,
   RequestSuggestion,
   ReturnCandidate,
   ReturnSource,
+  StagedReceiptResult,
   User,
   Warehouse,
+  XlsxMappingSuggestion,
+  XlsxMappingTemplate,
+  XlsxMappingTemplateInput,
+  XlsxMappingTemplateUpdate,
+  XlsxMappingUseCase,
   XlsxPreview,
 } from "@/api/types";
 
@@ -42,6 +58,8 @@ export const queryKeys = {
   warehouses: (includeInactive = false) =>
     ["warehouses", includeInactive] as const,
   users: ["users"] as const,
+  notifications: (page: number, pageSize: number) =>
+    ["notifications", page, pageSize] as const,
   alerts: (open: boolean) => ["alerts", open] as const,
   alert: (id: number) => ["alert", id] as const,
   alertRecipients: ["alert-recipients"] as const,
@@ -54,6 +72,17 @@ export const queryKeys = {
   request: (id: number) => ["request", id] as const,
   requestEvents: (id: number) => ["request-events", id] as const,
   requestDocuments: (id: number) => ["request-documents", id] as const,
+  requestComments: (id: number) => ["request-comments", id] as const,
+  requestAttachments: (id: number) => ["request-attachments", id] as const,
+  requestAssignees: (warehouseId: number | undefined) =>
+    ["request-assignees", warehouseId ?? null] as const,
+  requestReconciliation: (
+    filters: RequestReportFilters,
+    page: number,
+    pageSize: number,
+  ) => ["request-reconciliation", filters, page, pageSize] as const,
+  requestAnalytics: (filters: RequestReportFilters) =>
+    ["request-analytics", filters] as const,
   requestSuggestion: (
     warehouseId: number | undefined,
     direction: RequestDirection,
@@ -62,6 +91,10 @@ export const queryKeys = {
     ["return-sources", warehouseId ?? null] as const,
   returnCandidates: (sourceInboundRequestId: number | undefined) =>
     ["return-candidates", sourceInboundRequestId ?? null] as const,
+  xlsxMappingTemplates: (
+    useCase: XlsxMappingUseCase,
+    warehouseId: number | undefined,
+  ) => ["xlsx-mapping-templates", useCase, warehouseId ?? null] as const,
   employees: (
     warehouseId?: number,
     includeInactive?: boolean,
@@ -147,7 +180,20 @@ export function useUpdateWarehouse() {
       patch: Partial<
         Pick<
           Warehouse,
-          "name" | "min_inventory" | "max_capacity" | "min_pages_per_day"
+          | "name"
+          | "min_inventory"
+          | "max_capacity"
+          | "min_pages_per_day"
+          | "lead_time_days"
+          | "safety_stock_percent"
+          | "history_30_weight"
+          | "history_90_weight"
+          | "forecast_adjustment"
+          | "receipt_mode"
+          | "require_erp_document"
+          | "quarantine_imports"
+          | "quarantine_manual_receipts"
+          | "two_person_approval_threshold"
         >
       >;
     }) => (await api.patch<Warehouse>(`/warehouses/${input.id}`, input.patch)).data,
@@ -165,6 +211,16 @@ export function useCreateWarehouse() {
       min_inventory?: number;
       max_capacity?: number;
       min_pages_per_day?: number | null;
+      lead_time_days?: number;
+      safety_stock_percent?: number;
+      history_30_weight?: number;
+      history_90_weight?: number;
+      forecast_adjustment?: number | null;
+      receipt_mode?: Warehouse["receipt_mode"];
+      require_erp_document?: boolean;
+      quarantine_imports?: boolean;
+      quarantine_manual_receipts?: boolean;
+      two_person_approval_threshold?: number | null;
     }) => (await api.post<Warehouse>("/warehouses", input)).data,
     onSuccess: () => {
       invalidateWarehouseState(qc);
@@ -207,6 +263,7 @@ export function useUpdateUser() {
         is_active?: boolean;
         role_override?: boolean;
         email_alerts_enabled?: boolean;
+        email_requests_enabled?: boolean;
         warehouse_ids?: number[];
       };
     }) => (await api.patch<User>(`/users/${input.id}`, input.patch)).data,
@@ -219,6 +276,52 @@ export function useUpdateUser() {
       qc.invalidateQueries({ queryKey: ["warehouses"] });
       qc.invalidateQueries({ queryKey: queryKeys.dashboard });
     },
+  });
+}
+
+export function useUpdateMyRequestEmailPreference() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (enabled: boolean) =>
+      (
+        await api.patch<User>("/users/me/preferences", {
+          email_requests_enabled: enabled,
+        })
+      ).data,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.me });
+      qc.invalidateQueries({ queryKey: queryKeys.users });
+    },
+  });
+}
+
+export function useNotifications(page = 1, pageSize = 25) {
+  return useQuery({
+    queryKey: queryKeys.notifications(page, pageSize),
+    queryFn: async () =>
+      (
+        await api.get<NotificationPage>(
+          `/notifications${buildQueryString({
+            page,
+            page_size: pageSize,
+          })}`,
+        )
+      ).data,
+    refetchInterval: 30_000,
+    refetchOnWindowFocus: true,
+  });
+}
+
+export function useMarkNotificationsRead() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (notificationIds?: number[]) =>
+      (
+        await api.post<{ unread: number }>("/notifications/mark-read", {
+          notification_ids: notificationIds,
+        })
+      ).data,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["notifications"] }),
   });
 }
 
@@ -311,7 +414,7 @@ export function useCreateBox() {
       contents?: string;
       warehouse_id: number;
       note?: string;
-    }) => (await api.post<Box>("/boxes", input)).data,
+    }) => (await api.post<Box | StagedReceiptResult>("/boxes", input)).data,
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["boxes"] });
       qc.invalidateQueries({ queryKey: queryKeys.dashboard });
@@ -458,6 +561,93 @@ export function usePreviewBoxImportXlsx() {
   });
 }
 
+export function useXlsxMappingTemplates(
+  useCase: XlsxMappingUseCase,
+  warehouseId?: number,
+) {
+  return useQuery({
+    queryKey: queryKeys.xlsxMappingTemplates(useCase, warehouseId),
+    queryFn: async () =>
+      (
+        await api.get<XlsxMappingTemplate[]>("/xlsx-mapping-templates", {
+          params: { use_case: useCase, warehouse_id: warehouseId },
+        })
+      ).data,
+  });
+}
+
+export function useSuggestXlsxMappingTemplates() {
+  return useMutation({
+    mutationFn: async (input: {
+      use_case: XlsxMappingUseCase;
+      warehouse_id?: number;
+      filename: string;
+      sheet_name: string;
+      header_candidates: string[][];
+    }) =>
+      (
+        await api.post<XlsxMappingSuggestion[]>(
+          "/xlsx-mapping-templates/suggestions",
+          input,
+        )
+      ).data,
+  });
+}
+
+export function useCreateXlsxMappingTemplate() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: XlsxMappingTemplateInput) =>
+      (await api.post<XlsxMappingTemplate>("/xlsx-mapping-templates", input))
+        .data,
+    onSuccess: () =>
+      qc.invalidateQueries({ queryKey: ["xlsx-mapping-templates"] }),
+  });
+}
+
+export function useUpdateXlsxMappingTemplate() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: {
+      templateId: number;
+      payload: XlsxMappingTemplateUpdate;
+    }) =>
+      (
+        await api.patch<XlsxMappingTemplate>(
+          `/xlsx-mapping-templates/${input.templateId}`,
+          input.payload,
+        )
+      ).data,
+    onSuccess: () =>
+      qc.invalidateQueries({ queryKey: ["xlsx-mapping-templates"] }),
+  });
+}
+
+export function useDeleteXlsxMappingTemplate() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (templateId: number) => {
+      await api.delete(`/xlsx-mapping-templates/${templateId}`);
+    },
+    onSuccess: () =>
+      qc.invalidateQueries({ queryKey: ["xlsx-mapping-templates"] }),
+  });
+}
+
+export function useRecordXlsxMappingTemplateUse() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (templateId: number) =>
+      (
+        await api.post<XlsxMappingTemplate>(
+          `/xlsx-mapping-templates/${templateId}/use`,
+        )
+      ).data,
+    onSuccess: () =>
+      qc.invalidateQueries({ queryKey: ["xlsx-mapping-templates"] }),
+  });
+}
+
 export function useImportMappedBoxes() {
   const qc = useQueryClient();
   return useMutation({
@@ -500,6 +690,45 @@ export function useRequests(
   });
 }
 
+export function useRequestReconciliation(
+  filters: RequestReportFilters,
+  page: number,
+  pageSize: number,
+) {
+  return useQuery({
+    queryKey: queryKeys.requestReconciliation(filters, page, pageSize),
+    queryFn: async () =>
+      (
+        await api.get<RequestReconciliation>(
+          `/requests/reconciliation${buildQueryString({
+            ...filters,
+            page,
+            page_size: pageSize,
+          })}`,
+        )
+      ).data,
+    placeholderData: (previous) => previous,
+  });
+}
+
+export function useRequestAnalytics(filters: RequestReportFilters) {
+  const analyticsFilters = {
+    warehouse_id: filters.warehouse_id,
+    assigned_mover_user_id: filters.assigned_mover_user_id,
+    from_at: filters.from_at,
+    to_at: filters.to_at,
+  };
+  return useQuery({
+    queryKey: queryKeys.requestAnalytics(analyticsFilters),
+    queryFn: async () =>
+      (
+        await api.get<RequestAnalytics>(
+          `/requests/analytics${buildQueryString(analyticsFilters)}`,
+        )
+      ).data,
+  });
+}
+
 export function useRequest(id: number | undefined) {
   return useQuery({
     queryKey: id ? queryKeys.request(id) : ["request", "noop"],
@@ -525,6 +754,41 @@ export function useRequestDocuments(id: number | undefined) {
     queryFn: async () =>
       (await api.get<RequestDocument[]>(`/requests/${id}/documents`)).data,
     enabled: !!id,
+  });
+}
+
+export function useRequestComments(id: number | undefined) {
+  return useQuery({
+    queryKey: id ? queryKeys.requestComments(id) : ["request-comments", "noop"],
+    queryFn: async () =>
+      (await api.get<RequestComment[]>(`/requests/${id}/comments`)).data,
+    enabled: !!id,
+  });
+}
+
+export function useRequestAttachments(id: number | undefined) {
+  return useQuery({
+    queryKey: id
+      ? queryKeys.requestAttachments(id)
+      : ["request-attachments", "noop"],
+    queryFn: async () =>
+      (await api.get<RequestAttachment[]>(`/requests/${id}/attachments`)).data,
+    enabled: !!id,
+  });
+}
+
+export function useRequestAssignees(warehouseId: number | undefined) {
+  return useQuery({
+    queryKey: queryKeys.requestAssignees(warehouseId),
+    queryFn: async () =>
+      (
+        await api.get<RequestAssignee[]>(
+          `/requests/assignees${buildQueryString({
+            warehouse_id: warehouseId,
+          })}`,
+        )
+      ).data,
+    enabled: warehouseId !== undefined,
   });
 }
 
@@ -589,6 +853,8 @@ function invalidateRequestQueries(
     qc.invalidateQueries({ queryKey: queryKeys.request(id) });
     qc.invalidateQueries({ queryKey: queryKeys.requestEvents(id) });
     qc.invalidateQueries({ queryKey: queryKeys.requestDocuments(id) });
+    qc.invalidateQueries({ queryKey: queryKeys.requestComments(id) });
+    qc.invalidateQueries({ queryKey: queryKeys.requestAttachments(id) });
   }
 }
 
@@ -601,6 +867,12 @@ export function useCreateRequest() {
             direction: "inbound";
             warehouse_id: number;
             quantity: number;
+            priority?: BoxRequest["priority"];
+            requested_date?: string;
+            sla_deadline?: string;
+            destination_contact?: string;
+            internal_location?: string;
+            special_handling_instructions?: string;
           }
         | {
             direction: "return";
@@ -608,6 +880,12 @@ export function useCreateRequest() {
             quantity: number;
             source_inbound_request_id: number;
             box_ids: number[];
+            priority?: BoxRequest["priority"];
+            requested_date?: string;
+            sla_deadline?: string;
+            destination_contact?: string;
+            internal_location?: string;
+            special_handling_instructions?: string;
           },
     ) => (await api.post<BoxRequest>("/requests", input)).data,
     onSuccess: (data) => invalidateRequestQueries(qc, data.id),
@@ -618,7 +896,12 @@ type RequestActionInput =
   | {
       id: number;
       expectedVersion: number;
-      action: "approve" | "start-transit";
+      action:
+        | "approve"
+        | "prepare"
+        | "mark-ready"
+        | "start-transit"
+        | "mark-arrived";
     }
   | {
       id: number;
@@ -635,10 +918,45 @@ type RequestActionInput =
   | {
       id: number;
       expectedVersion: number;
+      action: "hold";
+      body: { reason: string };
+    }
+  | {
+      id: number;
+      expectedVersion: number;
+      action: "resume" | "retry-transport";
+      body: { resolution: string };
+    }
+  | {
+      id: number;
+      expectedVersion: number;
+      action: "reschedule";
+      body: {
+        reason: string;
+        revised_window_start: string;
+        revised_window_end: string;
+      };
+    }
+  | {
+      id: number;
+      expectedVersion: number;
+      action: "report-failed-delivery";
+      body: {
+        reason: string;
+        revised_window_start?: string;
+        revised_window_end?: string;
+      };
+    }
+  | {
+      id: number;
+      expectedVersion: number;
       action: "complete";
       body: {
         inbound_items?: InboundRequestItemInput[];
+        collected_box_ids?: number[];
+        discrepancies?: RequestDiscrepancyInput[];
         discrepancy_reason?: string;
+        idempotency_key: string;
       };
     };
 
@@ -665,6 +983,101 @@ export function useRequestAction() {
   });
 }
 
+export function useUpdateRequestCoordination() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: {
+      id: number;
+      expectedVersion: number;
+      patch: Partial<{
+        priority: BoxRequest["priority"];
+        requested_date: string | null;
+        scheduled_window_start: string | null;
+        scheduled_window_end: string | null;
+        sla_deadline: string | null;
+        assigned_mover_user_id: number | null;
+        destination_contact: string | null;
+        internal_location: string | null;
+        special_handling_instructions: string | null;
+      }>;
+    }) =>
+      (
+        await api.patch<BoxRequest>(`/requests/${input.id}/coordination`, {
+          ...input.patch,
+          expected_version: input.expectedVersion,
+        })
+      ).data,
+    onSuccess: (data) => invalidateRequestQueries(qc, data.id),
+    onError: (_error, input) => invalidateRequestQueries(qc, input.id),
+  });
+}
+
+export function useAddRequestComment() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: {
+      requestId: number;
+      expectedVersion: number;
+      body: string;
+    }) =>
+      (
+        await api.post<RequestComment>(`/requests/${input.requestId}/comments`, {
+          expected_version: input.expectedVersion,
+          body: input.body,
+        })
+      ).data,
+    onSettled: (_data, _error, input) =>
+      invalidateRequestQueries(qc, input.requestId),
+  });
+}
+
+export function useUploadRequestAttachment() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: {
+      requestId: number;
+      expectedVersion: number;
+      file: File;
+    }) => {
+      const form = new FormData();
+      form.append("file", input.file);
+      form.append("expected_version", String(input.expectedVersion));
+      return (
+        await api.post<RequestAttachment>(
+          `/requests/${input.requestId}/attachments`,
+          form,
+          { headers: { "Content-Type": "multipart/form-data" } },
+        )
+      ).data;
+    },
+    onSettled: (_data, _error, input) =>
+      invalidateRequestQueries(qc, input.requestId),
+  });
+}
+
+export function useDownloadRequestAttachment() {
+  return useMutation({
+    mutationFn: async (input: {
+      requestId: number;
+      attachmentId: number;
+      filename: string;
+    }) => {
+      const response = await api.get<Blob>(
+        `/requests/${input.requestId}/attachments/${input.attachmentId}/download`,
+        { responseType: "blob" },
+      );
+      const url = URL.createObjectURL(response.data);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = input.filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    },
+  });
+}
+
 export function useUploadRequestDocument() {
   const qc = useQueryClient();
   return useMutation({
@@ -673,11 +1086,13 @@ export function useUploadRequestDocument() {
       file: File;
       documentType: RequestDocumentType;
       erpReference: string;
+      expectedVersion: number;
     }) => {
       const form = new FormData();
       form.append("file", input.file);
       form.append("document_type", input.documentType);
       form.append("erp_reference", input.erpReference);
+      form.append("expected_version", String(input.expectedVersion));
       return (
         await api.post<RequestDocument>(
           `/requests/${input.requestId}/documents`,
@@ -687,6 +1102,86 @@ export function useUploadRequestDocument() {
       ).data;
     },
     onSuccess: (_data, input) => invalidateRequestQueries(qc, input.requestId),
+    onError: (_error, input) => invalidateRequestQueries(qc, input.requestId),
+  });
+}
+
+export function useSubmitFollowUpDraft() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: {
+      requestId: number;
+      expectedVersion: number;
+      boxIds: number[];
+    }) =>
+      (
+        await api.post<BoxRequest>(`/requests/${input.requestId}/submit-draft`, {
+          expected_version: input.expectedVersion,
+          box_ids: input.boxIds,
+        })
+      ).data,
+    onSuccess: (data) => invalidateRequestQueries(qc, data.id),
+    onError: (_error, input) => invalidateRequestQueries(qc, input.requestId),
+  });
+}
+
+export function useRequestDiscrepancies(id: number | undefined) {
+  return useQuery({
+    queryKey: id ? ["request-discrepancies", id] : ["request-discrepancies", "noop"],
+    queryFn: async () =>
+      (await api.get<RequestDiscrepancy[]>(`/requests/${id}/discrepancies`)).data,
+    enabled: !!id,
+  });
+}
+
+export function useUploadDiscrepancyPhoto() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: {
+      requestId: number;
+      discrepancyId: number;
+      expectedVersion: number;
+      file: File;
+    }) => {
+      const form = new FormData();
+      form.append("file", input.file);
+      form.append("expected_version", String(input.expectedVersion));
+      return (
+        await api.post<RequestDiscrepancyPhoto>(
+          `/requests/${input.requestId}/discrepancies/${input.discrepancyId}/photos`,
+          form,
+          { headers: { "Content-Type": "multipart/form-data" } },
+        )
+      ).data;
+    },
+    onSettled: (_data, _error, input) => {
+      invalidateRequestQueries(qc, input.requestId);
+      qc.invalidateQueries({ queryKey: ["request-discrepancies", input.requestId] });
+    },
+  });
+}
+
+export function useDownloadDiscrepancyPhoto() {
+  return useMutation({
+    mutationFn: async (input: {
+      requestId: number;
+      discrepancyId: number;
+      photoId: number;
+      filename: string;
+    }) => {
+      const response = await api.get<Blob>(
+        `/requests/${input.requestId}/discrepancies/${input.discrepancyId}/photos/${input.photoId}/download`,
+        { responseType: "blob", headers: { "Cache-Control": "no-cache" } },
+      );
+      const url = URL.createObjectURL(response.data);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = input.filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    },
   });
 }
 

@@ -11,6 +11,7 @@ from app.config import get_settings
 from app.db import SessionLocal
 from app.services.alerts import dispatch_safe, evaluate_safe
 from app.services.productivity_dispatch import send_daily_reports_safe
+from app.services.request_notifications import dispatch_request_email_safe
 
 logger = logging.getLogger("warehouse.scheduler")
 
@@ -27,6 +28,14 @@ def _dispatch_tick() -> None:
     db = SessionLocal()
     try:
         dispatch_safe(db)
+    finally:
+        db.close()
+
+
+def _request_dispatch_tick() -> None:
+    db = SessionLocal()
+    try:
+        dispatch_request_email_safe(db)
     finally:
         db.close()
 
@@ -100,6 +109,14 @@ def build_scheduler() -> AsyncIOScheduler:
         trigger="interval",
         seconds=300,
         id="alerts-dispatch-tick",
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        _request_dispatch_tick,
+        trigger="interval",
+        seconds=60,
+        id="request-notifications-dispatch-tick",
         max_instances=1,
         coalesce=True,
     )

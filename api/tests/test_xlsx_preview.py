@@ -52,14 +52,29 @@ def test_requester_can_preview_and_other_users_cannot(
     ).json()["id"]
 
     _as_user(mover)
-    client.post(f"/api/requests/{request_id}/approve", json={})
+    version = client.get(f"/api/requests/{request_id}").json()["version"]
+    client.post(
+        f"/api/requests/{request_id}/approve",
+        json={"expected_version": version},
+    )
     monkeypatch.setattr("app.routers.requests.put_document", lambda **_: None)
+    version = client.get(f"/api/requests/{request_id}").json()["version"]
     client.post(
         f"/api/requests/{request_id}/documents",
-        data={"document_type": "delivery_note", "erp_reference": "DN-XLSX"},
+        data={
+            "document_type": "delivery_note",
+            "erp_reference": "DN-XLSX",
+            "expected_version": str(version),
+        },
         files={"file": ("note.pdf", b"%PDF- preview", "application/pdf")},
     )
-    client.post(f"/api/requests/{request_id}/start-transit", json={})
+    for action in ("prepare", "mark-ready", "start-transit", "mark-arrived"):
+        version = client.get(f"/api/requests/{request_id}").json()["version"]
+        response = client.post(
+            f"/api/requests/{request_id}/{action}",
+            json={"expected_version": version},
+        )
+        assert response.status_code == 200
 
     _as_user(requester)
     response = client.post(

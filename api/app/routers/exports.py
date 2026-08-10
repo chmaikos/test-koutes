@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, timedelta
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import select
 
 from app.deps import CurrentUser, DbSession
@@ -19,8 +19,17 @@ from app.services.exports import (
     boxes_to_xlsx,
     productivity_to_csv,
     productivity_to_xlsx,
+    request_analytics_to_csv,
+    request_analytics_to_xlsx,
+    request_reconciliation_to_csv,
+    request_reconciliation_to_xlsx,
 )
 from app.services.productivity import employee_averages
+from app.services.request_reporting import (
+    RequestReportFilters,
+    build_reconciliation,
+    build_request_analytics,
+)
 
 router = APIRouter(prefix="/exports", tags=["exports"])
 
@@ -32,6 +41,22 @@ def _filename(prefix: str, ext: str) -> str:
 
 def _warehouse_names(db) -> dict[int, str]:
     return dict(db.execute(select(Warehouse.id, Warehouse.name)).all())
+
+
+def _request_filters(
+    warehouse_id: int | None,
+    assigned_mover_user_id: int | None,
+    from_at: datetime | None,
+    to_at: datetime | None,
+) -> RequestReportFilters:
+    if from_at is not None and to_at is not None and to_at <= from_at:
+        raise HTTPException(status_code=400, detail="to_at must be after from_at")
+    return RequestReportFilters(
+        warehouse_id=warehouse_id,
+        assigned_mover_user_id=assigned_mover_user_id,
+        from_at=from_at,
+        to_at=to_at,
+    )
 
 
 def _productivity_report_rows(
@@ -183,6 +208,168 @@ def export_productivity_xlsx(
         headers={
             "Content-Disposition": (
                 f'attachment; filename="{_filename("productivity", "xlsx")}"'
+            )
+        },
+    )
+
+
+def _request_reconciliation_export(
+    db,
+    user,
+    *,
+    warehouse_id: int | None,
+    assigned_mover_user_id: int | None,
+    from_at: datetime | None,
+    to_at: datetime | None,
+    severity: str | None,
+    issue_type: str | None,
+):
+    return build_reconciliation(
+        db,
+        user=user,
+        filters=_request_filters(
+            warehouse_id, assigned_mover_user_id, from_at, to_at
+        ),
+        severity=severity,
+        issue_type=issue_type,
+        page=1,
+        page_size=100_000,
+    )
+
+
+@router.get("/request-reconciliation.csv")
+def export_request_reconciliation_csv(
+    db: DbSession,
+    user: CurrentUser,
+    warehouse_id: int | None = Query(default=None, ge=1),
+    assigned_mover_user_id: int | None = Query(default=None, ge=1),
+    from_at: datetime | None = None,
+    to_at: datetime | None = None,
+    severity: str | None = None,
+    issue_type: str | None = None,
+) -> Response:
+    report = _request_reconciliation_export(
+        db,
+        user,
+        warehouse_id=warehouse_id,
+        assigned_mover_user_id=assigned_mover_user_id,
+        from_at=from_at,
+        to_at=to_at,
+        severity=severity,
+        issue_type=issue_type,
+    )
+    return Response(
+        content=request_reconciliation_to_csv(report.items),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{_filename("request-reconciliation", "csv")}"'
+            )
+        },
+    )
+
+
+@router.get("/request-reconciliation.xlsx")
+def export_request_reconciliation_xlsx(
+    db: DbSession,
+    user: CurrentUser,
+    warehouse_id: int | None = Query(default=None, ge=1),
+    assigned_mover_user_id: int | None = Query(default=None, ge=1),
+    from_at: datetime | None = None,
+    to_at: datetime | None = None,
+    severity: str | None = None,
+    issue_type: str | None = None,
+) -> Response:
+    report = _request_reconciliation_export(
+        db,
+        user,
+        warehouse_id=warehouse_id,
+        assigned_mover_user_id=assigned_mover_user_id,
+        from_at=from_at,
+        to_at=to_at,
+        severity=severity,
+        issue_type=issue_type,
+    )
+    return Response(
+        content=request_reconciliation_to_xlsx(report.items),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{_filename("request-reconciliation", "xlsx")}"'
+            )
+        },
+    )
+
+
+def _analytics_report(
+    db,
+    user,
+    *,
+    warehouse_id: int | None,
+    assigned_mover_user_id: int | None,
+    from_at: datetime | None,
+    to_at: datetime | None,
+):
+    return build_request_analytics(
+        db,
+        user=user,
+        filters=_request_filters(
+            warehouse_id, assigned_mover_user_id, from_at, to_at
+        ),
+    )
+
+
+@router.get("/request-analytics.csv")
+def export_request_analytics_csv(
+    db: DbSession,
+    user: CurrentUser,
+    warehouse_id: int | None = Query(default=None, ge=1),
+    assigned_mover_user_id: int | None = Query(default=None, ge=1),
+    from_at: datetime | None = None,
+    to_at: datetime | None = None,
+) -> Response:
+    report = _analytics_report(
+        db,
+        user,
+        warehouse_id=warehouse_id,
+        assigned_mover_user_id=assigned_mover_user_id,
+        from_at=from_at,
+        to_at=to_at,
+    )
+    return Response(
+        content=request_analytics_to_csv(report),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{_filename("request-analytics", "csv")}"'
+            )
+        },
+    )
+
+
+@router.get("/request-analytics.xlsx")
+def export_request_analytics_xlsx(
+    db: DbSession,
+    user: CurrentUser,
+    warehouse_id: int | None = Query(default=None, ge=1),
+    assigned_mover_user_id: int | None = Query(default=None, ge=1),
+    from_at: datetime | None = None,
+    to_at: datetime | None = None,
+) -> Response:
+    report = _analytics_report(
+        db,
+        user,
+        warehouse_id=warehouse_id,
+        assigned_mover_user_id=assigned_mover_user_id,
+        from_at=from_at,
+        to_at=to_at,
+    )
+    return Response(
+        content=request_analytics_to_xlsx(report),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{_filename("request-analytics", "xlsx")}"'
             )
         },
     )

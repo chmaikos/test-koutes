@@ -22,6 +22,7 @@ import {
 // for that state; admins toggling "Override rules" below get the full
 // status list instead of just this single button.
 const NEXT_STATUS: Record<BoxStatus, BoxStatus[]> = {
+  quarantined: [],
   received: ["processing"],
   processing: ["incomplete"],
   incomplete: ["ready_to_return"],

@@ -76,11 +76,12 @@ class _Eval:
     warehouse: Warehouse
     available: int
     unavailable: int
+    quarantined: int
 
     @property
     def inventory(self) -> int:
         """Total in-warehouse boxes (everything but ``returned``)."""
-        return self.available + self.unavailable
+        return self.available + self.unavailable + self.quarantined
 
 
 def _inventory_per_warehouse(db: Session) -> list[_Eval]:
@@ -101,8 +102,14 @@ def _inventory_per_warehouse(db: Session) -> list[_Eval]:
             else_=0,
         )
     )
+    quarantined_case = func.sum(
+        case(
+            (Box.status == BoxStatus.quarantined, 1),
+            else_=0,
+        )
+    )
     rows = db.execute(
-        select(Warehouse, available_case, unavailable_case)
+        select(Warehouse, available_case, unavailable_case, quarantined_case)
         .join(
             Box,
             and_(
@@ -116,12 +123,13 @@ def _inventory_per_warehouse(db: Session) -> list[_Eval]:
         .order_by(Warehouse.id)
     ).all()
     out: list[_Eval] = []
-    for warehouse, available, unavailable in rows:
+    for warehouse, available, unavailable, quarantined in rows:
         out.append(
             _Eval(
                 warehouse=warehouse,
                 available=int(available or 0),
                 unavailable=int(unavailable or 0),
+                quarantined=int(quarantined or 0),
             )
         )
     return out
@@ -267,13 +275,13 @@ def evaluate_alerts(db: Session) -> list[Alert]:
         # closed-and-done plus emptied-but-not-cleared. That's the
         # backlog actively eating warehouse space waiting for pickup or
         # downstream processing.
-        over = ev.unavailable >= wh.max_capacity
+        over = ev.inventory >= wh.max_capacity
         _reconcile_alert(
             db,
             warehouse_id=wh.id,
             alert_type=AlertType.max_capacity,
             triggered_now=over,
-            value=ev.unavailable,
+            value=ev.inventory,
             threshold=wh.max_capacity,
             now=now,
             triggered_out=triggered,
@@ -290,15 +298,15 @@ def evaluate_alerts(db: Session) -> list[Alert]:
                 1, int(math.ceil(wh.max_capacity * pct / 100))
             )
             near_cap = (
-                ev.unavailable >= near_threshold
-                and ev.unavailable < wh.max_capacity
+                ev.inventory >= near_threshold
+                and ev.inventory < wh.max_capacity
             )
             _reconcile_alert(
                 db,
                 warehouse_id=wh.id,
                 alert_type=AlertType.near_capacity,
                 triggered_now=near_cap,
-                value=ev.unavailable,
+                value=ev.inventory,
                 threshold=near_threshold,
                 now=now,
                 triggered_out=triggered,

@@ -5,14 +5,29 @@ warehouse. Built with **FastAPI**, **React (Vite + TypeScript)**, **Postgres 16*
 **Microsoft Entra ID** (M365 SSO), live updates over **SSE**, CSV/XLSX exports,
 and threshold alerts (in-app + email via Microsoft Graph).
 
+**Documentation:** [Ελληνικός οδηγός (Markdown)](docs/USER_GUIDE_EL.md) ·
+[Ελληνικός οδηγός (PDF)](docs/USER_GUIDE_EL.pdf)
+
 ## Features
 
 - Per-warehouse live dashboard (received today, returned today, in-progress,
   ready-to-return, capacity bar, open alerts).
 - Searchable / filterable boxes table with inline status transitions.
 - Full audit trail per box (timeline of events).
-- Audited inbound box orders and return requests with mover approval, delivery /
-  collection tracking, and final receipt acceptance.
+- Audited inbound box orders and return requests with the explicit lifecycle
+  `submitted → approved → preparing → ready_for_transport → in_transit →
+  awaiting_confirmation → completed`. Direction-specific labels distinguish
+  dispatch/delivery from collection/warehouse confirmation.
+- Structured operational recovery keeps holds, reschedules, and failed
+  transport attempts out of the lifecycle status. Every exception records its
+  reason, revised window, resume target, actor, timestamps, resolution, SLA
+  adjustment, audit event, and notification.
+- Request coordination includes priority, requested/SLA dates, transport
+  windows, mover assignment, destination details, comments, and supporting
+  attachments. Ready and awaiting-confirmation queues support daily operations.
+- Fulfilment discrepancies support typed line records and photos. Partial
+  inbound deliveries create backorders; partial collections release unresolved
+  reservations into non-reserving follow-up drafts.
 - Returns are linked to a completed inbound order. Users select all or any
   subset of that order's unreserved boxes currently marked Ready to Return;
   remaining boxes can be included in later return requests.
@@ -28,6 +43,19 @@ and threshold alerts (in-app + email via Microsoft Graph).
   source rows. Repeated rows for the same lot and box number are merged, with
   distinct contents combined into one physical box record.
 - Versioned ERP delivery and return notes stored privately in local RustFS.
+- Explainable demand recommendations combine minimum stock, outstanding inbound
+  and return work, lead-time demand, weighted 30/90-day history, safety stock,
+  capacity limits, confidence, and administrator adjustments.
+- Saved XLSX mappings can be reused for imports and inbound confirmation.
+- Request reconciliation, lifecycle analytics, and ACL-filtered CSV/XLSX
+  exports cover discrepancies, documents, overrides, exceptions, SLA breaches,
+  preparation, transport, acceptance, and throughput.
+- In-app request notifications, email preferences, durable Graph-email outbox,
+  and SSE refreshes cover lifecycle, coordination, exception, document, and
+  comment events.
+- Configurable staged-receipt governance supports administrator review,
+  two-person thresholds, required documents, quarantine, release/rejection, and
+  audited restoration of archived box identities.
 - Employee productivity tracking with positive daily page entries, per-warehouse
   minimum pages/day settings, single top/bottom performers, and weekly,
   monthly, and rolling 90-day employee averages. Employees below the configured
@@ -428,9 +456,10 @@ admin can disable a user (`is_active = false`) without touching Entra.
 
 Every non-admin role is also restricted by the user's warehouse assignments.
 Any user can submit a request for an assigned warehouse. Movers approve or
-reject requests, attach the corresponding ERP note, and start transport.
-The original requester accepts an inbound delivery; a mover accepts returned
-boxes at the warehouse. Inventory changes only at that final acceptance step.
+reject requests, prepare them, mark them ready, attach the corresponding ERP
+note, start transport, and record arrival. The original requester confirms an
+inbound delivery; a mover confirms returned boxes at the warehouse. Inventory
+changes only at that final confirmation step.
 
 ## ERP delivery and return notes
 
@@ -451,6 +480,49 @@ The Compose stack stores objects in the `rustfs-data` volume and metadata in
 Postgres. Back up **both** `postgres-data` and `rustfs-data` together; restoring
 only one side leaves document metadata or files orphaned. Test a paired restore
 regularly and do not expose RustFS port 9000 outside the trusted network.
+
+ERP connectivity itself is deliberately deferred. Manual ERP references and
+versioned uploads remain the supported integration boundary; see
+[`docs/ERP_INTEGRATION_TODO.md`](docs/ERP_INTEGRATION_TODO.md) for the contract
+and security decisions required before any connector is built.
+
+## Request workflow configuration
+
+Request planning and receipt governance are configured per warehouse in
+**Settings**:
+
+- lead time, safety-stock percentage, 30/90-day history weights, and optional
+  forecast adjustment,
+- receipt mode (`auto_complete` or `admin_review`),
+- required ERP document, quarantine rules for imported/manual receipts, and
+  optional two-person approval threshold.
+
+Users can independently enable or disable request email while retaining in-app
+notifications. Graph delivery uses the existing `ENTRA_*`,
+`ALERT_EMAIL_FROM`, and `PUBLIC_BASE_URL` settings; request mail is persisted in
+an outbox and retried by the scheduler. Object limits and RustFS credentials use
+the existing `DOCUMENT_MAX_BYTES` and `RUSTFS_*` settings.
+
+## Request API
+
+The OpenAPI page at `/api/docs` is authoritative. Key endpoint groups are:
+
+- `GET/POST /api/requests` plus filters for status, priority, assignee, and
+  operational queues,
+- lifecycle actions: `approve`, `prepare`, `mark-ready`, `start-transit`,
+  `mark-arrived`, and `complete`,
+- recovery actions: `hold`, `resume`, `reschedule`,
+  `report-failed-delivery`, and `retry-transport`,
+- coordination, comments, supporting attachments, ERP documents,
+  discrepancies/photos, follow-up submission, events, suggestions, return
+  sources/candidates, reconciliation, and analytics,
+- `/api/notifications`, `/api/xlsx-mapping-templates`, and request report
+  endpoints under `/api/exports`.
+
+Every mutating request action requires `expected_version`; completion also uses
+an idempotency key. Warehouse ACL and role checks are enforced server-side.
+Lifecycle and notification mutations publish SSE events so active clients
+invalidate the relevant request, inventory, and dashboard queries.
 
 ## Development
 

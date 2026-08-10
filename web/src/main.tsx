@@ -29,6 +29,7 @@ import { WarehouseProductivityDetailPage } from "@/pages/WarehouseProductivityDe
 import { SettingsPage } from "@/pages/SettingsPage";
 import { RequestPage } from "@/pages/RequestPage";
 import { RequestDetailPage } from "@/pages/RequestDetailPage";
+import { RequestReconciliationPage } from "@/pages/RequestReconciliationPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -136,6 +137,10 @@ async function bootstrap() {
                     <Route path="boxes" element={<BoxesPage />} />
                     <Route path="boxes/:id" element={<BoxDetailPage />} />
                     <Route path="requests" element={<RequestPage />} />
+                    <Route
+                      path="requests/reconciliation"
+                      element={<RequestReconciliationPage />}
+                    />
                     <Route
                       path="requests/:id"
                       element={<RequestDetailPage />}

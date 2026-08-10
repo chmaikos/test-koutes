@@ -14,5 +14,7 @@ export function mappedImportPayload(
 
 export function importResultTitle(result: ImportResult): string {
   const batchSuffix = result.receipt_request_ids.length === 1 ? "" : "es";
-  return `Import result · ${result.created.length} created · ${result.restored.length} restored · ${result.receipt_request_ids.length} receipt batch${batchSuffix}`;
+  const staged = result.staged_receipt_ids?.length ?? 0;
+  const stagedLabel = staged ? ` · ${staged} staged` : "";
+  return `Import result · ${result.created.length} created · ${result.restored.length} restored${stagedLabel} · ${result.receipt_request_ids.length} receipt batch${batchSuffix}`;
 }

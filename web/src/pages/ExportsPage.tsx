@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { Download } from "lucide-react";
 import { api } from "@/api/client";
-import { useWarehouses } from "@/api/hooks";
-import type { BoxStatus } from "@/api/types";
+import { useRequestAssignees, useWarehouses } from "@/api/hooks";
+import type { BoxStatus, RequestIssueSeverity } from "@/api/types";
 import { ALL_BOX_STATUSES } from "@/api/types";
 import { STATUS_LABEL } from "@/components/StatusBadge";
 
@@ -22,6 +22,20 @@ export function ExportsPage() {
   const [productivityDownloading, setProductivityDownloading] = useState<
     "csv" | "xlsx" | null
   >(null);
+  const [requestWarehouseId, setRequestWarehouseId] = useState<number | "">("");
+  const [requestAssigneeId, setRequestAssigneeId] = useState<number | "">("");
+  const [requestSeverity, setRequestSeverity] = useState<
+    RequestIssueSeverity | ""
+  >("");
+  const [requestIssueType, setRequestIssueType] = useState("");
+  const [requestFrom, setRequestFrom] = useState("");
+  const [requestTo, setRequestTo] = useState("");
+  const [requestDownloading, setRequestDownloading] = useState<string | null>(
+    null,
+  );
+  const requestAssignees = useRequestAssignees(
+    requestWarehouseId || undefined,
+  );
 
   async function download(format: "csv" | "xlsx") {
     setDownloading(format);
@@ -93,6 +107,56 @@ export function ExportsPage() {
       alert(`Export failed${status ? `: status ${status}` : ""}`);
     } finally {
       setProductivityDownloading(null);
+    }
+  }
+
+  async function downloadRequestReport(
+    report: "request-reconciliation" | "request-analytics",
+    format: "csv" | "xlsx",
+  ) {
+    const key = `${report}-${format}`;
+    setRequestDownloading(key);
+    try {
+      const params: Record<string, string> = {};
+      if (requestWarehouseId) {
+        params.warehouse_id = String(requestWarehouseId);
+      }
+      if (requestAssigneeId) {
+        params.assigned_mover_user_id = String(requestAssigneeId);
+      }
+      if (requestFrom) {
+        params.from_at = new Date(`${requestFrom}T00:00:00`).toISOString();
+      }
+      if (requestTo) {
+        const exclusiveEnd = new Date(`${requestTo}T00:00:00`);
+        exclusiveEnd.setDate(exclusiveEnd.getDate() + 1);
+        params.to_at = exclusiveEnd.toISOString();
+      }
+      if (report === "request-reconciliation" && requestSeverity) {
+        params.severity = requestSeverity;
+      }
+      if (report === "request-reconciliation" && requestIssueType) {
+        params.issue_type = requestIssueType;
+      }
+      const response = await api.get<Blob>(`/exports/${report}.${format}`, {
+        params,
+        responseType: "blob",
+      });
+      const url = URL.createObjectURL(response.data);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      anchor.download = `${report}-${stamp}.${format}`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch (err) {
+      console.error("[request-export] failed", err);
+      const status = (err as { response?: { status?: number } }).response?.status;
+      alert(`Export failed${status ? `: status ${status}` : ""}`);
+    } finally {
+      setRequestDownloading(null);
     }
   }
 
@@ -185,6 +249,156 @@ export function ExportsPage() {
           <Download className="h-4 w-4" />
           {downloading === "xlsx" ? "Preparing..." : "Download XLSX"}
         </button>
+        </div>
+      </section>
+
+      <section className="card card-pad space-y-4">
+        <div>
+          <h2 className="font-semibold">Request reconciliation and analytics</h2>
+          <p className="text-xs text-slate-500">
+            Export the same ACL-scoped issues and metrics shown on the
+            reconciliation dashboard.
+          </p>
+        </div>
+        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-6">
+          <label className="block">
+            <span className="text-xs text-slate-500">Warehouse</span>
+            <select
+              className="input"
+              value={requestWarehouseId}
+              onChange={(event) => {
+                setRequestWarehouseId(
+                  event.target.value ? Number(event.target.value) : "",
+                );
+                setRequestAssigneeId("");
+              }}
+            >
+              <option value="">All accessible</option>
+              {warehouses.data?.map((warehouse) => (
+                <option key={warehouse.id} value={warehouse.id}>
+                  {warehouse.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="block">
+            <span className="text-xs text-slate-500">
+              Reconciliation issue
+            </span>
+            <select
+              className="input"
+              value={requestIssueType}
+              onChange={(event) => setRequestIssueType(event.target.value)}
+            >
+              <option value="">All</option>
+              {[
+                "shortage",
+                "excess",
+                "typed_discrepancy",
+                "open_follow_up",
+                "missing_erp_document",
+                "superseded_erp_document",
+                "admin_override",
+                "cancelled_reservation",
+                "awaiting_confirmation",
+                "operational_exception",
+                "sla_breach",
+                "review_pending_self_receipt",
+              ].map((value) => (
+                <option key={value} value={value}>
+                  {value.replaceAll("_", " ")}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="block">
+            <span className="text-xs text-slate-500">Assignee</span>
+            <select
+              className="input"
+              value={requestAssigneeId}
+              disabled={!requestWarehouseId}
+              onChange={(event) =>
+                setRequestAssigneeId(
+                  event.target.value ? Number(event.target.value) : "",
+                )
+              }
+            >
+              <option value="">
+                {requestWarehouseId
+                  ? "All assignees"
+                  : "Choose warehouse first"}
+              </option>
+              {requestAssignees.data?.map((assignee) => (
+                <option key={assignee.id} value={assignee.id}>
+                  {assignee.display_name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="block">
+            <span className="text-xs text-slate-500">
+              Reconciliation severity
+            </span>
+            <select
+              className="input"
+              value={requestSeverity}
+              onChange={(event) =>
+                setRequestSeverity(
+                  event.target.value as RequestIssueSeverity | "",
+                )
+              }
+            >
+              <option value="">All</option>
+              <option value="critical">Critical</option>
+              <option value="high">High</option>
+              <option value="medium">Medium</option>
+              <option value="low">Low</option>
+            </select>
+          </label>
+          <label className="block">
+            <span className="text-xs text-slate-500">From</span>
+            <input
+              type="date"
+              className="input"
+              value={requestFrom}
+              onChange={(event) => setRequestFrom(event.target.value)}
+            />
+          </label>
+          <label className="block">
+            <span className="text-xs text-slate-500">Through</span>
+            <input
+              type="date"
+              className="input"
+              value={requestTo}
+              onChange={(event) => setRequestTo(event.target.value)}
+            />
+          </label>
+        </div>
+        <div className="flex flex-wrap gap-3">
+          {(
+            [
+              ["request-reconciliation", "csv", "Reconciliation CSV"],
+              ["request-reconciliation", "xlsx", "Reconciliation XLSX"],
+              ["request-analytics", "csv", "Analytics CSV"],
+              ["request-analytics", "xlsx", "Analytics XLSX"],
+            ] as const
+          ).map(([report, format, label]) => {
+            const key = `${report}-${format}`;
+            return (
+              <button
+                key={key}
+                type="button"
+                className={
+                  format === "csv" ? "btn-primary" : "btn-secondary"
+                }
+                disabled={requestDownloading !== null}
+                onClick={() => downloadRequestReport(report, format)}
+              >
+                <Download className="h-4 w-4" />
+                {requestDownloading === key ? "Preparing..." : label}
+              </button>
+            );
+          })}
         </div>
       </section>
 

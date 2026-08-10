@@ -1,9 +1,4 @@
-"""Send mail via Microsoft Graph using the client-credentials flow.
-
-We do not run this on the request path; alerts call us from a background task
-or the scheduler. Failures are logged and swallowed so the alert row is still
-persisted regardless.
-"""
+"""Generic Microsoft Graph email transport using client credentials."""
 from __future__ import annotations
 
 import logging
@@ -41,26 +36,18 @@ def _acquire_token() -> str | None:
     return result["access_token"]
 
 
-def send_alert_email(
+def send_email(
     *,
     subject: str,
     html_body: str,
-    to: list[str] | None = None,
+    to: list[str],
+    text_body: str | None = None,
 ) -> tuple[bool, str | None]:
-    """Send a single alert email through Graph.
-
-    ``to`` is the explicit recipient list; if omitted we fall back to the
-    static ``ALERT_EMAIL_TO`` for backwards compatibility with any caller
-    that hasn't been updated to use :mod:`app.services.alert_recipients`.
-
-    Returns ``(ok, error)`` so the caller can log a structured reason in
-    the alert_notifications audit table; ``error`` is ``None`` on success.
-    """
+    """Send one message and return a structured transport result."""
     settings = get_settings()
     if not settings.graph_configured:
         return False, "graph not configured"
-    recipients = to if to is not None else settings.alert_email_to_list
-    if not recipients:
+    if not to:
         return False, "no recipients"
     token = _acquire_token()
     if token is None:
@@ -71,11 +58,15 @@ def send_alert_email(
             "subject": subject,
             "body": {"contentType": "HTML", "content": html_body},
             "toRecipients": [
-                {"emailAddress": {"address": addr}} for addr in recipients
+                {"emailAddress": {"address": addr}} for addr in to
             ],
         },
         "saveToSentItems": False,
     }
+    # Graph's sendMail endpoint accepts one body. ``text_body`` remains part
+    # of the generic transport contract for audit/alternate transports; Graph
+    # receives the HTML version.
+    _ = text_body
     try:
         with httpx.Client(timeout=15.0) as client:
             resp = client.post(
@@ -92,3 +83,18 @@ def send_alert_email(
         error = f"http error: {exc}"
         logger.warning("graph sendMail error: %s", exc)
         return False, error
+
+
+def send_alert_email(
+    *,
+    subject: str,
+    html_body: str,
+    to: list[str] | None = None,
+) -> tuple[bool, str | None]:
+    """Compatibility wrapper for alert and productivity callers."""
+    settings = get_settings()
+    recipients = to if to is not None else settings.alert_email_to_list
+    return send_email(subject=subject, html_body=html_body, to=recipients)
+
+
+__all__ = ["send_alert_email", "send_email"]

@@ -213,6 +213,7 @@ def summary(db: DbSession, user: CurrentUser) -> DashboardSummary:
         full = {s: int(status_counts.get(s, 0)) for s in BoxStatus}
         available = sum(full[s] for s in AVAILABLE_STATUSES)
         unavailable = sum(full[s] for s in UNAVAILABLE_STATUSES)
+        quarantined = full[BoxStatus.quarantined]
         inventory = sum(full[s] for s in ACTIVE_STATUSES)
         ready_to_return = full[BoxStatus.ready_to_return]
         completed = completed_today.get(wh.id, 0)
@@ -234,6 +235,7 @@ def summary(db: DbSession, user: CurrentUser) -> DashboardSummary:
                 inventory=inventory,
                 available_boxes=available,
                 unavailable_boxes=unavailable,
+                quarantined_boxes=quarantined,
                 ready_to_return_boxes=ready_to_return,
                 received_today=received_today.get(wh.id, 0),
                 returned_today=returned_today.get(wh.id, 0),

@@ -3,6 +3,7 @@ import { Link, useSearchParams } from "react-router-dom";
 import {
   ArrowDownToLine,
   ArrowUpFromLine,
+  BarChart3,
   ChevronLeft,
   ChevronRight,
   Plus,
@@ -21,6 +22,10 @@ import type {
   BoxRequest,
   RequestDirection,
   RequestFilters,
+  RequestPriority,
+  RequestQueue,
+  RequestSuggestion,
+  RequestSortField,
   RequestStatus,
 } from "@/api/types";
 import {
@@ -38,12 +43,33 @@ import {
 const PAGE_SIZE = 25;
 const DIRECTIONS: RequestDirection[] = ["inbound", "return"];
 const STATUSES: RequestStatus[] = [
+  "draft",
   "submitted",
   "approved",
+  "preparing",
+  "ready_for_transport",
   "in_transit",
+  "awaiting_confirmation",
   "completed",
   "rejected",
   "cancelled",
+];
+const PRIORITIES: RequestPriority[] = ["low", "normal", "high", "urgent"];
+const QUEUES: { value: RequestQueue; label: string }[] = [
+  { value: "unassigned", label: "Unassigned" },
+  { value: "due_today", label: "Due today" },
+  { value: "overdue", label: "Overdue" },
+  { value: "ready_for_transport", label: "Ready for transport" },
+  { value: "awaiting_confirmation", label: "Awaiting confirmation" },
+  { value: "pending_receipt_review", label: "Pending receipt review" },
+];
+const SORT_FIELDS: { value: RequestSortField; label: string }[] = [
+  { value: "created_at", label: "Created" },
+  { value: "updated_at", label: "Updated" },
+  { value: "priority", label: "Priority" },
+  { value: "sla_deadline", label: "SLA deadline" },
+  { value: "scheduled_window_start", label: "Transport window" },
+  { value: "assignment", label: "Assignment" },
 ];
 
 function isDirection(value: string | null): value is RequestDirection {
@@ -54,18 +80,34 @@ function isStatus(value: string | null): value is RequestStatus {
   return STATUSES.includes(value as RequestStatus);
 }
 
+function isPriority(value: string | null): value is RequestPriority {
+  return PRIORITIES.includes(value as RequestPriority);
+}
+
+function isQueue(value: string | null): value is RequestQueue {
+  return QUEUES.some((queue) => queue.value === value);
+}
+
+function isSort(value: string | null): value is RequestSortField {
+  return SORT_FIELDS.some((field) => field.value === value);
+}
+
 export function RequestPage() {
   const [params, setParams] = useSearchParams();
   const warehouses = useWarehouses(true);
   const me = useMe();
   const canCreate = !!me.data;
-  const isMover = me.data?.role === "warehouse_mover";
+  const isMover =
+    me.data?.role === "warehouse_mover" || me.data?.role === "admin";
   const [showCreate, setShowCreate] = useState(false);
 
   const filters = useMemo<RequestFilters>(() => {
     const warehouseId = Number(params.get("warehouse_id"));
     const direction = params.get("direction");
     const status = params.get("status");
+    const priority = params.get("priority");
+    const queue = params.get("queue");
+    const sortBy = params.get("sort_by");
     return {
       warehouse_id:
         Number.isInteger(warehouseId) && warehouseId > 0
@@ -73,6 +115,11 @@ export function RequestPage() {
           : undefined,
       direction: isDirection(direction) ? direction : undefined,
       status: isStatus(status) ? status : undefined,
+      priority: isPriority(priority) ? priority : undefined,
+      queue: isQueue(queue) ? queue : undefined,
+      search: params.get("search") || undefined,
+      sort_by: isSort(sortBy) ? sortBy : "created_at",
+      sort_dir: params.get("sort_dir") === "asc" ? "asc" : "desc",
     };
   }, [params]);
   const rawPage = Number(params.get("page"));
@@ -107,19 +154,24 @@ export function RequestPage() {
           </h1>
           <p className="text-sm text-slate-500">
             {isMover
-              ? "Dispatch approved requests and complete deliveries or returns."
+              ? "Prepare, dispatch, recover, and confirm deliveries or returns."
               : "Order boxes into a warehouse or arrange eligible box returns."}
           </p>
         </div>
-        {canCreate && (
-          <button
-            type="button"
-            className="btn-primary"
-            onClick={() => setShowCreate(true)}
-          >
-            <Plus className="h-4 w-4" /> New request
-          </button>
-        )}
+        <div className="flex flex-wrap gap-2">
+          <Link className="btn-secondary" to="/requests/reconciliation">
+            <BarChart3 className="h-4 w-4" /> Reconciliation
+          </Link>
+          {canCreate && (
+            <button
+              type="button"
+              className="btn-primary"
+              onClick={() => setShowCreate(true)}
+            >
+              <Plus className="h-4 w-4" /> New request
+            </button>
+          )}
+        </div>
       </header>
 
       {isMover && (
@@ -143,15 +195,47 @@ export function RequestPage() {
             <button
               type="button"
               className="btn-secondary"
-              onClick={() => setParam("status", "in_transit")}
+              onClick={() => setParam("status", "awaiting_confirmation")}
             >
-              In transit
+              Awaiting confirmation
             </button>
           </div>
         </section>
       )}
 
-      <section className="card card-pad grid gap-3 sm:grid-cols-3">
+      <div className="flex flex-wrap gap-2" aria-label="Request queues">
+        {QUEUES.map((queue) => (
+          <button
+            key={queue.value}
+            type="button"
+            className={
+              filters.queue === queue.value ? "btn-primary" : "btn-secondary"
+            }
+            onClick={() =>
+              setParam(
+                "queue",
+                filters.queue === queue.value ? undefined : queue.value,
+              )
+            }
+          >
+            {queue.label}
+          </button>
+        ))}
+      </div>
+
+      <section className="card card-pad grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
+        <label className="block sm:col-span-2">
+          <span className="text-xs text-slate-500">Search</span>
+          <input
+            className="input"
+            type="search"
+            value={filters.search ?? ""}
+            placeholder="Request, person, contact, location…"
+            onChange={(event) =>
+              setParam("search", event.target.value || undefined)
+            }
+          />
+        </label>
         <label className="block">
           <span className="text-xs text-slate-500">Warehouse</span>
           <select
@@ -203,6 +287,48 @@ export function RequestPage() {
             ))}
           </select>
         </label>
+        <label className="block">
+          <span className="text-xs text-slate-500">Priority</span>
+          <select
+            className="input"
+            value={filters.priority ?? ""}
+            onChange={(event) =>
+              setParam("priority", event.target.value || undefined)
+            }
+          >
+            <option value="">All priorities</option>
+            {PRIORITIES.map((priority) => (
+              <option key={priority} value={priority}>
+                {priority[0].toUpperCase() + priority.slice(1)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="block">
+          <span className="text-xs text-slate-500">Sort</span>
+          <select
+            className="input"
+            value={filters.sort_by}
+            onChange={(event) => setParam("sort_by", event.target.value)}
+          >
+            {SORT_FIELDS.map((field) => (
+              <option key={field.value} value={field.value}>
+                {field.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="block">
+          <span className="text-xs text-slate-500">Sort direction</span>
+          <select
+            className="input"
+            value={filters.sort_dir}
+            onChange={(event) => setParam("sort_dir", event.target.value)}
+          >
+            <option value="desc">Descending</option>
+            <option value="asc">Ascending</option>
+          </select>
+        </label>
       </section>
 
       <section className="card overflow-hidden">
@@ -214,22 +340,23 @@ export function RequestPage() {
                 <th className="px-4 py-2.5">Warehouse</th>
                 <th className="px-4 py-2.5">Direction</th>
                 <th className="px-4 py-2.5 text-right">Quantity</th>
-                <th className="px-4 py-2.5">Requester</th>
+                <th className="px-4 py-2.5">Priority</th>
+                <th className="px-4 py-2.5">Assigned</th>
+                <th className="px-4 py-2.5">Transport</th>
                 <th className="px-4 py-2.5">Status</th>
-                <th className="px-4 py-2.5">Updated</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {requests.isLoading && (
                 <tr>
-                  <td colSpan={7} className="px-4 py-8 text-center text-slate-400">
+                  <td colSpan={8} className="px-4 py-8 text-center text-slate-400">
                     Loading…
                   </td>
                 </tr>
               )}
               {!requests.isLoading && requests.data?.items.length === 0 && (
                 <tr>
-                  <td colSpan={7} className="px-4 py-8 text-center text-slate-400">
+                  <td colSpan={8} className="px-4 py-8 text-center text-slate-400">
                     No requests match these filters.
                   </td>
                 </tr>
@@ -332,15 +459,22 @@ function RequestRow({
         </span>
       </td>
       <td className="px-4 py-3 text-right tabular-nums">{request.quantity}</td>
-      <td className="px-4 py-3">{request.requester_name ?? "—"}</td>
+      <td className="px-4 py-3">
+        <PriorityBadge priority={request.priority} />
+      </td>
+      <td className="px-4 py-3">
+        {request.assigned_mover_name ?? (
+          <span className="text-amber-700">Unassigned</span>
+        )}
+      </td>
+      <td className="whitespace-nowrap px-4 py-3 text-xs text-slate-600">
+        {formatTransportWindow(request)}
+      </td>
       <td className="px-4 py-3">
         <RequestStatusBadge
           status={request.status}
           direction={request.direction}
         />
-      </td>
-      <td className="whitespace-nowrap px-4 py-3 text-slate-500">
-        {new Date(request.updated_at).toLocaleString()}
       </td>
     </tr>
   );
@@ -372,10 +506,35 @@ function RequestCard({
       </div>
       <div className="mt-2 flex items-center justify-between text-xs text-slate-500">
         <span>{warehouseName}</span>
-        <span>{new Date(request.updated_at).toLocaleString()}</span>
+        <PriorityBadge priority={request.priority} />
+      </div>
+      <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-slate-500">
+        <span>{request.assigned_mover_name ?? "Unassigned"}</span>
+        <span className="text-right">{formatTransportWindow(request)}</span>
       </div>
     </Link>
   );
+}
+
+function PriorityBadge({ priority }: { priority: RequestPriority }) {
+  const classes = {
+    low: "bg-slate-100 text-slate-600",
+    normal: "bg-blue-50 text-blue-700",
+    high: "bg-amber-100 text-amber-800",
+    urgent: "bg-rose-100 text-rose-800",
+  }[priority];
+  return (
+    <span className={`badge ${classes}`}>
+      {priority[0].toUpperCase() + priority.slice(1)}
+    </span>
+  );
+}
+
+function formatTransportWindow(request: BoxRequest) {
+  if (!request.scheduled_window_start) return "Not scheduled";
+  const start = new Date(request.scheduled_window_start).toLocaleString();
+  if (!request.scheduled_window_end) return start;
+  return `${start} – ${new Date(request.scheduled_window_end).toLocaleTimeString()}`;
 }
 
 function CreateRequestDialog({ onClose }: { onClose: () => void }) {
@@ -384,6 +543,12 @@ function CreateRequestDialog({ onClose }: { onClose: () => void }) {
   const [direction, setDirection] = useState<RequestDirection>("inbound");
   const [warehouseId, setWarehouseId] = useState<number | undefined>();
   const [quantity, setQuantity] = useState(1);
+  const [priority, setPriority] = useState<RequestPriority>("normal");
+  const [requestedDate, setRequestedDate] = useState("");
+  const [slaDeadline, setSlaDeadline] = useState("");
+  const [destinationContact, setDestinationContact] = useState("");
+  const [internalLocation, setInternalLocation] = useState("");
+  const [specialInstructions, setSpecialInstructions] = useState("");
   const [quantityTouched, setQuantityTouched] = useState(false);
   const [sourceInboundRequestId, setSourceInboundRequestId] = useState<
     number | undefined
@@ -472,12 +637,30 @@ function CreateRequestDialog({ onClose }: { onClose: () => void }) {
                   quantity: selectedBoxIds.length,
                   source_inbound_request_id: sourceInboundRequestId!,
                   box_ids: selectedBoxIds,
+                  priority,
+                  requested_date: requestedDate || undefined,
+                  sla_deadline: slaDeadline
+                    ? new Date(slaDeadline).toISOString()
+                    : undefined,
+                  destination_contact: destinationContact || undefined,
+                  internal_location: internalLocation || undefined,
+                  special_handling_instructions:
+                    specialInstructions || undefined,
                 });
               } else {
                 await create.mutateAsync({
                   direction,
                   warehouse_id: warehouseId,
                   quantity,
+                  priority,
+                  requested_date: requestedDate || undefined,
+                  sla_deadline: slaDeadline
+                    ? new Date(slaDeadline).toISOString()
+                    : undefined,
+                  destination_contact: destinationContact || undefined,
+                  internal_location: internalLocation || undefined,
+                  special_handling_instructions:
+                    specialInstructions || undefined,
                 });
               }
               onClose();
@@ -537,30 +720,106 @@ function CreateRequestDialog({ onClose }: { onClose: () => void }) {
             </select>
           </label>
 
-          {warehouseId && direction === "inbound" && (
-            <SuggestionPanel
-              loading={suggestion.isLoading}
-              direction={direction}
-              suggestion={suggestion.data}
-            />
-          )}
-
-          {direction === "inbound" ? (
+          <div className="grid gap-3 sm:grid-cols-3">
             <label className="block">
-              <span className="text-xs text-slate-500">Quantity</span>
-              <input
-                required
+              <span className="text-xs text-slate-500">Priority</span>
+              <select
                 className="input"
-                type="number"
-                min={1}
-                max={5000}
-                value={quantity}
-                onChange={(event) => {
-                  setQuantityTouched(true);
-                  setQuantity(Number(event.target.value));
-                }}
+                value={priority}
+                onChange={(event) =>
+                  setPriority(event.target.value as RequestPriority)
+                }
+              >
+                {PRIORITIES.map((value) => (
+                  <option key={value} value={value}>
+                    {value[0].toUpperCase() + value.slice(1)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="block">
+              <span className="text-xs text-slate-500">Requested date</span>
+              <input
+                className="input"
+                type="date"
+                value={requestedDate}
+                onChange={(event) => setRequestedDate(event.target.value)}
               />
             </label>
+            <label className="block">
+              <span className="text-xs text-slate-500">SLA deadline</span>
+              <input
+                className="input"
+                type="datetime-local"
+                value={slaDeadline}
+                onChange={(event) => setSlaDeadline(event.target.value)}
+              />
+            </label>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="block">
+              <span className="text-xs text-slate-500">Destination contact</span>
+              <input
+                className="input"
+                value={destinationContact}
+                maxLength={320}
+                onChange={(event) => setDestinationContact(event.target.value)}
+              />
+            </label>
+            <label className="block">
+              <span className="text-xs text-slate-500">Internal location</span>
+              <input
+                className="input"
+                value={internalLocation}
+                maxLength={320}
+                placeholder="Building, floor, room"
+                onChange={(event) => setInternalLocation(event.target.value)}
+              />
+            </label>
+          </div>
+          <label className="block">
+            <span className="text-xs text-slate-500">
+              Special handling instructions
+            </span>
+            <textarea
+              className="input min-h-20"
+              value={specialInstructions}
+              maxLength={5000}
+              onChange={(event) => setSpecialInstructions(event.target.value)}
+            />
+          </label>
+
+          {direction === "inbound" ? (
+            <div className="grid items-start gap-3 lg:grid-cols-[minmax(0,1fr)_12rem]">
+              {warehouseId ? (
+                <SuggestionPanel
+                  loading={suggestion.isLoading}
+                  suggestion={suggestion.data}
+                />
+              ) : (
+                <div />
+              )}
+              <label className="block rounded-lg border border-slate-200 p-3">
+                <span className="text-xs font-medium text-slate-700">
+                  Requested quantity
+                </span>
+                <input
+                  required
+                  className="input mt-1"
+                  type="number"
+                  min={1}
+                  max={5000}
+                  value={quantity}
+                  onChange={(event) => {
+                    setQuantityTouched(true);
+                    setQuantity(Number(event.target.value));
+                  }}
+                />
+                <span className="mt-1 block text-xs text-slate-500">
+                  Editable. The recommendation is guidance, not a mandatory value.
+                </span>
+              </label>
+            </div>
           ) : (
             warehouseId && (
               <section className="space-y-3">
@@ -742,19 +1001,11 @@ function CreateRequestDialog({ onClose }: { onClose: () => void }) {
 
 function SuggestionPanel({
   loading,
-  direction,
   suggestion,
 }: {
   loading: boolean;
-  direction: RequestDirection;
   suggestion:
-    | {
-        current_available: number;
-        min_inventory: number;
-        pending_inbound: number;
-        suggested_quantity: number;
-        eligible_return: number;
-      }
+    | RequestSuggestion
     | undefined;
 }) {
   if (loading) {
@@ -768,20 +1019,61 @@ function SuggestionPanel({
   return (
     <section className="rounded-lg border border-brand-100 bg-brand-50/60 p-3">
       <div className="flex items-baseline justify-between gap-3">
-        <h3 className="text-sm font-medium text-brand-900">Recommendation</h3>
+        <div>
+          <h3 className="text-sm font-medium text-brand-900">Recommendation</h3>
+          <span className="text-xs capitalize text-brand-700">
+            {suggestion.confidence.replace("_", " ")} confidence
+            {suggestion.fallback_used ? " · minimum-gap fallback" : ""}
+          </span>
+        </div>
         <strong className="text-lg tabular-nums text-brand-800">
           {suggestion.suggested_quantity} boxes
         </strong>
       </div>
       <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-xs sm:grid-cols-4">
         <SuggestionValue label="Available" value={suggestion.current_available} />
-        <SuggestionValue label="Minimum" value={suggestion.min_inventory} />
+        <SuggestionValue label="Baseline gap" value={suggestion.baseline_gap} />
         <SuggestionValue label="Pending inbound" value={suggestion.pending_inbound} />
+        <SuggestionValue label="Backorders" value={suggestion.pending_backorder} />
         <SuggestionValue
-          label={direction === "return" ? "Eligible to return" : "Return eligible"}
-          value={suggestion.eligible_return}
+          label="Lead-time demand"
+          value={suggestion.lead_time_demand}
         />
+        <SuggestionValue label="Safety stock" value={suggestion.safety_stock_quantity} />
+        <SuggestionValue label="Adjustment" value={suggestion.adjustment_quantity} />
+        <SuggestionValue label="Target inventory" value={suggestion.target_inventory} />
+        <SuggestionValue label="Capacity limit" value={suggestion.capacity_limit} />
       </dl>
+      <p className="mt-2 text-xs leading-5 text-slate-600">
+        {suggestion.explanation}
+      </p>
+      {suggestion.fallback_reason && (
+        <p className="mt-1 text-xs text-slate-500">
+          Fallback reason: {suggestion.fallback_reason}
+        </p>
+      )}
+      {suggestion.sample_size > 0 && (
+        <p className="mt-1 text-xs text-slate-500">
+          Observed {suggestion.history_30_quantity} qualifying transitions in 30
+          days and {suggestion.history_90_quantity} in 90 days across{" "}
+          {suggestion.history_days} history days. Weighted rate{" "}
+          {suggestion.weighted_daily_rate.toFixed(2)} boxes/day using{" "}
+          {Math.round(suggestion.normalized_30_weight * 100)}/
+          {Math.round(suggestion.normalized_90_weight * 100)} weighting.
+        </p>
+      )}
+      {(suggestion.scheduled_inbound > 0 ||
+        suggestion.scheduled_return > 0) && (
+        <p className="mt-1 text-xs text-slate-500">
+          Within lead time: {suggestion.scheduled_inbound} inbound and{" "}
+          {suggestion.scheduled_return} scheduled returns.
+        </p>
+      )}
+      {suggestion.capacity_cap_applied && (
+        <p className="mt-1 text-xs font-medium text-amber-700">
+          The recommendation was reduced to stay within projected capacity.
+        </p>
+      )}
     </section>
   );
 }

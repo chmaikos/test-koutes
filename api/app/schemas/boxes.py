@@ -71,6 +71,9 @@ class BoxEventOut(BaseModel):
     occurred_at: datetime
     user_id: int | None
     note: str | None
+    metadata: dict[str, object] = Field(
+        default_factory=dict, validation_alias="event_metadata"
+    )
 
 
 # --- bulk + import -----------------------------------------------------------
@@ -143,3 +146,21 @@ class ImportResult(BaseModel):
     restored: list[BoxOut] = Field(default_factory=list)
     skipped: list[ImportSkip]
     receipt_request_ids: list[int] = Field(default_factory=list)
+    staged_receipt_ids: list[int] = Field(default_factory=list)
+
+
+class StagedReceiptResult(BaseModel):
+    outcome: str = "staged"
+    staged_receipt_id: int
+
+
+class QuarantineBulkAction(BaseModel):
+    box_ids: list[int] = Field(min_length=1, max_length=500)
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+class QuarantineBulkResult(BaseModel):
+    updated: list[BoxOut] = Field(default_factory=list)
+    archived_ids: list[int] = Field(default_factory=list)
+    skipped: list[BulkSkip] = Field(default_factory=list)
+    request_ids: list[int] = Field(default_factory=list)

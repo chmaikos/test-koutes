@@ -80,7 +80,11 @@ export default defineConfig({
             urlPattern: ({ url }) =>
               /\/api\/requests\/\d+\/documents\/\d+\/download$/.test(
                 url.pathname,
-              ) || url.pathname.startsWith("/api/exports/"),
+              ) ||
+              /\/api\/requests\/\d+\/attachments\/\d+\/download$/.test(
+                url.pathname,
+              ) ||
+              url.pathname.startsWith("/api/exports/"),
             handler: "NetworkOnly",
           },
           {

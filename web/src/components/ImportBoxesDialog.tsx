@@ -3,7 +3,7 @@ import { Upload } from "lucide-react";
 import { useImportMappedBoxes, useWarehouses } from "@/api/hooks";
 import type { ImportResult, InboundRequestItemInput } from "@/api/types";
 import { mappedImportPayload } from "@/pages/importResults";
-import { ExcelRowMapper } from "@/pages/RequestDetailPage";
+import { ExcelRowMapper } from "@/components/ExcelRowMapper";
 
 export function ImportBoxesDialog({
   onClose,
@@ -98,12 +98,22 @@ export function ImportBoxesDialog({
             </span>
           </label>
 
-          <ExcelRowMapper
-            onApply={(rows) => {
-              setMappedRows(rows);
-              setError(null);
-            }}
-          />
+          {warehouseId === "" ? (
+            <p className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600">
+              Choose the destination warehouse to load private and
+              warehouse-shared mapping templates.
+            </p>
+          ) : (
+            <ExcelRowMapper
+              key={warehouseId}
+              useCase="box_import"
+              warehouseId={warehouseId}
+              onApply={(rows) => {
+                setMappedRows(rows);
+                setError(null);
+              }}
+            />
+          )}
 
           {mappedRows.length > 0 && (
             <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3">

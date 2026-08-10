@@ -1,0 +1,11 @@
+{{ headline }}
+
+Request #{{ request_id }} · {{ warehouse_name }}
+{{ message }}
+
+Status: {{ status }}
+Priority: {{ priority }}
+Assigned: {{ assigned_to }}
+{% if deep_link %}
+Open request: {{ deep_link }}
+{% endif %}

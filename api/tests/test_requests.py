@@ -28,6 +28,36 @@ def _as_user(app: FastAPI, user) -> None:
     app.dependency_overrides[get_current_user] = lambda: user
 
 
+def _version(client, request_id: int) -> int:
+    return client.get(f"/api/requests/{request_id}").json()["version"]
+
+
+def _action(client, request_id: int, action: str, **payload):
+    if action == "start-transit":
+        current_status = client.get(f"/api/requests/{request_id}").json()["status"]
+        if current_status == "approved":
+            prepared = _action(client, request_id, "prepare")
+            assert prepared.status_code == 200
+            ready = _action(client, request_id, "mark-ready")
+            assert ready.status_code == 200
+    if action == "complete":
+        current_status = client.get(f"/api/requests/{request_id}").json()["status"]
+        if current_status == "in_transit":
+            arrived = _action(client, request_id, "mark-arrived")
+            assert arrived.status_code == 200
+    payload["expected_version"] = _version(client, request_id)
+    if action == "complete":
+        payload.setdefault("idempotency_key", f"test-completion-{request_id}")
+    return client.post(f"/api/requests/{request_id}/{action}", json=payload)
+
+
+def _document_data(client, request_id: int, **data):
+    return {
+        **data,
+        "expected_version": str(_version(client, request_id)),
+    }
+
+
 def _box(session: Session, user, number: str, status: BoxStatus = BoxStatus.received) -> Box:
     box = create_box(
         session,
@@ -57,20 +87,26 @@ def _start_inbound_delivery(
         json={"direction": "inbound", "warehouse_id": 1, "quantity": quantity},
     ).json()["id"]
     _as_user(app, mover)
-    assert client.post(f"/api/requests/{request_id}/approve", json={}).status_code == 200
+    assert _action(client, request_id, "approve").status_code == 200
     monkeypatch.setattr("app.routers.requests.put_document", lambda **_: None)
     assert (
         client.post(
             f"/api/requests/{request_id}/documents",
-            data={"document_type": "delivery_note", "erp_reference": f"DN-{request_id}"},
+            data=_document_data(
+                client,
+                request_id,
+                document_type="delivery_note",
+                erp_reference=f"DN-{request_id}",
+            ),
             files={"file": ("note.pdf", b"%PDF-1.7 test", "application/pdf")},
         ).status_code
         == 201
     )
     assert (
-        client.post(f"/api/requests/{request_id}/start-transit", json={}).status_code
+        _action(client, request_id, "start-transit").status_code
         == 200
     )
+    assert _action(client, request_id, "mark-arrived").status_code == 200
     _as_user(app, requester)
     return request_id
 
@@ -88,14 +124,14 @@ def _complete_inbound_order(
     request_id = _start_inbound_delivery(
         client, requester, mover, monkeypatch, quantity=quantity
     )
-    completed = client.post(
-        f"/api/requests/{request_id}/complete",
-        json={
-            "inbound_items": [
-                {"lot": lot, "box_number": str(index)}
-                for index in range(1, quantity + 1)
-            ]
-        },
+    completed = _action(
+        client,
+        request_id,
+        "complete",
+        inbound_items=[
+            {"lot": lot, "box_number": str(index)}
+            for index in range(1, quantity + 1)
+        ],
     )
     assert completed.status_code == 200
     boxes = list(
@@ -154,35 +190,41 @@ def test_inbound_workflow_materializes_boxes_only_on_acceptance(
     assert session.scalar(select(func.count(Box.id))) == 0
 
     _as_user(app, mover)
-    assert client.post(f"/api/requests/{request_id}/approve", json={}).status_code == 200
+    assert _action(client, request_id, "approve").status_code == 200
     monkeypatch.setattr("app.routers.requests.put_document", lambda **_: None)
     uploaded = client.post(
         f"/api/requests/{request_id}/documents",
-        data={"document_type": "delivery_note", "erp_reference": "DN-100"},
+        data=_document_data(
+            client,
+            request_id,
+            document_type="delivery_note",
+            erp_reference="DN-100",
+        ),
         files={"file": ("delivery-note.pdf", b"%PDF-1.7 test", "application/pdf")},
     )
     assert uploaded.status_code == 201
     assert uploaded.json()["erp_reference"] == "DN-100"
     assert (
-        client.post(f"/api/requests/{request_id}/start-transit", json={}).status_code
+        _action(client, request_id, "start-transit").status_code
         == 200
     )
     assert session.scalar(select(func.count(Box.id))) == 0
+    assert _action(client, request_id, "mark-arrived").status_code == 200
 
     _as_user(app, requester)
-    completed = client.post(
-        f"/api/requests/{request_id}/complete",
-        json={
-            "inbound_items": [
-                {"lot": "NEW-LOT", "box_number": "1", "contents": "A"},
-                {
-                    "lot": "NEW-LOT",
-                    "box_number": "001",
-                    "contents": "A extra",
-                },
-                {"lot": "NEW-LOT", "box_number": "2", "contents": "B"},
-            ]
-        },
+    completed = _action(
+        client,
+        request_id,
+        "complete",
+        inbound_items=[
+            {"lot": "NEW-LOT", "box_number": "1", "contents": "A"},
+            {
+                "lot": "NEW-LOT",
+                "box_number": "001",
+                "contents": "A extra",
+            },
+            {"lot": "NEW-LOT", "box_number": "2", "contents": "B"},
+        ],
     )
     assert completed.status_code == 200
     assert completed.json()["status"] == "completed"
@@ -196,7 +238,13 @@ def test_inbound_workflow_materializes_boxes_only_on_acceptance(
         ("NEW-LOT", "001", "A | A extra", BoxStatus.received),
         ("NEW-LOT", "002", "B", BoxStatus.received),
     ]
-    repeated = client.post(f"/api/requests/{request_id}/complete", json={})
+    repeated = client.post(
+        f"/api/requests/{request_id}/complete",
+        json={
+            "expected_version": created["version"],
+            "idempotency_key": f"test-completion-{request_id}",
+        },
+    )
     assert repeated.status_code == 200
     assert session.scalar(select(func.count(Box.id))) == 2
 
@@ -210,15 +258,15 @@ def test_short_inbound_delivery_completes_with_audited_variance(
         client, requester, mover, monkeypatch, quantity=3
     )
 
-    completed = client.post(
-        f"/api/requests/{request_id}/complete",
-        json={
-            "inbound_items": [
-                {"lot": "SHORT", "box_number": "1"},
-                {"lot": "SHORT", "box_number": "2"},
-            ],
-            "discrepancy_reason": "Two boxes were available at dispatch.",
-        },
+    completed = _action(
+        client,
+        request_id,
+        "complete",
+        inbound_items=[
+            {"lot": "SHORT", "box_number": "1"},
+            {"lot": "SHORT", "box_number": "2"},
+        ],
+        discrepancy_reason="Two boxes were available at dispatch.",
     )
 
     assert completed.status_code == 200
@@ -230,10 +278,27 @@ def test_short_inbound_delivery_completes_with_audited_variance(
         == "Two boxes were available at dispatch."
     )
     assert session.scalar(select(func.count(Box.id))) == 2
+    assert len(completed.json()["discrepancies"]) == 1
+    assert completed.json()["discrepancies"][0]["discrepancy_type"] == "missing"
+    child_id = completed.json()["child_request_ids"][0]
+    child = client.get(f"/api/requests/{child_id}").json()
+    assert child["status"] == "submitted"
+    assert child["origin"] == "backorder"
+    assert child["quantity"] == 1
+    assert child["parent_request_id"] == request_id
+    assert child["root_request_id"] == request_id
+    photo = client.post(
+        f"/api/requests/{request_id}/discrepancies/"
+        f"{completed.json()['discrepancies'][0]['id']}/photos",
+        data={"expected_version": str(completed.json()["version"])},
+        files={"file": ("shortage.jpg", b"\xff\xd8\xffphoto", "image/jpeg")},
+    )
+    assert photo.status_code == 201
+    assert photo.json()["original_filename"] == "shortage.jpg"
     event = session.scalar(
         select(BoxRequestEvent).where(
             BoxRequestEvent.request_id == request_id,
-            BoxRequestEvent.event_type == BoxRequestEventType.completed,
+            BoxRequestEvent.event_type == BoxRequestEventType.partial_completion,
         )
     )
     assert event is not None
@@ -250,17 +315,17 @@ def test_over_delivery_groups_duplicates_before_recording_variance(
         client, requester, mover, monkeypatch, quantity=2
     )
 
-    completed = client.post(
-        f"/api/requests/{request_id}/complete",
-        json={
-            "inbound_items": [
-                {"lot": "OVER", "box_number": "1", "contents": "A"},
-                {"lot": "OVER", "box_number": "001", "contents": "B"},
-                {"lot": "OVER", "box_number": "2"},
-                {"lot": "OVER", "box_number": "3"},
-            ],
-            "discrepancy_reason": "Accepted an extra prepared box.",
-        },
+    completed = _action(
+        client,
+        request_id,
+        "complete",
+        inbound_items=[
+            {"lot": "OVER", "box_number": "1", "contents": "A"},
+            {"lot": "OVER", "box_number": "001", "contents": "B"},
+            {"lot": "OVER", "box_number": "2"},
+            {"lot": "OVER", "box_number": "3"},
+        ],
+        discrepancy_reason="Accepted an extra prepared box.",
     )
 
     assert completed.status_code == 200
@@ -270,7 +335,10 @@ def test_over_delivery_groups_duplicates_before_recording_variance(
     first = session.scalar(select(Box).where(Box.box_number == "001"))
     assert first is not None
     assert first.contents == "A | B"
-    repeated = client.post(f"/api/requests/{request_id}/complete", json={})
+    repeated = client.post(
+        f"/api/requests/{request_id}/complete",
+        json={"expected_version": 1, "idempotency_key": f"test-completion-{request_id}"},
+    )
     assert repeated.status_code == 200
     assert session.scalar(select(func.count(Box.id))) == 3
 
@@ -284,17 +352,19 @@ def test_inbound_variance_requires_reason_and_creates_no_inventory(
         client, requester, mover, monkeypatch, quantity=2
     )
 
-    response = client.post(
-        f"/api/requests/{request_id}/complete",
-        json={"inbound_items": [{"lot": "SHORT", "box_number": "1"}]},
+    response = _action(
+        client,
+        request_id,
+        "complete",
+        inbound_items=[{"lot": "SHORT", "box_number": "1"}],
     )
 
     assert response.status_code == 400
-    assert "discrepancy_reason is required" in response.json()["detail"]
+    assert "missing discrepancy" in response.json()["detail"]
     assert session.scalar(select(func.count(Box.id))) == 0
     request = session.get(BoxRequest, request_id)
     assert request is not None
-    assert request.status == BoxRequestStatus.in_transit
+    assert request.status == BoxRequestStatus.awaiting_confirmation
     assert request.actual_received_quantity is None
 
 
@@ -345,18 +415,23 @@ def test_return_workflow_reserves_and_returns_specific_boxes(
     assert [item["box_id"] for item in remaining] == [boxes[1].id]
 
     _as_user(app, mover)
-    client.post(f"/api/requests/{request_id}/approve", json={})
+    _action(client, request_id, "approve")
     monkeypatch.setattr("app.routers.requests.put_document", lambda **_: None)
     client.post(
         f"/api/requests/{request_id}/documents",
-        data={"document_type": "return_note", "erp_reference": "RN-100"},
+        data=_document_data(
+            client,
+            request_id,
+            document_type="return_note",
+            erp_reference="RN-100",
+        ),
         files={"file": ("return-note.pdf", b"%PDF-1.7 test", "application/pdf")},
     )
-    client.post(f"/api/requests/{request_id}/start-transit", json={})
-    completed = client.post(f"/api/requests/{request_id}/complete", json={})
+    _action(client, request_id, "start-transit")
+    completed = _action(client, request_id, "complete")
     assert completed.status_code == 200
-    assert completed.json()["actual_received_quantity"] is None
-    assert completed.json()["variance_quantity"] is None
+    assert completed.json()["actual_received_quantity"] == 2
+    assert completed.json()["variance_quantity"] == 0
     assert session.get(Box, boxes[0].id).status == BoxStatus.returned
     assert session.get(Box, boxes[2].id).status == BoxStatus.returned
     assert session.get(Box, boxes[1].id).status == BoxStatus.ready_to_return
@@ -435,9 +510,11 @@ def test_return_source_selection_validates_and_releases_reservations(
     )
     assert conflict.status_code == 409
 
-    cancelled = client.post(
-        f"/api/requests/{first_return.json()['id']}/cancel",
-        json={"reason": "Return later"},
+    cancelled = _action(
+        client,
+        first_return.json()["id"],
+        "cancel",
+        reason="Return later",
     )
     assert cancelled.status_code == 200
     assert {
@@ -458,9 +535,11 @@ def test_return_source_selection_validates_and_releases_reservations(
         },
     )
     _as_user(app, mover)
-    rejected = client.post(
-        f"/api/requests/{retried.json()['id']}/reject",
-        json={"reason": "Not collecting today"},
+    rejected = _action(
+        client,
+        retried.json()["id"],
+        "reject",
+        reason="Not collecting today",
     )
     assert rejected.status_code == 200
     _as_user(app, requester)
@@ -470,6 +549,82 @@ def test_return_source_selection_validates_and_releases_reservations(
             f"/api/requests/{source_id}/return-candidates"
         ).json()
     } == {box.id for box in boxes}
+
+
+def test_partial_return_creates_non_reserving_reselection_draft(
+    client, session, make_user, monkeypatch
+):
+    requester = make_user(UserRole.operator)
+    mover = make_user(UserRole.warehouse_mover)
+    source_id, boxes = _complete_inbound_order(
+        client,
+        session,
+        requester,
+        mover,
+        monkeypatch,
+        quantity=2,
+        lot="PARTIAL-RETURN",
+    )
+    for box in boxes:
+        box.status = BoxStatus.ready_to_return
+    session.commit()
+    _as_user(app, requester)
+    created = client.post(
+        "/api/requests",
+        json={
+            "direction": "return",
+            "warehouse_id": 1,
+            "quantity": 2,
+            "source_inbound_request_id": source_id,
+            "box_ids": [box.id for box in boxes],
+        },
+    ).json()
+    _as_user(app, mover)
+    _action(client, created["id"], "approve")
+    monkeypatch.setattr("app.routers.requests.put_document", lambda **_: None)
+    client.post(
+        f"/api/requests/{created['id']}/documents",
+        data=_document_data(
+            client,
+            created["id"],
+            document_type="return_note",
+            erp_reference="RN-PARTIAL",
+        ),
+        files={"file": ("return.pdf", b"%PDF- partial", "application/pdf")},
+    )
+    _action(client, created["id"], "start-transit")
+    completed = _action(
+        client,
+        created["id"],
+        "complete",
+        collected_box_ids=[boxes[0].id],
+        discrepancy_reason="Second box was not collected.",
+    )
+    assert completed.status_code == 200
+    result = completed.json()
+    assert result["actual_received_quantity"] == 1
+    assert result["variance_quantity"] == -1
+    assert session.get(Box, boxes[0].id).status == BoxStatus.returned
+    assert session.get(Box, boxes[1].id).status == BoxStatus.ready_to_return
+    draft = client.get(f"/api/requests/{result['child_request_ids'][0]}").json()
+    assert draft["status"] == "draft"
+    assert draft["origin"] == "return_reselection"
+    assert draft["items"] == []
+    assert draft["parent_request_id"] == created["id"]
+    _as_user(app, requester)
+    available = client.get(f"/api/requests/{source_id}/return-candidates").json()
+    assert [item["box_id"] for item in available] == [boxes[1].id]
+    submitted = client.post(
+        f"/api/requests/{draft['id']}/submit-draft",
+        json={
+            "expected_version": draft["version"],
+            "box_ids": [boxes[1].id],
+        },
+    )
+    assert submitted.status_code == 200
+    assert submitted.json()["status"] == "submitted"
+    assert submitted.json()["items"][0]["box_id"] == boxes[1].id
+    assert client.get(f"/api/requests/{source_id}/return-candidates").json() == []
 
 
 def test_return_candidates_require_completed_source_and_ready_boxes(
@@ -538,23 +693,28 @@ def test_return_completion_is_atomic_and_legacy_source_link_is_optional(
     session.commit()
 
     _as_user(app, mover)
-    client.post(f"/api/requests/{created['id']}/approve", json={})
+    _action(client, created["id"], "approve")
     monkeypatch.setattr("app.routers.requests.put_document", lambda **_: None)
     client.post(
         f"/api/requests/{created['id']}/documents",
-        data={"document_type": "return_note", "erp_reference": "RN-LEGACY"},
+        data=_document_data(
+            client,
+            created["id"],
+            document_type="return_note",
+            erp_reference="RN-LEGACY",
+        ),
         files={"file": ("return-note.pdf", b"%PDF-1.7 test", "application/pdf")},
     )
-    client.post(f"/api/requests/{created['id']}/start-transit", json={})
+    _action(client, created["id"], "start-transit")
     boxes[1].status = BoxStatus.processing
     session.commit()
-    failed = client.post(f"/api/requests/{created['id']}/complete", json={})
+    failed = _action(client, created["id"], "complete")
     assert failed.status_code == 409
     assert session.get(Box, boxes[0].id).status == BoxStatus.ready_to_return
     assert session.get(BoxRequest, created["id"]).source_inbound_request_id is None
     boxes[1].status = BoxStatus.ready_to_return
     session.commit()
-    completed = client.post(f"/api/requests/{created['id']}/complete", json={})
+    completed = _action(client, created["id"], "complete")
     assert completed.status_code == 200
     assert completed.json()["source_inbound_request_id"] is None
 
@@ -633,17 +793,22 @@ def test_return_completion_rejects_wrong_warehouse(
         },
     ).json()["id"]
     _as_user(app, mover)
-    client.post(f"/api/requests/{return_id}/approve", json={})
+    _action(client, return_id, "approve")
     monkeypatch.setattr("app.routers.requests.put_document", lambda **_: None)
     client.post(
         f"/api/requests/{return_id}/documents",
-        data={"document_type": "return_note", "erp_reference": "RN-WH"},
+        data=_document_data(
+            client,
+            return_id,
+            document_type="return_note",
+            erp_reference="RN-WH",
+        ),
         files={"file": ("return.pdf", b"%PDF-1.7 test", "application/pdf")},
     )
-    client.post(f"/api/requests/{return_id}/start-transit", json={})
+    _action(client, return_id, "start-transit")
     boxes[0].current_warehouse_id = 2
     session.commit()
-    completed = client.post(f"/api/requests/{return_id}/complete", json={})
+    completed = _action(client, return_id, "complete")
     assert completed.status_code == 409
     assert session.get(Box, boxes[0].id).status == BoxStatus.ready_to_return
 
@@ -659,14 +824,40 @@ def test_only_movers_can_approve_and_requester_can_cancel(client, session, make_
 
     _as_user(app, other)
     assert client.post(f"/api/requests/{request_id}/approve", json={}).status_code == 403
-    assert client.post(f"/api/requests/{request_id}/cancel", json={}).status_code == 403
+    assert _action(client, request_id, "cancel").status_code == 403
 
     _as_user(app, requester)
-    cancelled = client.post(
-        f"/api/requests/{request_id}/cancel", json={"reason": "No longer needed"}
+    cancelled = _action(
+        client, request_id, "cancel", reason="No longer needed"
     )
     assert cancelled.status_code == 200
     assert cancelled.json()["status"] == BoxRequestStatus.cancelled.value
+
+
+def test_request_mutations_require_versions_and_conflicts_are_structured(
+    client, make_user
+):
+    requester = make_user(UserRole.viewer)
+    mover = make_user(UserRole.warehouse_mover)
+    _as_user(app, requester)
+    created = client.post(
+        "/api/requests",
+        json={"direction": "inbound", "warehouse_id": 1, "quantity": 1},
+    ).json()
+    _as_user(app, mover)
+    assert client.post(f"/api/requests/{created['id']}/approve", json={}).status_code == 422
+    approved = _action(client, created["id"], "approve")
+    assert approved.status_code == 200
+    conflict = client.post(
+        f"/api/requests/{created['id']}/start-transit",
+        json={"expected_version": created["version"]},
+    )
+    assert conflict.status_code == 409
+    detail = conflict.json()["detail"]
+    assert detail["request_id"] == created["id"]
+    assert detail["latest_version"] == approved.json()["version"]
+    assert detail["latest_status"] == "approved"
+    assert detail["relevant_events"][0]["event_type"] == "approved"
 
 
 def test_document_download_is_acl_checked(client, session, make_user, monkeypatch):
@@ -678,11 +869,16 @@ def test_document_download_is_acl_checked(client, session, make_user, monkeypatc
         json={"direction": "inbound", "warehouse_id": 1, "quantity": 1},
     ).json()["id"]
     _as_user(app, mover)
-    client.post(f"/api/requests/{request_id}/approve", json={})
+    _action(client, request_id, "approve")
     monkeypatch.setattr("app.routers.requests.put_document", lambda **_: None)
     document = client.post(
         f"/api/requests/{request_id}/documents",
-        data={"document_type": "delivery_note", "erp_reference": "DN-200"},
+        data=_document_data(
+            client,
+            request_id,
+            document_type="delivery_note",
+            erp_reference="DN-200",
+        ),
         files={"file": ("note.pdf", b"%PDF- test", "application/pdf")},
     ).json()
 
@@ -752,7 +948,12 @@ def test_import_receipt_owner_can_upload_erp_document(
     monkeypatch.setattr("app.routers.requests.put_document", lambda **_: None)
     uploaded = client.post(
         f"/api/requests/{receipt_id}/documents",
-        data={"document_type": "delivery_note", "erp_reference": "DN-IMPORT-1"},
+        data=_document_data(
+            client,
+            receipt_id,
+            document_type="delivery_note",
+            erp_reference="DN-IMPORT-1",
+        ),
         files={
             "file": (
                 "import-delivery.pdf",
@@ -767,7 +968,12 @@ def test_import_receipt_owner_can_upload_erp_document(
     _as_user(app, outsider)
     denied = client.post(
         f"/api/requests/{receipt_id}/documents",
-        data={"document_type": "other", "erp_reference": "OTHER"},
+        data=_document_data(
+            client,
+            receipt_id,
+            document_type="other",
+            erp_reference="OTHER",
+        ),
         files={"file": ("other.pdf", b"%PDF- denied", "application/pdf")},
     )
     assert denied.status_code == 403
@@ -782,24 +988,39 @@ def test_document_replacement_retains_audit_version(client, session, make_user, 
         json={"direction": "inbound", "warehouse_id": 1, "quantity": 1},
     ).json()["id"]
     _as_user(app, mover)
-    client.post(f"/api/requests/{request_id}/approve", json={})
+    _action(client, request_id, "approve")
     monkeypatch.setattr("app.routers.requests.put_document", lambda **_: None)
 
     invalid = client.post(
         f"/api/requests/{request_id}/documents",
-        data={"document_type": "delivery_note", "erp_reference": "DN-BAD"},
+        data=_document_data(
+            client,
+            request_id,
+            document_type="delivery_note",
+            erp_reference="DN-BAD",
+        ),
         files={"file": ("note.txt", b"not allowed", "text/plain")},
     )
     assert invalid.status_code == 415
 
     first = client.post(
         f"/api/requests/{request_id}/documents",
-        data={"document_type": "delivery_note", "erp_reference": "DN-1"},
+        data=_document_data(
+            client,
+            request_id,
+            document_type="delivery_note",
+            erp_reference="DN-1",
+        ),
         files={"file": ("note.pdf", b"%PDF- first", "application/pdf")},
     ).json()
     second = client.post(
         f"/api/requests/{request_id}/documents",
-        data={"document_type": "delivery_note", "erp_reference": "DN-2"},
+        data=_document_data(
+            client,
+            request_id,
+            document_type="delivery_note",
+            erp_reference="DN-2",
+        ),
         files={"file": ("note.pdf", b"%PDF- second", "application/pdf")},
     ).json()
     documents = client.get(f"/api/requests/{request_id}/documents").json()
@@ -820,7 +1041,7 @@ def test_document_upload_reports_unavailable_storage(
         json={"direction": "inbound", "warehouse_id": 1, "quantity": 1},
     ).json()["id"]
     _as_user(app, mover)
-    client.post(f"/api/requests/{request_id}/approve", json={})
+    _action(client, request_id, "approve")
 
     def unavailable(**_):
         raise StorageUnavailableError("object storage is unavailable")
@@ -828,7 +1049,12 @@ def test_document_upload_reports_unavailable_storage(
     monkeypatch.setattr("app.routers.requests.put_document", unavailable)
     response = client.post(
         f"/api/requests/{request_id}/documents",
-        data={"document_type": "delivery_note", "erp_reference": "DN-500"},
+        data=_document_data(
+            client,
+            request_id,
+            document_type="delivery_note",
+            erp_reference="DN-500",
+        ),
         files={"file": ("note.pdf", b"%PDF- unavailable", "application/pdf")},
     )
     assert response.status_code == 503

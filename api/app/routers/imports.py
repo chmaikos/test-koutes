@@ -14,7 +14,8 @@ from fastapi import (
 )
 
 from app.deps import CurrentUser, DbSession, require_operator
-from app.events import bus
+from app.events import bus, publish_notification_event
+from app.models.requests import BoxRequest
 from app.schemas.boxes import (
     BoxOut,
     ImportResult,
@@ -29,6 +30,7 @@ from app.schemas.requests import (
 from app.services.alerts import evaluate_safe
 from app.services.boxes import BoxRuleError
 from app.services.imports import import_boxes_xlsx, import_mapped_boxes
+from app.services.requests import RequestAccessError, RequestRuleError
 from app.services.xlsx_preview import MAX_XLSX_BYTES, preview_xlsx
 
 router = APIRouter(prefix="/boxes", tags=["boxes"])
@@ -46,8 +48,9 @@ async def preview_box_import(
     payload = await file.read(MAX_XLSX_BYTES + 1)
     try:
         sheets = preview_xlsx(payload)
-    except BoxRuleError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (BoxRuleError, RequestRuleError) as exc:
+        code = 403 if isinstance(exc, RequestAccessError) else 400
+        raise HTTPException(status_code=code, detail=str(exc)) from exc
     return XlsxPreviewOut(
         filename=filename,
         sheets=[
@@ -94,6 +97,12 @@ async def import_mapped_box_rows(
         )
     for request_id in outcome.receipt_request_ids:
         await bus.publish("request.created", {"id": request_id})
+    for request_id in outcome.staged_receipt_ids:
+        await bus.publish("request.created", {"id": request_id, "staged": True})
+        await publish_notification_event(
+            warehouse_id=payload.warehouse_id,
+            request_id=request_id,
+        )
     if outcome.created or outcome.restored:
         background.add_task(evaluate_safe, db)
     return ImportResult(
@@ -108,6 +117,7 @@ async def import_mapped_box_rows(
             for skipped in outcome.skipped
         ],
         receipt_request_ids=outcome.receipt_request_ids,
+        staged_receipt_ids=outcome.staged_receipt_ids,
     )
 
 
@@ -145,9 +155,14 @@ async def import_boxes(
             default_warehouse_id=warehouse_id,
             restore_archived=restore_archived,
         )
-    except BoxRuleError as exc:
+    except (BoxRuleError, RequestRuleError) as exc:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            status_code=(
+                status.HTTP_403_FORBIDDEN
+                if isinstance(exc, RequestAccessError)
+                else status.HTTP_400_BAD_REQUEST
+            ),
+            detail=str(exc),
         ) from exc
 
     affected_warehouses = {
@@ -158,6 +173,14 @@ async def import_boxes(
         await bus.publish("box.updated", {"warehouse_id": wid, "bulk": True})
     for request_id in outcome.receipt_request_ids:
         await bus.publish("request.created", {"id": request_id})
+    for request_id in outcome.staged_receipt_ids:
+        await bus.publish("request.created", {"id": request_id, "staged": True})
+        staged = db.get(BoxRequest, request_id)
+        if staged is not None:
+            await publish_notification_event(
+                warehouse_id=staged.warehouse_id,
+                request_id=request_id,
+            )
     if outcome.created or outcome.restored:
         background.add_task(evaluate_safe, db)
 
@@ -169,4 +192,5 @@ async def import_boxes(
             for s in outcome.skipped
         ],
         receipt_request_ids=outcome.receipt_request_ids,
+        staged_receipt_ids=outcome.staged_receipt_ids,
     )

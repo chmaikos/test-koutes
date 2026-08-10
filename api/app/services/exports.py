@@ -13,6 +13,7 @@ from openpyxl.utils import get_column_letter
 
 from app.models.boxes import Box, BoxStatus
 from app.models.employees import ProductivityEntry
+from app.schemas.requests import RequestAnalyticsOut, RequestReconciliationIssue
 from app.services.productivity import EmployeeAverages
 
 EXPORT_COLUMNS = [
@@ -33,6 +34,7 @@ EXPORT_COLUMNS = [
 _DATETIME_COLUMN_INDICES = (6, 7, 8, 9)
 
 STATUS_LABELS: dict[BoxStatus, str] = {
+    BoxStatus.quarantined: "Quarantined",
     BoxStatus.received: "Received",
     BoxStatus.ready_to_return: "Ready to return",
     BoxStatus.returned: "Returned",
@@ -68,6 +70,38 @@ PRODUCTIVITY_DETAIL_COLUMNS = [
     "Pages / 8-Hour Day",
     "Entry Excluded",
     "Note",
+]
+
+REQUEST_RECONCILIATION_COLUMNS = [
+    "Severity",
+    "Issue Type",
+    "Request ID",
+    "Box ID",
+    "Warehouse ID",
+    "Warehouse",
+    "Assignee ID",
+    "Assignee",
+    "Request Status",
+    "Title",
+    "Detail",
+    "Occurred At",
+    "Due At",
+    "Request Link",
+    "Box Link",
+]
+
+REQUEST_ANALYTICS_COLUMNS = [
+    "Section",
+    "Metric",
+    "Name",
+    "Value",
+    "Numerator",
+    "Denominator",
+    "Rate",
+    "Average Seconds",
+    "Sample Size",
+    "Completed Requests",
+    "Completed Quantity",
 ]
 
 
@@ -276,6 +310,142 @@ def productivity_to_xlsx(
         PRODUCTIVITY_DETAIL_COLUMNS,
         (_detail_export_row(row) for row in details),
     )
+    buf = io.BytesIO()
+    workbook.save(buf)
+    return buf.getvalue()
+
+
+def _reconciliation_row(issue: RequestReconciliationIssue) -> list:
+    return [
+        issue.severity,
+        issue.issue_type,
+        issue.request_id,
+        issue.box_id,
+        issue.warehouse_id,
+        issue.warehouse_name,
+        issue.assigned_mover_user_id,
+        issue.assigned_mover_name,
+        issue.request_status.value,
+        issue.title,
+        issue.detail,
+        _to_naive_utc(issue.occurred_at),
+        _to_naive_utc(issue.due_at),
+        issue.request_path,
+        issue.box_path,
+    ]
+
+
+def request_reconciliation_to_csv(
+    issues: Iterable[RequestReconciliationIssue],
+) -> bytes:
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(REQUEST_RECONCILIATION_COLUMNS)
+    for issue in issues:
+        writer.writerow(
+            [_format_csv_value(value) for value in _reconciliation_row(issue)]
+        )
+    return ("\ufeff" + buf.getvalue()).encode("utf-8")
+
+
+def request_reconciliation_to_xlsx(
+    issues: Iterable[RequestReconciliationIssue],
+) -> bytes:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Reconciliation"
+    _write_sheet(
+        sheet,
+        REQUEST_RECONCILIATION_COLUMNS,
+        (_reconciliation_row(issue) for issue in issues),
+    )
+    buf = io.BytesIO()
+    workbook.save(buf)
+    return buf.getvalue()
+
+
+def _analytics_rows(report: RequestAnalyticsOut) -> list[list]:
+    rows: list[list] = [
+        ["summary", "total_requests", "", report.total_requests],
+        ["summary", "completed_requests", "", report.completed_requests],
+    ]
+    for name in (
+        "approval_duration",
+        "preparation_duration",
+        "transport_duration",
+        "acceptance_duration",
+    ):
+        metric = getattr(report, name)
+        rows.append(
+            [
+                "duration",
+                name,
+                "supported" if metric.supported else "unsupported",
+                None,
+                None,
+                None,
+                None,
+                metric.average_seconds,
+                metric.sample_size,
+            ]
+        )
+    for name in ("on_time", "discrepancy", "shortage", "overage"):
+        metric = getattr(report, name)
+        rows.append(
+            [
+                "rate",
+                name,
+                "",
+                None,
+                metric.numerator,
+                metric.denominator,
+                metric.rate,
+            ]
+        )
+    for section, reasons in (
+        ("rejection_reason", report.rejection_reasons),
+        ("cancellation_reason", report.cancellation_reasons),
+    ):
+        rows.extend(
+            [section, "reason", reason.reason, reason.count] for reason in reasons
+        )
+    for section, throughput in (
+        ("warehouse_throughput", report.throughput_by_warehouse),
+        ("mover_throughput", report.throughput_by_mover),
+    ):
+        rows.extend(
+            [
+                section,
+                "throughput",
+                item.name,
+                item.id,
+                None,
+                None,
+                None,
+                None,
+                None,
+                item.completed_requests,
+                item.completed_quantity,
+            ]
+            for item in throughput
+        )
+    return [row + [None] * (len(REQUEST_ANALYTICS_COLUMNS) - len(row)) for row in rows]
+
+
+def request_analytics_to_csv(report: RequestAnalyticsOut) -> bytes:
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(REQUEST_ANALYTICS_COLUMNS)
+    for row in _analytics_rows(report):
+        writer.writerow([_format_csv_value(value) for value in row])
+    return ("\ufeff" + buf.getvalue()).encode("utf-8")
+
+
+def request_analytics_to_xlsx(report: RequestAnalyticsOut) -> bytes:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Request analytics"
+    _write_sheet(sheet, REQUEST_ANALYTICS_COLUMNS, _analytics_rows(report))
     buf = io.BytesIO()
     workbook.save(buf)
     return buf.getvalue()

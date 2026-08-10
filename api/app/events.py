@@ -52,3 +52,21 @@ class EventBus:
 
 
 bus = EventBus()
+
+
+async def publish_notification_event(
+    *,
+    warehouse_id: int,
+    request_id: int,
+) -> None:
+    """Signal clients to refetch their persisted notification inbox."""
+    await bus.publish(
+        "notification.created",
+        {
+            "warehouse_id": warehouse_id,
+            "request_id": request_id,
+        },
+    )
+
+
+__all__ = ["bus", "publish_notification_event"]

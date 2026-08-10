@@ -59,8 +59,7 @@ function WarehouseCard({ summary }: { summary: WarehouseSummary }) {
   // (low = danger when we drop below) and unavailable compared to the
   // maximum (high = danger when we accumulate too much backlog).
   const lowAvailable = summary.available_boxes < summary.min_inventory;
-  const highUnavailable =
-    summary.unavailable_boxes >= summary.max_capacity;
+  const highUnavailable = summary.inventory >= summary.max_capacity;
   // We want the "available" bar to read full when supply comfortably
   // exceeds the minimum, so divide by max(min, available). Once supply
   // drops below the minimum the bar visibly shrinks proportionally.
@@ -72,7 +71,7 @@ function WarehouseCard({ summary }: { summary: WarehouseSummary }) {
   const unavailablePct = Math.min(
     100,
     Math.round(
-      (summary.unavailable_boxes / Math.max(1, summary.max_capacity)) * 100,
+      (summary.inventory / Math.max(1, summary.max_capacity)) * 100,
     ),
   );
 
@@ -108,9 +107,9 @@ function WarehouseCard({ summary }: { summary: WarehouseSummary }) {
         tone={lowAvailable ? "danger" : "ok"}
       />
       <BarMetric
-        label="Unavailable"
-        hint="vs. max capacity"
-        value={summary.unavailable_boxes}
+        label="Occupied"
+        hint={`${summary.quarantined_boxes} quarantined · vs. max capacity`}
+        value={summary.inventory}
         anchor={summary.max_capacity}
         anchorLabel="max"
         pct={unavailablePct}
@@ -137,6 +136,9 @@ function WarehouseCard({ summary }: { summary: WarehouseSummary }) {
           label="Received today"
           value={summary.received_today}
         />
+        {summary.quarantined_boxes > 0 && (
+          <Stat label="Quarantined" value={summary.quarantined_boxes} />
+        )}
       </dl>
 
       <ProductivitySection summary={summary} />

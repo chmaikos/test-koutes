@@ -8,9 +8,21 @@ from sqlalchemy import select
 from app.deps import CurrentUser, DbSession, require_admin
 from app.models.users import User
 from app.models.warehouses import Warehouse
-from app.schemas.users import UserOut, UserUpdate
+from app.schemas.users import UserOut, UserPreferencesUpdate, UserUpdate
 
 router = APIRouter(tags=["users"])
+
+
+@router.patch("/users/me/preferences", response_model=UserOut)
+def update_my_preferences(
+    payload: UserPreferencesUpdate,
+    db: DbSession,
+    user: CurrentUser,
+) -> UserOut:
+    user.email_requests_enabled = payload.email_requests_enabled
+    db.commit()
+    db.refresh(user)
+    return UserOut.model_validate(user)
 
 
 @router.get("/users", response_model=list[UserOut])
@@ -41,6 +53,8 @@ def update_user(
         target.is_active = payload.is_active
     if payload.email_alerts_enabled is not None:
         target.email_alerts_enabled = payload.email_alerts_enabled
+    if payload.email_requests_enabled is not None:
+        target.email_requests_enabled = payload.email_requests_enabled
     if payload.warehouse_ids is not None:
         # Replace the user's per-warehouse ACL wholesale. We validate that
         # every requested id refers to a real warehouse so admins get a

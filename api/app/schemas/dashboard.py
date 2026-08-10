@@ -23,6 +23,7 @@ class WarehouseSummary(BaseModel):
     #   closed-and-done) compared against ``max_capacity``.
     available_boxes: int
     unavailable_boxes: int
+    quarantined_boxes: int
     # Subset of ``unavailable_boxes`` shown separately on the dashboard
     # as "packaged for return". Exposing both lets the UI distinguish
     # boxes that are physically packed (ready_to_return) from boxes

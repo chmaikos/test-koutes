@@ -23,6 +23,7 @@ import {
 import clsx from "clsx";
 import { useDashboard, useMe } from "@/api/hooks";
 import { useLiveStream } from "@/hooks/useLiveStream";
+import { NotificationCenter } from "@/components/NotificationCenter";
 
 interface NavItem {
   to: string;
@@ -39,7 +40,7 @@ const NAV_ITEMS: NavItem[] = [
   { to: "/productivity", label: "Productivity", icon: Activity },
   { to: "/alerts", label: "Alerts", icon: AlertTriangle, badgeKey: "alerts" },
   { to: "/exports", label: "Exports", icon: Download },
-  { to: "/settings", label: "Settings", icon: SettingsIcon, adminOnly: true },
+  { to: "/settings", label: "Settings", icon: SettingsIcon },
 ];
 
 /**
@@ -127,7 +128,8 @@ function DesktopSidebar({
         <div className="flex h-8 w-8 items-center justify-center rounded-md bg-brand-600 text-white">
           <BoxesIcon className="h-4 w-4" />
         </div>
-        <div className="font-semibold tracking-tight">Box Tracker</div>
+        <div className="flex-1 font-semibold tracking-tight">Box Tracker</div>
+        <NotificationCenter desktopAlign="left" />
       </div>
       <nav className="flex-1 space-y-1 p-3">
         {items.map((item) => (
@@ -229,6 +231,7 @@ function MobileTopBar({
       <div className="flex-1 truncate text-base font-semibold tracking-tight">
         {title}
       </div>
+      <NotificationCenter />
       {openAlerts > 0 && (
         <Link
           to="/alerts"

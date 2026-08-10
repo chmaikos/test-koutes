@@ -47,7 +47,10 @@ def test_archive_reports_box_and_request_blockers(client, session):
 
     cancelled = client.post(
         f"/api/requests/{request.json()['id']}/cancel",
-        json={"reason": "Clearing warehouse for archive"},
+        json={
+            "reason": "Clearing warehouse for archive",
+            "expected_version": request.json()["version"],
+        },
     )
     assert cancelled.status_code == 200
     assert client.delete("/api/warehouses/1").status_code == 200

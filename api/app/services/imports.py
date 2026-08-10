@@ -15,13 +15,18 @@ from app.models.boxes import Box
 from app.models.requests import BoxRequestOrigin
 from app.models.users import User
 from app.models.warehouses import Warehouse
+from app.schemas.requests import InboundBoxItem
 from app.services.boxes import (
     BoxRuleError,
     create_box,
     normalize_box_number,
     restore_archived_box,
 )
-from app.services.requests import create_completed_receipt
+from app.services.requests import (
+    create_completed_receipt,
+    create_staged_receipt,
+    receipt_requires_review,
+)
 
 # Hard caps: we do this on the request thread so we want a worst-case bound.
 MAX_FILE_BYTES = 5 * 1024 * 1024
@@ -57,6 +62,7 @@ class ImportOutcome:
     restored: list[Box] = field(default_factory=list)
     skipped: list[ImportSkipEntry] = field(default_factory=list)
     receipt_request_ids: list[int] = field(default_factory=list)
+    staged_receipt_ids: list[int] = field(default_factory=list)
 
 
 def _commit_import_receipts(
@@ -96,6 +102,31 @@ def import_mapped_boxes(
     restore_archived: bool = False,
 ) -> ImportOutcome:
     outcome = ImportOutcome()
+    warehouse = db.get(Warehouse, warehouse_id)
+    if warehouse is None or not warehouse.is_active:
+        raise BoxRuleError(f"warehouse {warehouse_id} does not exist or is archived")
+    if receipt_requires_review(
+        warehouse,
+        BoxRequestOrigin.xlsx_import,
+        quantity=len(items),
+    ):
+        receipt = create_staged_receipt(
+            db,
+            user=user,
+            warehouse_id=warehouse_id,
+            items=[
+                InboundBoxItem(
+                    box_number=box_number,
+                    lot=lot,
+                    contents=contents,
+                )
+                for box_number, lot, contents in items
+            ],
+            origin=BoxRequestOrigin.xlsx_import,
+            restore_archived=restore_archived,
+        )
+        outcome.staged_receipt_ids.append(receipt.id)
+        return outcome
     for position, (box_number, lot, contents) in enumerate(items, start=1):
         try:
             restored = (
@@ -224,6 +255,9 @@ def import_boxes_xlsx(
         )
 
     outcome = ImportOutcome()
+    pending_by_warehouse: dict[
+        int, list[tuple[int, InboundBoxItem]]
+    ] = {}
     # Box numbers are unique per ``lot`` (see ``services.boxes.create_box``),
     # so the in-file dedupe key must be the pair, not the number alone.
     seen_pairs: set[tuple[str, str]] = set()
@@ -340,41 +374,102 @@ def import_boxes_xlsx(
             )
             continue
 
-        try:
-            restored = (
-                restore_archived_box(
-                    db,
-                    user=user,
+        pending_by_warehouse.setdefault(warehouse_id, []).append(
+            (
+                offset,
+                InboundBoxItem(
                     box_number=box_number,
                     lot=lot,
                     contents=contents,
+                ),
+            )
+        )
+
+    for warehouse_id, pending_rows in pending_by_warehouse.items():
+        warehouse = warehouses_by_id[warehouse_id]
+        if receipt_requires_review(
+            warehouse,
+            BoxRequestOrigin.xlsx_import,
+            quantity=len(pending_rows),
+        ):
+            staged_items: list[InboundBoxItem] = []
+            for offset, item in pending_rows:
+                existing = db.scalar(
+                    select(Box).where(
+                        Box.box_number == item.box_number,
+                        Box.lot == item.lot,
+                    )
+                )
+                if existing is not None and (
+                    existing.archived_at is None or not restore_archived
+                ):
+                    reason = (
+                        f"box {item.box_number!r} already exists in lot {item.lot!r}"
+                        if existing.archived_at is None
+                        else (
+                            f"box {item.box_number!r} in lot {item.lot!r} is archived; "
+                            "enable restore_archived to restore it"
+                        )
+                    )
+                    outcome.skipped.append(
+                        ImportSkipEntry(
+                            row=offset,
+                            box_number=item.box_number,
+                            reason=reason,
+                        )
+                    )
+                    continue
+                staged_items.append(item)
+            if staged_items:
+                receipt = create_staged_receipt(
+                    db,
+                    user=user,
                     warehouse_id=warehouse_id,
-                    note=f"Explicitly restored from XLSX row {offset}.",
+                    items=staged_items,
+                    origin=BoxRequestOrigin.xlsx_import,
+                    restore_archived=restore_archived,
+                )
+                outcome.staged_receipt_ids.append(receipt.id)
+            continue
+
+        for offset, item in pending_rows:
+            try:
+                restored = (
+                    restore_archived_box(
+                        db,
+                        user=user,
+                        box_number=item.box_number,
+                        lot=item.lot,
+                        contents=item.contents,
+                        warehouse_id=warehouse_id,
+                        note=f"Explicitly restored from XLSX row {offset}.",
+                        commit=False,
+                    )
+                    if restore_archived
+                    else None
+                )
+                box = restored or create_box(
+                    db,
+                    user=user,
+                    box_number=item.box_number,
+                    lot=item.lot,
+                    contents=item.contents,
+                    warehouse_id=warehouse_id,
                     commit=False,
                 )
-                if restore_archived
-                else None
-            )
-            box = restored or create_box(
-                db,
-                user=user,
-                box_number=box_number,
-                lot=lot,
-                contents=contents,
-                warehouse_id=warehouse_id,
-                commit=False,
-            )
-        except BoxRuleError as exc:
-            outcome.skipped.append(
-                ImportSkipEntry(
-                    row=offset, box_number=box_number, reason=str(exc)
+            except BoxRuleError as exc:
+                outcome.skipped.append(
+                    ImportSkipEntry(
+                        row=offset,
+                        box_number=item.box_number,
+                        reason=str(exc),
+                    )
                 )
-            )
-            continue
-        if restored is not None:
-            outcome.restored.append(box)
-        else:
-            outcome.created.append(box)
+                continue
+            if restored is not None:
+                outcome.restored.append(box)
+            else:
+                outcome.created.append(box)
 
     _commit_import_receipts(db, user=user, outcome=outcome)
     return outcome
