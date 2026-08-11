@@ -102,6 +102,7 @@ class BoxRequestEventType(str, enum.Enum):
     rescheduled = "rescheduled"
     failed_delivery = "failed_delivery"
     transport_retry = "transport_retry"
+    force_purge_adjusted = "force_purge_adjusted"
 
 
 class BoxRequestExceptionKind(str, enum.Enum):

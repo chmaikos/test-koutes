@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 from datetime import UTC, datetime
 from pathlib import Path
 from types import ModuleType
@@ -35,6 +36,37 @@ def _load_merge_migration() -> ModuleType:
         / "0028_safe_lot_merge.py"
     )
     spec = importlib.util.spec_from_file_location("migration_0028_safe_lot_merge", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_purge_migration() -> ModuleType:
+    path = (
+        Path(__file__).parents[1]
+        / "alembic"
+        / "versions"
+        / "0029_lot_purge_audit.py"
+    )
+    spec = importlib.util.spec_from_file_location("migration_0029_lot_purge_audit", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_force_adjustment_migration() -> ModuleType:
+    path = (
+        Path(__file__).parents[1]
+        / "alembic"
+        / "versions"
+        / "0030_force_purge_adjustment_event.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "migration_0030_force_purge_adjustment_event",
+        path,
+    )
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -202,6 +234,167 @@ def test_merge_migration_is_single_head() -> None:
     root = Path(__file__).parents[1]
     config = Config(str(root / "alembic.ini"))
     config.set_main_option("script_location", str(root / "alembic"))
-    assert ScriptDirectory.from_config(config).get_heads() == ["0028_safe_lot_merge"]
+    assert ScriptDirectory.from_config(config).get_heads() == [
+        "0030_force_purge_adjustment"
+    ]
     migration = _load_merge_migration()
     assert migration.down_revision == "0027_first_class_lots"
+
+
+def test_purge_migration_sqlite_schema_and_safe_downgrade() -> None:
+    first_class = _load_migration()
+    merge = _load_merge_migration()
+    purge = _load_purge_migration()
+    engine = _legacy_database()
+    with engine.begin() as connection:
+        first_class.op = _operations(connection)
+        first_class.upgrade()
+        merge.op = _operations(connection)
+        merge.upgrade()
+        purge.op = _operations(connection)
+        purge.upgrade()
+
+        inspector = sa.inspect(connection)
+        columns = {
+            column["name"]: column
+            for column in inspector.get_columns("lot_purge_events")
+        }
+        assert {
+            "lot_id",
+            "lot_name",
+            "lot_version",
+            "actor_user_id",
+            "reason",
+            "receipt_ids",
+            "receipt_count",
+            "archived_box_ids",
+            "archived_box_count",
+            "object_keys",
+            "object_key_count",
+            "object_cleanup_status",
+            "object_cleanup_failures",
+            "object_cleanup_completed_at",
+            "created_at",
+            "updated_at",
+            "metadata",
+        } <= columns.keys()
+        foreign_keys = inspector.get_foreign_keys("lot_purge_events")
+        assert not any(fk["referred_table"] == "lots" for fk in foreign_keys)
+        actor_fk = next(
+            fk
+            for fk in foreign_keys
+            if fk["constrained_columns"] == ["actor_user_id"]
+        )
+        assert actor_fk["options"]["ondelete"] == "SET NULL"
+        assert {
+            index["name"] for index in inspector.get_indexes("lot_purge_events")
+        } >= {
+            "ix_lot_purge_events_lot_created",
+            "ix_lot_purge_events_actor_created",
+            "ix_lot_purge_events_cleanup_updated",
+        }
+
+        connection.execute(
+            sa.text(
+                """
+                INSERT INTO lot_purge_events
+                    (lot_id, lot_name, lot_version, reason)
+                VALUES
+                    (42, 'Deleted lot', 3, 'Confirmed duplicate receipt')
+                """
+            )
+        )
+        with pytest.raises(RuntimeError, match="lot purge audit data exists"):
+            purge.downgrade()
+        connection.execute(sa.text("DELETE FROM lot_purge_events"))
+        purge.downgrade()
+        assert "lot_purge_events" not in sa.inspect(connection).get_table_names()
+    engine.dispose()
+
+
+def test_purge_migration_offline_postgresql_sql_is_valid_and_safe() -> None:
+    migration = _load_purge_migration()
+    output = io.StringIO()
+    context = MigrationContext.configure(
+        dialect_name="postgresql",
+        opts={"as_sql": True, "output_buffer": output},
+    )
+    migration.op = Operations(context)
+
+    migration.upgrade()
+    migration.downgrade()
+    sql = output.getvalue()
+
+    assert "CREATE TABLE lot_purge_events" in sql
+    assert "FOREIGN KEY(actor_user_id) REFERENCES users" in sql
+    assert "FOREIGN KEY(lot_id) REFERENCES lots" not in sql
+    assert "IF EXISTS (SELECT 1 FROM lot_purge_events)" in sql
+    assert "RAISE EXCEPTION" in sql
+    assert "DROP TABLE lot_purge_events" in sql
+
+
+def test_purge_migration_follows_merge_revision() -> None:
+    migration = _load_purge_migration()
+    assert migration.revision == "0029_lot_purge_audit"
+    assert migration.down_revision == "0028_safe_lot_merge"
+
+
+def test_force_adjustment_migration_sqlite_is_compatible_and_guarded() -> None:
+    migration = _load_force_adjustment_migration()
+    engine = sa.create_engine("sqlite://", future=True)
+    with engine.begin() as connection:
+        connection.execute(
+            sa.text(
+                """
+                CREATE TABLE box_request_events (
+                    id INTEGER PRIMARY KEY,
+                    event_type VARCHAR(64) NOT NULL
+                )
+                """
+            )
+        )
+        migration.op = _operations(connection)
+        migration.upgrade()
+        migration.downgrade()
+
+        connection.execute(
+            sa.text(
+                """
+                INSERT INTO box_request_events (id, event_type)
+                VALUES (1, 'force_purge_adjusted')
+                """
+            )
+        )
+        with pytest.raises(
+            RuntimeError,
+            match="force purge adjustment events exist",
+        ):
+            migration.downgrade()
+    engine.dispose()
+
+
+def test_force_adjustment_migration_offline_postgresql_sql_is_safe() -> None:
+    migration = _load_force_adjustment_migration()
+    output = io.StringIO()
+    context = MigrationContext.configure(
+        dialect_name="postgresql",
+        opts={"as_sql": True, "output_buffer": output},
+    )
+    migration.op = Operations(context)
+
+    migration.upgrade()
+    migration.downgrade()
+    sql = output.getvalue()
+
+    assert (
+        "ALTER TYPE box_request_event_type "
+        "ADD VALUE IF NOT EXISTS 'force_purge_adjusted'"
+    ) in sql
+    assert "WHERE event_type = 'force_purge_adjusted'" in sql
+    assert "RAISE EXCEPTION" in sql
+
+
+def test_force_adjustment_migration_follows_purge_revision() -> None:
+    migration = _load_force_adjustment_migration()
+    assert migration.revision == "0030_force_purge_adjustment"
+    assert migration.down_revision == "0029_lot_purge_audit"

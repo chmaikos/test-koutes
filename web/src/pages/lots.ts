@@ -2,9 +2,20 @@ import type {
   BoxLotReassignmentPayload,
   BoxStatus,
   LotFilters,
+  LotForcePurgeConflict,
+  LotForcePurgePayload,
+  LotForcePurgePreview,
+  LotForcePurgeRequestRewrite,
   LotMergeCandidate,
   LotMergePayload,
   LotOption,
+  LotPurgeBlocker,
+  LotPurgeBlockerCode,
+  LotPurgeCleanupStatus,
+  LotPurgeConflict,
+  LotPurgeEntity,
+  LotPurgePayload,
+  LotPurgePreview,
   LotProgressState,
   LotRenamePayload,
   LotSortField,
@@ -226,6 +237,307 @@ export function reassignmentPayload(
     lot_id: lotId,
     reason: reason.trim(),
     expected_lot_version: sourceLotVersion,
+  };
+}
+
+export function canPurgeLot(
+  role: Role,
+  lot: { id: number; state?: "merged" },
+): boolean {
+  return role === "admin" && !("state" in lot && lot.state === "merged");
+}
+
+export function purgeConfirmationIsValid(
+  preview: LotPurgePreview | undefined,
+  confirmationName: string,
+  reason: string,
+): boolean {
+  return (
+    !!preview?.eligible &&
+    preview.blockers.length === 0 &&
+    confirmationName === preview.lot_name &&
+    reason.trim().length > 0 &&
+    reason.trim().length <= 2000
+  );
+}
+
+export function lotPurgePayload(
+  preview: LotPurgePreview,
+  confirmationName: string,
+  reason: string,
+): LotPurgePayload {
+  return {
+    confirmation_name: confirmationName,
+    reason: reason.trim(),
+    expected_version: preview.lot_version,
+    expected_graph_signature: preview.graph_signature,
+  };
+}
+
+export function lotPurgeConflict(error: unknown): LotPurgeConflict | null {
+  const response = (
+    error as {
+      response?: {
+        status?: number;
+        data?: { detail?: unknown };
+      };
+    }
+  ).response;
+  const detail = response?.data?.detail;
+  if (
+    response?.status !== 409 ||
+    typeof detail !== "object" ||
+    detail === null ||
+    !("code" in detail) ||
+    typeof detail.code !== "string" ||
+    !("message" in detail) ||
+    typeof detail.message !== "string"
+  ) {
+    return null;
+  }
+  const currentPreview =
+    "current_preview" in detail &&
+    (typeof detail.current_preview === "object" ||
+      detail.current_preview === null)
+      ? (detail.current_preview as LotPurgePreview | null)
+      : null;
+  return {
+    code: detail.code,
+    message: detail.message,
+    current_preview: currentPreview,
+  };
+}
+
+export function purgeConflictFormState(reason: string): {
+  confirmationName: string;
+  reason: string;
+} {
+  return { confirmationName: "", reason };
+}
+
+export function purgeSuccessAction(
+  status: LotPurgeCleanupStatus,
+): "navigate" | "cleanup_required" {
+  return status === "completed" || status === "not_required"
+    ? "navigate"
+    : "cleanup_required";
+}
+
+export function purgeCleanupWarning(
+  auditId: number,
+  status: LotPurgeCleanupStatus,
+  failureCount: number,
+): string {
+  const failureSummary =
+    failureCount === 0
+      ? "Cleanup remains pending without a reported object failure."
+      : `${failureCount} stored ${
+          failureCount === 1 ? "object has" : "objects have"
+        } not been confirmed deleted.`;
+  return `The lot data is permanently gone, but storage cleanup is ${status.replaceAll(
+    "_",
+    " ",
+  )}. ${failureSummary} Purge audit #${auditId} can be retried by an administrator.`;
+}
+
+export function lotPurgeRemovalItems(preview: LotPurgePreview): string[] {
+  return [
+    `Lot “${preview.lot_name}” (version ${preview.lot_version})`,
+    `${preview.archived_box_count} archived ${
+      preview.archived_box_count === 1 ? "box" : "boxes"
+    } and their box history`,
+    `${preview.linked_request_count} exclusive self-${
+      preview.linked_request_count === 1 ? "receipt" : "receipts"
+    } and all owned request records`,
+    `${preview.object_key_count} stored ${
+      preview.object_key_count === 1 ? "object" : "objects"
+    }`,
+  ];
+}
+
+const PURGE_BLOCKER_TEXT: Record<LotPurgeBlockerCode, string> = {
+  merged_tombstone: "Merged source lots are retained as audit tombstones.",
+  merge_target:
+    "This lot has merged source tombstones and must remain as their target.",
+  active_boxes: "Archive every active box before trying the purge again.",
+  no_archived_boxes: "At least one archived box is required for this purge.",
+  no_self_receipts:
+    "The lot has no exclusive completed self-receipt eligible for removal.",
+  staged_requests:
+    "Resolve every staged or submitted receipt before trying the purge again.",
+  open_requests: "Complete or resolve every open request workflow first.",
+  requests_not_completed:
+    "Every linked request must be completed; terminal non-completed requests block purge.",
+  unsupported_request_origin:
+    "Only manual-entry and XLSX-import self-receipts are supported.",
+  unsupported_request_direction:
+    "Return or other non-inbound requests cannot be removed with this lot.",
+  mixed_lot_receipt:
+    "A linked receipt contains another lot, so it is not exclusively owned by this lot.",
+  incomplete_receipt_provenance:
+    "Every receipt line must point to one archived physical box in this lot.",
+  request_family:
+    "A follow-up, return, parent, child, or request-family relationship must be retained.",
+  foreign_request_reference:
+    "Another request or inconsistent item still refers to this receipt graph.",
+  unlinked_archived_boxes:
+    "Every archived box must be traceable to one of the completed self-receipts.",
+  shared_object_key:
+    "Another request references the same stored object, so storage cleanup would be unsafe.",
+  workflow_history:
+    "The request has workflow history beyond its initial completed self-receipt event.",
+  box_reassignment_history:
+    "A lot or box reassignment is part of retained audit history.",
+  merge_history: "Merge history must be retained and prevents purge.",
+  box_workflow_history:
+    "Movement, restoration, return, or status history for a box must be retained.",
+};
+
+export function lotPurgeBlockerText(blocker: LotPurgeBlocker): string {
+  return PURGE_BLOCKER_TEXT[blocker.code] ?? blocker.remediation;
+}
+
+export function lotPurgeEntityPath(
+  entity: LotPurgeEntity,
+  currentLotId: number,
+): string {
+  switch (entity.entity_type) {
+    case "box":
+      return `/boxes/${entity.entity_id}`;
+    case "request":
+      return `/requests/${entity.entity_id}`;
+    case "lot":
+      return `/lots/${entity.entity_id}`;
+    case "event":
+      return `/lots/${currentLotId}#lot-audit-history`;
+  }
+}
+
+export const FORCE_PURGE_MIN_REASON_LENGTH = 20;
+
+export function shouldOfferForcePurgeEscalation(
+  role: Role,
+  lot: { id: number; state?: "merged" },
+  safePreview: LotPurgePreview | undefined,
+): boolean {
+  return (
+    canPurgeLot(role, lot) &&
+    !!safePreview &&
+    (!safePreview.eligible || safePreview.blockers.length > 0)
+  );
+}
+
+export function forcePurgeHasHardBlock(
+  preview: LotForcePurgePreview | undefined,
+): boolean {
+  return !!preview && (!preview.force_allowed || preview.hard_blockers.length > 0);
+}
+
+export function forcePurgeChange(
+  before: number | null,
+  after: number | null,
+): string {
+  return `${before ?? "—"} → ${after ?? "—"}`;
+}
+
+export function forcePurgeSiblingPreservationText(
+  rewrite: LotForcePurgeRequestRewrite,
+): string {
+  const count = rewrite.preserved_sibling_lot_count;
+  return `${count} sibling ${count === 1 ? "lot is" : "lots are"} preserved with the rewritten request.`;
+}
+
+function requiredForceBlockerCodes(
+  preview: LotForcePurgePreview,
+): string[] {
+  return [...new Set(preview.overridden_blockers.map((blocker) => blocker.code))];
+}
+
+export function forcePurgeConfirmationIsValid(
+  preview: LotForcePurgePreview | undefined,
+  confirmationName: string,
+  confirmationPhrase: string,
+  reason: string,
+  acknowledgedBlockerCodes: readonly string[],
+): boolean {
+  if (!preview || forcePurgeHasHardBlock(preview)) return false;
+  const requiredCodes = requiredForceBlockerCodes(preview);
+  const suppliedCodes = [...new Set(acknowledgedBlockerCodes)];
+  return (
+    confirmationName === preview.lot_name &&
+    confirmationPhrase === preview.confirmation_phrase &&
+    reason.trim().length >= FORCE_PURGE_MIN_REASON_LENGTH &&
+    reason.trim().length <= 2000 &&
+    suppliedCodes.length === acknowledgedBlockerCodes.length &&
+    suppliedCodes.length === requiredCodes.length &&
+    requiredCodes.every((code) => suppliedCodes.includes(code))
+  );
+}
+
+export function lotForcePurgePayload(
+  preview: LotForcePurgePreview,
+  confirmationName: string,
+  confirmationPhrase: string,
+  reason: string,
+  acknowledgedBlockerCodes: readonly string[],
+): LotForcePurgePayload {
+  return {
+    confirmation_name: confirmationName,
+    confirmation_phrase: confirmationPhrase,
+    reason: reason.trim(),
+    expected_version: preview.lot_version,
+    expected_graph_signature: preview.graph_signature,
+    acknowledged_blocker_codes: [...acknowledgedBlockerCodes].sort(),
+  };
+}
+
+export function lotForcePurgeConflict(
+  error: unknown,
+): LotForcePurgeConflict | null {
+  const response = (
+    error as {
+      response?: {
+        status?: number;
+        data?: { detail?: unknown };
+      };
+    }
+  ).response;
+  const detail = response?.data?.detail;
+  if (
+    response?.status !== 409 ||
+    typeof detail !== "object" ||
+    detail === null ||
+    !("code" in detail) ||
+    typeof detail.code !== "string" ||
+    !("message" in detail) ||
+    typeof detail.message !== "string"
+  ) {
+    return null;
+  }
+  const currentPreview =
+    "current_preview" in detail &&
+    (typeof detail.current_preview === "object" ||
+      detail.current_preview === null)
+      ? (detail.current_preview as LotForcePurgePreview | null)
+      : null;
+  return {
+    code: detail.code,
+    message: detail.message,
+    current_preview: currentPreview,
+  };
+}
+
+export function forcePurgeConflictFormState(reason: string): {
+  confirmationName: string;
+  confirmationPhrase: string;
+  reason: string;
+  acknowledgedBlockerCodes: string[];
+} {
+  return {
+    confirmationName: "",
+    confirmationPhrase: "",
+    reason,
+    acknowledgedBlockerCodes: [],
   };
 }
 

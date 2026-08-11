@@ -24,9 +24,16 @@ import type {
   LotDetail,
   LotEvent,
   LotFilters,
+  LotForcePurgePayload,
+  LotForcePurgePreview,
+  LotForcePurgeResult,
   LotMergePayload,
   LotMergeResult,
   LotOption,
+  LotPurgeCleanupResult,
+  LotPurgePayload,
+  LotPurgePreview,
+  LotPurgeResult,
   LotRenamePayload,
   LotSummary,
   MergedLot,
@@ -84,6 +91,9 @@ export const queryKeys = {
     ["lot-options", search, page, limit] as const,
   lot: (id: number) => ["lot", id] as const,
   lotEvents: (id: number) => ["lot-events", id] as const,
+  lotPurgePreview: (id: number) => ["lot-purge-preview", id] as const,
+  lotForcePurgePreview: (id: number) =>
+    ["lot-force-purge-preview", id] as const,
   lotBoxes: (id: number, filters: BoxFilters, page: number, pageSize: number) =>
     ["lot-boxes", id, filters, page, pageSize] as const,
   requests: (filters: RequestFilters, page: number, pageSize: number) =>
@@ -430,9 +440,18 @@ function invalidateLotState(
 ) {
   qc.invalidateQueries({ queryKey: ["lots"] });
   qc.invalidateQueries({ queryKey: ["lot-options"] });
+  if (lotIds.length === 0) {
+    qc.invalidateQueries({ queryKey: ["lot"] });
+    qc.invalidateQueries({ queryKey: ["lot-events"] });
+    qc.invalidateQueries({ queryKey: ["lot-boxes"] });
+    qc.invalidateQueries({ queryKey: ["lot-purge-preview"] });
+    qc.invalidateQueries({ queryKey: ["lot-force-purge-preview"] });
+  }
   for (const id of lotIds) {
     qc.invalidateQueries({ queryKey: queryKeys.lot(id) });
     qc.invalidateQueries({ queryKey: queryKeys.lotEvents(id) });
+    qc.invalidateQueries({ queryKey: queryKeys.lotPurgePreview(id) });
+    qc.invalidateQueries({ queryKey: queryKeys.lotForcePurgePreview(id) });
     qc.invalidateQueries({ queryKey: ["lot-boxes", id] });
   }
 }
@@ -477,6 +496,38 @@ export function useLotEvents(id: number | undefined) {
     queryFn: async () =>
       (await api.get<LotDetail>(`/lots/${id}`)).data.audit_history as LotEvent[],
     enabled: !!id,
+  });
+}
+
+export function useLotPurgePreview(
+  id: number | undefined,
+  enabled: boolean,
+) {
+  return useQuery({
+    queryKey: id ? queryKeys.lotPurgePreview(id) : ["lot-purge-preview", "noop"],
+    queryFn: async () =>
+      (await api.get<LotPurgePreview>(`/lots/${id}/purge-preview`)).data,
+    enabled: enabled && !!id,
+    staleTime: 0,
+  });
+}
+
+export function useLotForcePurgePreview(
+  id: number | undefined,
+  enabled: boolean,
+) {
+  return useQuery({
+    queryKey: id
+      ? queryKeys.lotForcePurgePreview(id)
+      : ["lot-force-purge-preview", "noop"],
+    queryFn: async () =>
+      (
+        await api.get<LotForcePurgePreview>(
+          `/lots/${id}/force-purge-preview`,
+        )
+      ).data,
+    enabled: enabled && !!id,
+    staleTime: 0,
   });
 }
 
@@ -557,6 +608,91 @@ export function useMergeLots() {
       qc.invalidateQueries({ queryKey: ["return-candidates"] });
       qc.invalidateQueries({ queryKey: queryKeys.dashboard });
     },
+  });
+}
+
+function invalidatePurgedLotState(
+  qc: ReturnType<typeof useQueryClient>,
+  lotId: number,
+) {
+  qc.invalidateQueries({ queryKey: ["lots"] });
+  qc.invalidateQueries({ queryKey: ["lot-options"] });
+  qc.invalidateQueries({ queryKey: ["boxes"] });
+  qc.invalidateQueries({ queryKey: ["requests"] });
+  qc.invalidateQueries({ queryKey: ["request-reconciliation"] });
+  qc.invalidateQueries({ queryKey: ["request-analytics"] });
+  qc.invalidateQueries({ queryKey: ["request-suggestion"] });
+  qc.invalidateQueries({ queryKey: ["return-sources"] });
+  qc.invalidateQueries({ queryKey: ["return-candidates"] });
+  qc.invalidateQueries({ queryKey: ["notifications"] });
+  qc.invalidateQueries({ queryKey: ["alerts"] });
+  qc.invalidateQueries({ queryKey: ["exports"] });
+  qc.invalidateQueries({ queryKey: queryKeys.dashboard });
+  qc.removeQueries({ queryKey: ["box"] });
+  qc.removeQueries({ queryKey: ["box-events"] });
+  qc.removeQueries({ queryKey: ["request"] });
+  qc.removeQueries({ queryKey: ["request-events"] });
+  qc.removeQueries({ queryKey: ["request-documents"] });
+  qc.removeQueries({ queryKey: ["request-comments"] });
+  qc.removeQueries({ queryKey: ["request-attachments"] });
+  qc.removeQueries({ queryKey: ["request-discrepancies"] });
+  qc.removeQueries({ queryKey: queryKeys.lot(lotId), exact: true });
+  qc.removeQueries({ queryKey: queryKeys.lotEvents(lotId), exact: true });
+  qc.removeQueries({ queryKey: ["lot-boxes", lotId] });
+  qc.removeQueries({ queryKey: queryKeys.lotPurgePreview(lotId), exact: true });
+  qc.removeQueries({
+    queryKey: queryKeys.lotForcePurgePreview(lotId),
+    exact: true,
+  });
+}
+
+export function usePurgeLot() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: { lotId: number; payload: LotPurgePayload }) =>
+      (await api.post<LotPurgeResult>(`/lots/${input.lotId}/purge`, input.payload))
+        .data,
+    onSuccess: (_result, input) =>
+      invalidatePurgedLotState(qc, input.lotId),
+    onError: (_error, input) => {
+      qc.invalidateQueries({
+        queryKey: queryKeys.lotPurgePreview(input.lotId),
+      });
+    },
+  });
+}
+
+export function useForcePurgeLot() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: {
+      lotId: number;
+      payload: LotForcePurgePayload;
+    }) =>
+      (
+        await api.post<LotForcePurgeResult>(
+          `/lots/${input.lotId}/force-purge`,
+          input.payload,
+        )
+      ).data,
+    onSuccess: (_result, input) =>
+      invalidatePurgedLotState(qc, input.lotId),
+    onError: (_error, input) => {
+      qc.invalidateQueries({
+        queryKey: queryKeys.lotForcePurgePreview(input.lotId),
+      });
+    },
+  });
+}
+
+export function useRetryLotPurgeCleanup() {
+  return useMutation({
+    mutationFn: async (auditId: number) =>
+      (
+        await api.post<LotPurgeCleanupResult>(
+          `/lots/purge-audits/${auditId}/cleanup-retry`,
+        )
+      ).data,
   });
 }
 
@@ -653,6 +789,7 @@ export function useDeleteBox() {
       ).data;
     },
     onSuccess: () => {
+      invalidateLotState(qc);
       qc.invalidateQueries({ queryKey: ["boxes"] });
       qc.invalidateQueries({ queryKey: queryKeys.dashboard });
       qc.invalidateQueries({ queryKey: ["alerts"] });
@@ -673,6 +810,7 @@ export function useBulkDeleteBoxes() {
     }) =>
       (await api.post<BulkDeleteResult>("/boxes/bulk-delete", input)).data,
     onSuccess: () => {
+      invalidateLotState(qc);
       qc.invalidateQueries({ queryKey: ["boxes"] });
       qc.invalidateQueries({ queryKey: queryKeys.dashboard });
       qc.invalidateQueries({ queryKey: ["alerts"] });

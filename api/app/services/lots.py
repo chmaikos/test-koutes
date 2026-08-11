@@ -1,11 +1,25 @@
 """Domain operations for first-class lot identities."""
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
 
-from sqlalchemy import Float, case, cast, func, literal, or_, select, union_all
+from sqlalchemy import (
+    Float,
+    and_,
+    case,
+    cast,
+    delete,
+    func,
+    literal,
+    or_,
+    select,
+    union_all,
+    update,
+)
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -21,11 +35,24 @@ from app.models.lots import (
     Lot,
     LotEvent,
     LotEventType,
+    LotPurgeCleanupStatus,
+    LotPurgeEvent,
     clean_lot_name,
     normalize_lot_name,
 )
+from app.models.notifications import InAppNotification, RequestEmailOutbox
 from app.models.requests import (
     BoxRequest,
+    BoxRequestAttachment,
+    BoxRequestComment,
+    BoxRequestDirection,
+    BoxRequestDiscrepancy,
+    BoxRequestDiscrepancyPhoto,
+    BoxRequestDiscrepancyType,
+    BoxRequestDocument,
+    BoxRequestEvent,
+    BoxRequestEventType,
+    BoxRequestException,
     BoxRequestItem,
     BoxRequestOrigin,
     BoxRequestStatus,
@@ -33,6 +60,7 @@ from app.models.requests import (
 from app.models.users import User, UserRole
 from app.models.warehouses import Warehouse
 from app.services.acl import allowed_warehouse_ids, can_access
+from app.services.object_storage import delete_document_strict
 
 
 class LotRuleError(ValueError):
@@ -139,6 +167,216 @@ class LotOption:
     name: str
     normalized_name: str
     exact_normalized_match: bool
+
+
+class LotPurgeAnalysisError(LotRuleError):
+    """Base error for purge preview and locked revalidation."""
+
+
+class LotPurgeNotFoundError(LotPurgeAnalysisError):
+    """The requested lot does not exist, including as a merge tombstone."""
+
+
+class LotPurgeConflictError(LotPurgeAnalysisError):
+    """A purge confirmation or locked graph no longer matches."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str,
+        preview: LotPurgeEligibility | LotForcePurgeImpactPlan | None = None,
+    ):
+        super().__init__(message)
+        self.code = code
+        self.preview = preview
+
+
+@dataclass(frozen=True)
+class LotPurgeEntity:
+    entity_type: str
+    entity_id: int
+
+
+@dataclass(frozen=True)
+class LotPurgeBlocker:
+    code: str
+    message: str
+    remediation: str
+    entities: list[LotPurgeEntity]
+    entity_count: int
+    entities_truncated: bool
+
+
+@dataclass(frozen=True)
+class LotPurgeRequestPreview:
+    request_id: int
+    origin: str
+    status: str
+    direction: str
+    item_count: int
+    lot_item_count: int
+
+
+@dataclass(frozen=True)
+class LotPurgeEligibility:
+    lot_id: int
+    lot_name: str
+    lot_version: int
+    active_box_count: int
+    active_box_ids: list[int]
+    active_box_ids_truncated: bool
+    archived_box_count: int
+    archived_box_ids: list[int]
+    archived_box_ids_truncated: bool
+    linked_request_count: int
+    linked_request_ids: list[int]
+    linked_request_ids_truncated: bool
+    requests: list[LotPurgeRequestPreview]
+    requests_truncated: bool
+    object_key_count: int
+    graph_signature: str
+    eligible: bool
+    blockers: list[LotPurgeBlocker]
+
+
+@dataclass(frozen=True)
+class LotPurgeCleanupResult:
+    audit_id: int
+    status: LotPurgeCleanupStatus
+    failures: list[dict[str, object]]
+
+
+@dataclass(frozen=True)
+class LotPurgeResult:
+    audit_id: int
+    lot_id: int
+    lot_name: str
+    lot_version: int
+    archived_box_count: int
+    receipt_count: int
+    object_key_count: int
+    object_cleanup_status: LotPurgeCleanupStatus
+    object_cleanup_failures: list[dict[str, object]]
+    warehouse_ids: list[int]
+
+
+@dataclass(frozen=True)
+class LotForcePurgeResult:
+    audit_id: int
+    lot_id: int
+    lot_name: str
+    lot_version: int
+    active_box_count: int
+    archived_box_count: int
+    touched_request_count: int
+    rewritten_request_count: int
+    deleted_request_count: int
+    lineage_detachment_count: int
+    deletable_object_count: int
+    skipped_object_count: int
+    object_cleanup_status: LotPurgeCleanupStatus
+    object_cleanup_failures: list[dict[str, object]]
+    warehouse_ids: list[int]
+
+
+@dataclass(frozen=True)
+class LotForcePurgeItemPosition:
+    item_id: int
+    before_position: int
+    after_position: int | None
+
+
+@dataclass(frozen=True)
+class LotForcePurgeRequestRewrite:
+    request_id: int
+    adjustment_event_type: str
+    origin: str
+    status: str
+    direction: str
+    before_item_count: int
+    after_item_count: int
+    before_quantity: int
+    after_quantity: int
+    before_actual_received_quantity: int | None
+    after_actual_received_quantity: int | None
+    before_variance_quantity: int | None
+    after_variance_quantity: int | None
+    item_positions: list[LotForcePurgeItemPosition]
+    item_positions_truncated: bool
+    removed_item_ids: list[int]
+    removed_item_count: int
+    removed_item_ids_truncated: bool
+    removed_discrepancy_ids: list[int]
+    removed_discrepancy_count: int
+    removed_discrepancy_ids_truncated: bool
+    removed_discrepancy_photo_ids: list[int]
+    removed_discrepancy_photo_count: int
+    removed_discrepancy_photo_ids_truncated: bool
+    preserved_sibling_lot_ids: list[int]
+    preserved_sibling_lot_count: int
+    preserved_sibling_lot_ids_truncated: bool
+
+
+@dataclass(frozen=True)
+class LotForcePurgeLineageDetach:
+    request_id: int
+    field_name: Literal[
+        "source_inbound_request_id",
+        "parent_request_id",
+        "root_request_id",
+    ]
+    deleted_target_request_id: int
+
+
+@dataclass(frozen=True)
+class LotForcePurgeObjectCleanupPlan:
+    deletable_keys: list[str]
+    deletable_key_count: int
+    deletable_keys_truncated: bool
+    shared_skipped_keys: list[str]
+    shared_skipped_key_count: int
+    shared_skipped_keys_truncated: bool
+
+
+@dataclass(frozen=True)
+class LotForcePurgeBlocker:
+    code: str
+    message: str
+    entity_ids: list[int]
+    entity_count: int
+    entity_ids_truncated: bool
+
+
+@dataclass(frozen=True)
+class LotForcePurgeImpactPlan:
+    lot_id: int
+    lot_name: str
+    lot_version: int
+    confirmation_phrase: str
+    active_box_ids: list[int]
+    active_box_count: int
+    active_box_ids_truncated: bool
+    archived_box_ids: list[int]
+    archived_box_count: int
+    archived_box_ids_truncated: bool
+    touched_request_ids: list[int]
+    touched_request_count: int
+    touched_request_ids_truncated: bool
+    request_rewrites: list[LotForcePurgeRequestRewrite]
+    request_rewrite_count: int
+    request_rewrites_truncated: bool
+    fully_deleted_request_ids: list[int]
+    fully_deleted_request_count: int
+    fully_deleted_request_ids_truncated: bool
+    incoming_lineage_detachments: list[LotForcePurgeLineageDetach]
+    incoming_lineage_detachment_count: int
+    incoming_lineage_detachments_truncated: bool
+    object_cleanup: LotForcePurgeObjectCleanupPlan
+    hard_blockers: list[LotForcePurgeBlocker]
+    overridden_blockers: list[LotForcePurgeBlocker]
+    graph_signature: str
+    force_allowed: bool
 
 
 def validate_lot_name(value: str) -> str:
@@ -375,6 +613,2924 @@ def resolve_lot(
     if existing is None:
         raise LotNotFoundError(f"lot {validate_lot_name(lot)!r} not found")
     return existing
+
+
+_PURGE_LIST_LIMIT = 100
+_PURGE_RECEIPT_ORIGINS = {
+    BoxRequestOrigin.manual_entry,
+    BoxRequestOrigin.xlsx_import,
+}
+
+
+def _purge_lot_lock_statement(lot_id: int):
+    return (
+        select(Lot)
+        .where(Lot.id == lot_id)
+        .with_for_update(of=Lot)
+    )
+
+
+def _purge_box_lock_statement(lot_id: int):
+    return (
+        select(Box)
+        .where(Box.lot_id == lot_id)
+        .order_by(Box.id)
+        .with_for_update(of=Box)
+    )
+
+
+def _purge_request_lock_statement(request_ids: list[int]):
+    return (
+        select(BoxRequest.id)
+        .where(BoxRequest.id.in_(sorted(set(request_ids))))
+        .order_by(BoxRequest.id)
+        .with_for_update(of=BoxRequest)
+    )
+
+
+def _purge_request_item_lock_statement(request_ids: list[int]):
+    return (
+        select(BoxRequestItem.id)
+        .where(BoxRequestItem.request_id.in_(sorted(set(request_ids))))
+        .order_by(BoxRequestItem.id)
+        .with_for_update(of=BoxRequestItem)
+    )
+
+
+def _purge_owned_lock_statements(
+    *,
+    lot_id: int,
+    box_ids: list[int],
+    request_ids: list[int],
+    discrepancy_ids: list[int],
+) -> list:
+    """Build explicit PostgreSQL lock targets for every purge-owned table."""
+    statements = []
+    if request_ids:
+        statements.append(
+            select(BoxRequestDiscrepancy.id)
+            .where(BoxRequestDiscrepancy.request_id.in_(request_ids))
+            .order_by(BoxRequestDiscrepancy.id)
+            .with_for_update(of=BoxRequestDiscrepancy)
+        )
+        for model in (
+            BoxRequestEvent,
+            BoxRequestException,
+            BoxRequestDocument,
+            BoxRequestComment,
+            BoxRequestAttachment,
+            InAppNotification,
+            RequestEmailOutbox,
+        ):
+            statements.append(
+                select(model.id)
+                .where(model.request_id.in_(request_ids))
+                .order_by(model.id)
+                .with_for_update(of=model)
+            )
+        if discrepancy_ids:
+            statements.append(
+                select(BoxRequestDiscrepancyPhoto.id)
+                .where(
+                    BoxRequestDiscrepancyPhoto.discrepancy_id.in_(discrepancy_ids)
+                )
+                .order_by(BoxRequestDiscrepancyPhoto.id)
+                .with_for_update(of=BoxRequestDiscrepancyPhoto)
+            )
+    if box_ids:
+        statements.append(
+            select(BoxEvent.id)
+            .where(BoxEvent.box_id.in_(box_ids))
+            .order_by(BoxEvent.id)
+            .with_for_update(of=BoxEvent)
+        )
+    statements.append(
+        select(LotEvent.id)
+        .where(LotEvent.lot_id == lot_id)
+        .order_by(LotEvent.id)
+        .with_for_update(of=LotEvent)
+    )
+    return statements
+
+
+def _lock_purge_owned_rows(
+    db: Session,
+    *,
+    lot_id: int,
+    box_ids: list[int],
+    request_ids: list[int],
+) -> None:
+    """Lock every row whose mutable state or object key is purge-owned."""
+    discrepancy_ids = (
+        list(
+            db.scalars(
+                select(BoxRequestDiscrepancy.id)
+                .where(BoxRequestDiscrepancy.request_id.in_(request_ids))
+                .order_by(BoxRequestDiscrepancy.id)
+            ).all()
+        )
+        if request_ids
+        else []
+    )
+    for statement in _purge_owned_lock_statements(
+        lot_id=lot_id,
+        box_ids=box_ids,
+        request_ids=request_ids,
+        discrepancy_ids=discrepancy_ids,
+    ):
+        db.execute(statement).all()
+
+
+def _bounded_ids(ids: list[int]) -> tuple[list[int], bool]:
+    ordered = sorted(set(ids))
+    return ordered[:_PURGE_LIST_LIMIT], len(ordered) > _PURGE_LIST_LIMIT
+
+
+def _purge_entities(entity_type: str, ids: list[int]) -> list[LotPurgeEntity]:
+    bounded, _truncated = _bounded_ids(ids)
+    return [
+        LotPurgeEntity(entity_type=entity_type, entity_id=entity_id)
+        for entity_id in bounded
+    ]
+
+
+def _enum_text(value: object) -> str:
+    return str(getattr(value, "value", value))
+
+
+def _bounded_strings(values: list[str]) -> tuple[list[str], bool]:
+    ordered = sorted(set(values))
+    return ordered[:_PURGE_LIST_LIMIT], len(ordered) > _PURGE_LIST_LIMIT
+
+
+def _force_purge_lot_lock_statement(lot_id: int):
+    return (
+        select(Lot)
+        .where(Lot.id == lot_id)
+        .with_for_update(of=Lot)
+    )
+
+
+def _force_purge_box_lock_statement(lot_id: int):
+    return (
+        select(Box)
+        .where(Box.lot_id == lot_id)
+        .order_by(Box.id)
+        .with_for_update(of=Box)
+    )
+
+
+def _force_purge_request_lock_statement(request_ids: list[int]):
+    return (
+        select(BoxRequest.id)
+        .where(BoxRequest.id.in_(sorted(set(request_ids))))
+        .order_by(BoxRequest.id)
+        .with_for_update(of=BoxRequest)
+    )
+
+
+def _force_purge_item_lock_statement(request_ids: list[int]):
+    return (
+        select(BoxRequestItem.id)
+        .where(BoxRequestItem.request_id.in_(sorted(set(request_ids))))
+        .order_by(BoxRequestItem.id)
+        .with_for_update(of=BoxRequestItem)
+    )
+
+
+def _force_purge_discrepancy_lock_statement(request_ids: list[int]):
+    return (
+        select(BoxRequestDiscrepancy.id)
+        .where(BoxRequestDiscrepancy.request_id.in_(sorted(set(request_ids))))
+        .order_by(BoxRequestDiscrepancy.id)
+        .with_for_update(of=BoxRequestDiscrepancy)
+    )
+
+
+def _force_blocker(blocker: LotPurgeBlocker) -> LotForcePurgeBlocker:
+    entity_ids = [entity.entity_id for entity in blocker.entities]
+    return LotForcePurgeBlocker(
+        code=blocker.code,
+        message=blocker.message,
+        entity_ids=entity_ids,
+        entity_count=blocker.entity_count,
+        entity_ids_truncated=blocker.entities_truncated,
+    )
+
+
+def _force_object_key_reference_rows(db: Session, object_keys: list[str]):
+    if not object_keys:
+        return []
+    references = union_all(
+        select(
+            literal("document").label("row_type"),
+            BoxRequestDocument.id.label("row_id"),
+            BoxRequestDocument.request_id.label("request_id"),
+            BoxRequestDocument.object_key.label("object_key"),
+        ),
+        select(
+            literal("attachment").label("row_type"),
+            BoxRequestAttachment.id.label("row_id"),
+            BoxRequestAttachment.request_id.label("request_id"),
+            BoxRequestAttachment.object_key.label("object_key"),
+        ),
+        select(
+            literal("discrepancy_photo").label("row_type"),
+            BoxRequestDiscrepancyPhoto.id.label("row_id"),
+            BoxRequestDiscrepancy.request_id.label("request_id"),
+            BoxRequestDiscrepancyPhoto.object_key.label("object_key"),
+        ).join(
+            BoxRequestDiscrepancy,
+            BoxRequestDiscrepancy.id
+            == BoxRequestDiscrepancyPhoto.discrepancy_id,
+        ),
+    ).subquery()
+    return db.execute(
+        select(
+            references.c.row_type,
+            references.c.row_id,
+            references.c.request_id,
+            references.c.object_key,
+        )
+        .where(references.c.object_key.in_(object_keys))
+        .order_by(
+            references.c.object_key,
+            references.c.row_type,
+            references.c.row_id,
+        )
+    ).all()
+
+
+def analyze_lot_force_purge_impact(
+    db: Session,
+    *,
+    lot_id: int,
+    lock_for_update: bool = False,
+) -> LotForcePurgeImpactPlan:
+    """Plan a surgical, single-Lot force purge without mutating the graph.
+
+    The selected Lot and all of its active and archived boxes are in scope.
+    Request items are in scope when either their ``lot_id`` matches the Lot or
+    their ``box_id`` points at one of those boxes. Requests with surviving items
+    are rewritten; only requests with no survivors are planned for full removal.
+    """
+    lot = db.scalar(
+        _force_purge_lot_lock_statement(lot_id)
+        if lock_for_update
+        else select(Lot).where(Lot.id == lot_id)
+    )
+    if lot is None:
+        raise LotPurgeNotFoundError(f"lot {lot_id} not found")
+
+    boxes = list(
+        db.scalars(
+            _force_purge_box_lock_statement(lot_id)
+            if lock_for_update
+            else select(Box).where(Box.lot_id == lot_id).order_by(Box.id)
+        ).all()
+    )
+    box_ids = [box.id for box in boxes]
+    box_id_set = set(box_ids)
+    selected_item = BoxRequestItem.lot_id == lot_id
+    if box_ids:
+        selected_item = or_(selected_item, BoxRequestItem.box_id.in_(box_ids))
+    touched_request_ids_query = select(BoxRequestItem.request_id).where(selected_item)
+    if box_ids:
+        touched_request_ids_query = union_all(
+            touched_request_ids_query,
+            select(BoxRequestDiscrepancy.request_id).where(
+                BoxRequestDiscrepancy.box_id.in_(box_ids)
+            ),
+        )
+    touched_request_ids_subquery = touched_request_ids_query.subquery()
+    touched_request_ids_all = [
+        int(request_id)
+        for request_id in db.scalars(
+            select(touched_request_ids_subquery.c.request_id)
+            .distinct()
+            .order_by(touched_request_ids_subquery.c.request_id)
+        ).all()
+    ]
+
+    preliminary_deleted_request_ids: list[int] = []
+    preliminary_incoming_request_ids: list[int] = []
+    if lock_for_update and touched_request_ids_all:
+        item_counts = db.execute(
+            select(
+                BoxRequestItem.request_id,
+                func.count(BoxRequestItem.id).label("item_count"),
+                func.sum(case((selected_item, 1), else_=0)).label(
+                    "selected_item_count"
+                ),
+            )
+            .where(
+                BoxRequestItem.request_id.in_(touched_request_ids_all)
+            )
+            .group_by(BoxRequestItem.request_id)
+            .order_by(BoxRequestItem.request_id)
+        ).all()
+        preliminary_deleted_request_ids = [
+            int(row.request_id)
+            for row in item_counts
+            if int(row.item_count) == int(row.selected_item_count or 0)
+        ]
+        if preliminary_deleted_request_ids:
+            preliminary_incoming_request_ids = [
+                int(request_id)
+                for request_id in db.scalars(
+                    select(BoxRequest.id)
+                    .where(
+                        BoxRequest.id.not_in(
+                            preliminary_deleted_request_ids
+                        ),
+                        or_(
+                            BoxRequest.source_inbound_request_id.in_(
+                                preliminary_deleted_request_ids
+                            ),
+                            BoxRequest.parent_request_id.in_(
+                                preliminary_deleted_request_ids
+                            ),
+                            BoxRequest.root_request_id.in_(
+                                preliminary_deleted_request_ids
+                            ),
+                        ),
+                    )
+                    .order_by(BoxRequest.id)
+                ).all()
+            ]
+        db.execute(
+            _force_purge_request_lock_statement(
+                touched_request_ids_all
+                + preliminary_incoming_request_ids
+            )
+        ).all()
+        db.execute(_force_purge_item_lock_statement(touched_request_ids_all)).all()
+        db.execute(
+            _force_purge_discrepancy_lock_statement(touched_request_ids_all)
+        ).all()
+        _lock_purge_owned_rows(
+            db,
+            lot_id=lot_id,
+            box_ids=box_ids,
+            request_ids=touched_request_ids_all,
+        )
+
+    requests = (
+        list(
+            db.scalars(
+                select(BoxRequest)
+                .where(BoxRequest.id.in_(touched_request_ids_all))
+                .order_by(BoxRequest.id)
+            ).all()
+        )
+        if touched_request_ids_all
+        else []
+    )
+    items = (
+        list(
+            db.scalars(
+                select(BoxRequestItem)
+                .where(BoxRequestItem.request_id.in_(touched_request_ids_all))
+                .order_by(
+                    BoxRequestItem.request_id,
+                    BoxRequestItem.position,
+                    BoxRequestItem.id,
+                )
+            ).all()
+        )
+        if touched_request_ids_all
+        else []
+    )
+    discrepancies = (
+        list(
+            db.scalars(
+                select(BoxRequestDiscrepancy)
+                .where(
+                    BoxRequestDiscrepancy.request_id.in_(
+                        touched_request_ids_all
+                    )
+                )
+                .order_by(
+                    BoxRequestDiscrepancy.request_id,
+                    BoxRequestDiscrepancy.id,
+                )
+            ).all()
+        )
+        if touched_request_ids_all
+        else []
+    )
+    discrepancy_ids = [discrepancy.id for discrepancy in discrepancies]
+    photo_rows = (
+        db.execute(
+            select(
+                BoxRequestDiscrepancyPhoto.id,
+                BoxRequestDiscrepancyPhoto.discrepancy_id,
+                BoxRequestDiscrepancyPhoto.object_key,
+            )
+            .where(
+                BoxRequestDiscrepancyPhoto.discrepancy_id.in_(discrepancy_ids)
+            )
+            .order_by(
+                BoxRequestDiscrepancyPhoto.discrepancy_id,
+                BoxRequestDiscrepancyPhoto.id,
+            )
+        ).all()
+        if discrepancy_ids
+        else []
+    )
+
+    items_by_request: dict[int, list[BoxRequestItem]] = {
+        request_id: [] for request_id in touched_request_ids_all
+    }
+    for item in items:
+        items_by_request[item.request_id].append(item)
+    discrepancies_by_request: dict[int, list[BoxRequestDiscrepancy]] = {
+        request_id: [] for request_id in touched_request_ids_all
+    }
+    for discrepancy in discrepancies:
+        discrepancies_by_request[discrepancy.request_id].append(discrepancy)
+    photos_by_discrepancy: dict[int, list[tuple[int, str]]] = {
+        discrepancy_id: [] for discrepancy_id in discrepancy_ids
+    }
+    for photo_id, discrepancy_id, object_key in photo_rows:
+        photos_by_discrepancy[int(discrepancy_id)].append(
+            (int(photo_id), str(object_key))
+        )
+
+    removed_item_ids_all = {
+        item.id
+        for item in items
+        if item.lot_id == lot_id
+        or (item.box_id is not None and item.box_id in box_id_set)
+    }
+    fully_deleted_request_ids_all: list[int] = []
+    rewrite_rows: list[
+        tuple[
+            BoxRequest,
+            list[BoxRequestItem],
+            list[BoxRequestItem],
+            list[BoxRequestDiscrepancy],
+        ]
+    ] = []
+    for request in requests:
+        request_items = items_by_request[request.id]
+        removed_items = [
+            item for item in request_items if item.id in removed_item_ids_all
+        ]
+        remaining_items = [
+            item for item in request_items if item.id not in removed_item_ids_all
+        ]
+        request_discrepancies = discrepancies_by_request[request.id]
+        if removed_items and not remaining_items:
+            fully_deleted_request_ids_all.append(request.id)
+            removed_discrepancies = request_discrepancies
+        else:
+            removed_discrepancies = [
+                discrepancy
+                for discrepancy in request_discrepancies
+                if discrepancy.request_item_id in removed_item_ids_all
+                or (
+                    discrepancy.box_id is not None
+                    and discrepancy.box_id in box_id_set
+                )
+            ]
+            rewrite_rows.append(
+                (
+                    request,
+                    removed_items,
+                    remaining_items,
+                    removed_discrepancies,
+                )
+            )
+    deleted_request_id_set = set(fully_deleted_request_ids_all)
+    incoming_requests = (
+        list(
+            db.scalars(
+                select(BoxRequest)
+                .where(
+                    BoxRequest.id.not_in(fully_deleted_request_ids_all),
+                    or_(
+                        BoxRequest.source_inbound_request_id.in_(
+                            fully_deleted_request_ids_all
+                        ),
+                        BoxRequest.parent_request_id.in_(
+                            fully_deleted_request_ids_all
+                        ),
+                        BoxRequest.root_request_id.in_(
+                            fully_deleted_request_ids_all
+                        ),
+                    ),
+                )
+                .order_by(BoxRequest.id)
+            ).all()
+        )
+        if fully_deleted_request_ids_all
+        else []
+    )
+    incoming_request_ids = [request.id for request in incoming_requests]
+    graph_changed_while_locking = False
+    if lock_for_update:
+        graph_changed_while_locking = (
+            preliminary_deleted_request_ids
+            != fully_deleted_request_ids_all
+            or preliminary_incoming_request_ids != incoming_request_ids
+        )
+        extra_incoming_ids = sorted(
+            set(incoming_request_ids)
+            - set(preliminary_incoming_request_ids)
+        )
+        if extra_incoming_ids:
+            db.execute(
+                _force_purge_request_lock_statement(extra_incoming_ids)
+            ).all()
+    if lock_for_update and incoming_request_ids:
+        # Re-read locked rows so the plan and signature use locked values.
+        incoming_requests = list(
+            db.scalars(
+                select(BoxRequest)
+                .where(BoxRequest.id.in_(incoming_request_ids))
+                .order_by(BoxRequest.id)
+            ).all()
+        )
+
+    lineage_detachments_all: list[LotForcePurgeLineageDetach] = []
+    lineage_fields = (
+        "source_inbound_request_id",
+        "parent_request_id",
+        "root_request_id",
+    )
+    for request in incoming_requests:
+        for field_name in lineage_fields:
+            target_id = getattr(request, field_name)
+            if target_id in deleted_request_id_set:
+                lineage_detachments_all.append(
+                    LotForcePurgeLineageDetach(
+                        request_id=request.id,
+                        field_name=field_name,
+                        deleted_target_request_id=int(target_id),
+                    )
+                )
+
+    request_rewrites_all: list[LotForcePurgeRequestRewrite] = []
+    for request, removed_items, remaining_items, removed_discrepancies in rewrite_rows:
+        removed_ids = [item.id for item in removed_items]
+        _bounded_removed_ids, removed_ids_truncated = _bounded_ids(removed_ids)
+        removed_discrepancy_ids = [
+            discrepancy.id for discrepancy in removed_discrepancies
+        ]
+        (
+            _bounded_removed_discrepancy_ids,
+            removed_discrepancy_ids_truncated,
+        ) = _bounded_ids(removed_discrepancy_ids)
+        removed_photo_ids = sorted(
+            {
+                photo_id
+                for discrepancy in removed_discrepancies
+                for photo_id, _object_key in photos_by_discrepancy.get(
+                    discrepancy.id, []
+                )
+            }
+        )
+        _bounded_photo_ids, photo_ids_truncated = _bounded_ids(removed_photo_ids)
+        remaining_positions = {
+            item.id: position
+            for position, item in enumerate(remaining_items, start=1)
+        }
+        position_plan_all = [
+            LotForcePurgeItemPosition(
+                item_id=item.id,
+                before_position=item.position,
+                after_position=remaining_positions.get(item.id),
+            )
+            for item in items_by_request[request.id]
+        ]
+        sibling_lot_ids = sorted(
+            {
+                int(item.lot_id)
+                for item in remaining_items
+                if item.lot_id is not None and item.lot_id != lot_id
+            }
+        )
+        _bounded_sibling_ids, sibling_ids_truncated = _bounded_ids(
+            sibling_lot_ids
+        )
+        after_quantity = max(1, request.quantity - len(removed_items))
+        if request.status == BoxRequestStatus.completed:
+            if request.direction == BoxRequestDirection.inbound:
+                # Completed inbound items are the boxes actually received. The
+                # requested quantity may be larger or smaller when the receipt
+                # completed with a variance, so subtracting the removed actual
+                # items from both sides preserves that variance exactly.
+                after_actual = len(remaining_items)
+            else:
+                missing_item_ids = {
+                    discrepancy.request_item_id
+                    for discrepancy in discrepancies_by_request[request.id]
+                    if (
+                        discrepancy.discrepancy_type
+                        == BoxRequestDiscrepancyType.missing
+                        and discrepancy.request_item_id is not None
+                    )
+                }
+                removed_actual_count = sum(
+                    item.id not in missing_item_ids for item in removed_items
+                )
+                after_actual = max(
+                    0,
+                    (request.actual_received_quantity or 0)
+                    - removed_actual_count,
+                )
+            after_variance = after_actual - after_quantity
+        else:
+            after_actual = request.actual_received_quantity
+            after_variance = request.variance_quantity
+        request_rewrites_all.append(
+            LotForcePurgeRequestRewrite(
+                request_id=request.id,
+                adjustment_event_type=(
+                    BoxRequestEventType.force_purge_adjusted.value
+                ),
+                origin=_enum_text(request.origin),
+                status=_enum_text(request.status),
+                direction=_enum_text(request.direction),
+                before_item_count=len(items_by_request[request.id]),
+                after_item_count=len(remaining_items),
+                before_quantity=request.quantity,
+                after_quantity=after_quantity,
+                before_actual_received_quantity=request.actual_received_quantity,
+                after_actual_received_quantity=after_actual,
+                before_variance_quantity=request.variance_quantity,
+                after_variance_quantity=after_variance,
+                item_positions=position_plan_all,
+                item_positions_truncated=(
+                    len(position_plan_all) > _PURGE_LIST_LIMIT
+                ),
+                removed_item_ids=sorted(removed_ids),
+                removed_item_count=len(removed_ids),
+                removed_item_ids_truncated=removed_ids_truncated,
+                removed_discrepancy_ids=sorted(removed_discrepancy_ids),
+                removed_discrepancy_count=len(removed_discrepancy_ids),
+                removed_discrepancy_ids_truncated=(
+                    removed_discrepancy_ids_truncated
+                ),
+                removed_discrepancy_photo_ids=removed_photo_ids,
+                removed_discrepancy_photo_count=len(removed_photo_ids),
+                removed_discrepancy_photo_ids_truncated=photo_ids_truncated,
+                preserved_sibling_lot_ids=sibling_lot_ids,
+                preserved_sibling_lot_count=len(sibling_lot_ids),
+                preserved_sibling_lot_ids_truncated=sibling_ids_truncated,
+            )
+        )
+
+    document_rows = (
+        db.execute(
+            select(
+                BoxRequestDocument.id,
+                BoxRequestDocument.request_id,
+                BoxRequestDocument.object_key,
+            )
+            .where(
+                BoxRequestDocument.request_id.in_(
+                    fully_deleted_request_ids_all
+                )
+            )
+            .order_by(BoxRequestDocument.id)
+        ).all()
+        if fully_deleted_request_ids_all
+        else []
+    )
+    attachment_rows = (
+        db.execute(
+            select(
+                BoxRequestAttachment.id,
+                BoxRequestAttachment.request_id,
+                BoxRequestAttachment.object_key,
+            )
+            .where(
+                BoxRequestAttachment.request_id.in_(
+                    fully_deleted_request_ids_all
+                )
+            )
+            .order_by(BoxRequestAttachment.id)
+        ).all()
+        if fully_deleted_request_ids_all
+        else []
+    )
+    fully_deleted_discrepancy_ids = {
+        discrepancy.id
+        for request_id in fully_deleted_request_ids_all
+        for discrepancy in discrepancies_by_request[request_id]
+    }
+    partially_removed_photo_ids = {
+        photo_id
+        for rewrite in request_rewrites_all
+        for photo_id in rewrite.removed_discrepancy_photo_ids
+    }
+    deleted_photo_rows = [
+        (int(photo_id), int(discrepancy_id), str(object_key))
+        for photo_id, discrepancy_id, object_key in photo_rows
+        if (
+            int(discrepancy_id) in fully_deleted_discrepancy_ids
+            or int(photo_id) in partially_removed_photo_ids
+        )
+    ]
+    deleted_object_rows: set[tuple[str, int]] = {
+        ("document", int(row.id)) for row in document_rows
+    } | {
+        ("attachment", int(row.id)) for row in attachment_rows
+    } | {
+        ("discrepancy_photo", photo_id)
+        for photo_id, _discrepancy_id, _object_key in deleted_photo_rows
+    }
+    candidate_object_keys = sorted(
+        {
+            str(row.object_key) for row in document_rows
+        }
+        | {str(row.object_key) for row in attachment_rows}
+        | {
+            object_key
+            for _photo_id, _discrepancy_id, object_key in deleted_photo_rows
+        }
+    )
+    object_reference_rows = _force_object_key_reference_rows(
+        db, candidate_object_keys
+    )
+    shared_keys = {
+        str(row.object_key)
+        for row in object_reference_rows
+        if (str(row.row_type), int(row.row_id)) not in deleted_object_rows
+    }
+    deletable_keys_all = sorted(set(candidate_object_keys) - shared_keys)
+    shared_keys_all = sorted(shared_keys)
+    _bounded_deletable_keys, deletable_keys_truncated = _bounded_strings(
+        deletable_keys_all
+    )
+    _bounded_shared_keys, shared_keys_truncated = _bounded_strings(
+        shared_keys_all
+    )
+    object_cleanup = LotForcePurgeObjectCleanupPlan(
+        deletable_keys=deletable_keys_all,
+        deletable_key_count=len(deletable_keys_all),
+        deletable_keys_truncated=deletable_keys_truncated,
+        shared_skipped_keys=shared_keys_all,
+        shared_skipped_key_count=len(shared_keys_all),
+        shared_skipped_keys_truncated=shared_keys_truncated,
+    )
+
+    safe_preview = analyze_lot_purge_eligibility(db, lot_id=lot_id)
+    hard_codes = {"merged_tombstone", "merge_target"}
+    hard_blockers = [
+        _force_blocker(blocker)
+        for blocker in safe_preview.blockers
+        if blocker.code in hard_codes
+    ]
+    overridden_blockers = [
+        _force_blocker(blocker)
+        for blocker in safe_preview.blockers
+        if blocker.code not in hard_codes and blocker.code != "shared_object_key"
+    ]
+    if lot.merged_into_lot_id is None and lot.normalized_name is None:
+        hard_blockers.append(
+            LotForcePurgeBlocker(
+                code="invalid_identity",
+                message="The active Lot has no canonical identity.",
+                entity_ids=[lot.id],
+                entity_count=1,
+                entity_ids_truncated=False,
+            )
+        )
+    if graph_changed_while_locking:
+        hard_blockers.append(
+            LotForcePurgeBlocker(
+                code="graph_changed",
+                message=(
+                    "The force-purge graph changed while locks were acquired; "
+                    "retry the analysis."
+                ),
+                entity_ids=[],
+                entity_count=0,
+                entity_ids_truncated=False,
+            )
+        )
+
+    def graph_rows(statement) -> list[list[object]]:
+        return [list(row) for row in db.execute(statement).all()]
+
+    graph: dict[str, object] = {
+        "lot": [
+            lot.id,
+            lot.name,
+            lot.normalized_name,
+            lot.version,
+            lot.merged_into_lot_id,
+            lot.merged_at,
+        ],
+        "merge_sources": graph_rows(
+            select(
+                Lot.id,
+                Lot.version,
+                Lot.merged_into_lot_id,
+                Lot.merged_at,
+            )
+            .where(Lot.merged_into_lot_id == lot.id)
+            .order_by(Lot.id)
+        ),
+        "boxes": [
+            [
+                box.id,
+                box.lot_id,
+                box.current_warehouse_id,
+                box.status,
+                box.archived_at,
+                box.updated_at,
+            ]
+            for box in boxes
+        ],
+        "requests": [
+            [
+                request.id,
+                request.version,
+                request.status,
+                request.origin,
+                request.direction,
+                request.quantity,
+                request.actual_received_quantity,
+                request.variance_quantity,
+                request.source_inbound_request_id,
+                request.parent_request_id,
+                request.root_request_id,
+            ]
+            for request in requests
+        ],
+        "items": [
+            [
+                item.id,
+                item.request_id,
+                item.position,
+                item.box_id,
+                item.lot_id,
+                item.lot,
+                item.box_number,
+            ]
+            for item in items
+        ],
+        "discrepancies": [
+            [
+                discrepancy.id,
+                discrepancy.request_id,
+                discrepancy.request_item_id,
+                discrepancy.box_id,
+                discrepancy.discrepancy_type,
+                discrepancy.quantity,
+            ]
+            for discrepancy in discrepancies
+        ],
+        "discrepancy_photos": [
+            [int(photo_id), int(discrepancy_id), str(object_key)]
+            for photo_id, discrepancy_id, object_key in photo_rows
+        ],
+        "incoming_requests": [
+            [
+                request.id,
+                request.version,
+                request.source_inbound_request_id,
+                request.parent_request_id,
+                request.root_request_id,
+            ]
+            for request in incoming_requests
+        ],
+        "request_events": (
+            graph_rows(
+                select(
+                    BoxRequestEvent.id,
+                    BoxRequestEvent.request_id,
+                    BoxRequestEvent.event_type,
+                    BoxRequestEvent.from_status,
+                    BoxRequestEvent.to_status,
+                    BoxRequestEvent.event_metadata,
+                )
+                .where(
+                    BoxRequestEvent.request_id.in_(touched_request_ids_all)
+                )
+                .order_by(BoxRequestEvent.id)
+            )
+            if touched_request_ids_all
+            else []
+        ),
+        "request_exceptions": (
+            graph_rows(
+                select(
+                    BoxRequestException.id,
+                    BoxRequestException.request_id,
+                    BoxRequestException.exception_kind,
+                    BoxRequestException.resolved_at,
+                )
+                .where(
+                    BoxRequestException.request_id.in_(
+                        touched_request_ids_all
+                    )
+                )
+                .order_by(BoxRequestException.id)
+            )
+            if touched_request_ids_all
+            else []
+        ),
+        "documents": [list(row) for row in document_rows],
+        "attachments": [list(row) for row in attachment_rows],
+        "comments": (
+            graph_rows(
+                select(BoxRequestComment.id, BoxRequestComment.request_id)
+                .where(
+                    BoxRequestComment.request_id.in_(touched_request_ids_all)
+                )
+                .order_by(BoxRequestComment.id)
+            )
+            if touched_request_ids_all
+            else []
+        ),
+        "notifications": (
+            graph_rows(
+                select(InAppNotification.id, InAppNotification.request_id)
+                .where(
+                    InAppNotification.request_id.in_(
+                        touched_request_ids_all
+                    )
+                )
+                .order_by(InAppNotification.id)
+            )
+            if touched_request_ids_all
+            else []
+        ),
+        "email_outbox": (
+            graph_rows(
+                select(RequestEmailOutbox.id, RequestEmailOutbox.request_id)
+                .where(
+                    RequestEmailOutbox.request_id.in_(
+                        touched_request_ids_all
+                    )
+                )
+                .order_by(RequestEmailOutbox.id)
+            )
+            if touched_request_ids_all
+            else []
+        ),
+        "box_events": (
+            graph_rows(
+                select(
+                    BoxEvent.id,
+                    BoxEvent.box_id,
+                    BoxEvent.event_type,
+                    BoxEvent.from_status,
+                    BoxEvent.to_status,
+                    BoxEvent.from_warehouse_id,
+                    BoxEvent.to_warehouse_id,
+                )
+                .where(BoxEvent.box_id.in_(box_ids))
+                .order_by(BoxEvent.id)
+            )
+            if box_ids
+            else []
+        ),
+        "lot_events": graph_rows(
+            select(
+                LotEvent.id,
+                LotEvent.event_type,
+                LotEvent.old_name,
+                LotEvent.new_name,
+                LotEvent.event_metadata,
+            )
+            .where(LotEvent.lot_id == lot.id)
+            .order_by(LotEvent.id)
+        ),
+        "object_references": [list(row) for row in object_reference_rows],
+        "fully_deleted_request_ids": fully_deleted_request_ids_all,
+        "lineage_detachments": [
+            [
+                detachment.request_id,
+                detachment.field_name,
+                detachment.deleted_target_request_id,
+            ]
+            for detachment in lineage_detachments_all
+        ],
+    }
+    encoded = json.dumps(graph, default=str, sort_keys=True, separators=(",", ":"))
+    graph_signature = hashlib.sha256(encoded.encode()).hexdigest()
+
+    active_box_ids_all = [
+        box.id for box in boxes if box.archived_at is None
+    ]
+    archived_box_ids_all = [
+        box.id for box in boxes if box.archived_at is not None
+    ]
+    _active_box_ids, active_box_ids_truncated = _bounded_ids(
+        active_box_ids_all
+    )
+    _archived_box_ids, archived_box_ids_truncated = _bounded_ids(
+        archived_box_ids_all
+    )
+    _touched_request_ids, touched_request_ids_truncated = _bounded_ids(
+        touched_request_ids_all
+    )
+    _fully_deleted_request_ids, fully_deleted_ids_truncated = _bounded_ids(
+        fully_deleted_request_ids_all
+    )
+    return LotForcePurgeImpactPlan(
+        lot_id=lot.id,
+        lot_name=lot.name,
+        lot_version=lot.version,
+        confirmation_phrase=f"FORCE DELETE LOT {lot.id}",
+        active_box_ids=sorted(active_box_ids_all),
+        active_box_count=len(active_box_ids_all),
+        active_box_ids_truncated=active_box_ids_truncated,
+        archived_box_ids=sorted(archived_box_ids_all),
+        archived_box_count=len(archived_box_ids_all),
+        archived_box_ids_truncated=archived_box_ids_truncated,
+        touched_request_ids=sorted(touched_request_ids_all),
+        touched_request_count=len(touched_request_ids_all),
+        touched_request_ids_truncated=touched_request_ids_truncated,
+        request_rewrites=request_rewrites_all,
+        request_rewrite_count=len(request_rewrites_all),
+        request_rewrites_truncated=(
+            len(request_rewrites_all) > _PURGE_LIST_LIMIT
+        ),
+        fully_deleted_request_ids=sorted(fully_deleted_request_ids_all),
+        fully_deleted_request_count=len(fully_deleted_request_ids_all),
+        fully_deleted_request_ids_truncated=fully_deleted_ids_truncated,
+        incoming_lineage_detachments=lineage_detachments_all,
+        incoming_lineage_detachment_count=len(lineage_detachments_all),
+        incoming_lineage_detachments_truncated=(
+            len(lineage_detachments_all) > _PURGE_LIST_LIMIT
+        ),
+        object_cleanup=object_cleanup,
+        hard_blockers=hard_blockers,
+        overridden_blockers=overridden_blockers,
+        graph_signature=graph_signature,
+        force_allowed=not hard_blockers,
+    )
+
+
+def _purge_object_keys(db: Session, request_ids: list[int]) -> list[str]:
+    if not request_ids:
+        return []
+    keys = union_all(
+        select(BoxRequestDocument.object_key.label("object_key")).where(
+            BoxRequestDocument.request_id.in_(request_ids)
+        ),
+        select(BoxRequestAttachment.object_key.label("object_key")).where(
+            BoxRequestAttachment.request_id.in_(request_ids)
+        ),
+        select(BoxRequestDiscrepancyPhoto.object_key.label("object_key"))
+        .join(
+            BoxRequestDiscrepancy,
+            BoxRequestDiscrepancy.id
+            == BoxRequestDiscrepancyPhoto.discrepancy_id,
+        )
+        .where(BoxRequestDiscrepancy.request_id.in_(request_ids)),
+    ).subquery()
+    return sorted(
+        {
+            str(key)
+            for key in db.scalars(
+                select(keys.c.object_key).where(keys.c.object_key.is_not(None))
+            ).all()
+        }
+    )
+
+
+def _purge_object_key_references(db: Session):
+    return union_all(
+        select(
+            BoxRequestDocument.request_id.label("request_id"),
+            BoxRequestDocument.object_key.label("object_key"),
+        ),
+        select(
+            BoxRequestAttachment.request_id.label("request_id"),
+            BoxRequestAttachment.object_key.label("object_key"),
+        ),
+        select(
+            BoxRequestDiscrepancy.request_id.label("request_id"),
+            BoxRequestDiscrepancyPhoto.object_key.label("object_key"),
+        ).join(
+            BoxRequestDiscrepancy,
+            BoxRequestDiscrepancy.id
+            == BoxRequestDiscrepancyPhoto.discrepancy_id,
+        ),
+    ).subquery()
+
+
+def _purge_object_key_reference_count(db: Session, object_key: str) -> int:
+    references = _purge_object_key_references(db)
+    return int(
+        db.scalar(
+            select(func.count())
+            .select_from(references)
+            .where(references.c.object_key == object_key)
+        )
+        or 0
+    )
+
+
+def _purge_graph_signature(
+    db: Session,
+    *,
+    lot: Lot,
+    boxes: list[Box],
+    request_ids: list[int],
+    blockers: list[LotPurgeBlocker],
+) -> str:
+    """Hash the complete operational graph used by preview and execution."""
+    box_ids = [box.id for box in boxes]
+    discrepancy_ids = (
+        list(
+            db.scalars(
+                select(BoxRequestDiscrepancy.id)
+                .where(BoxRequestDiscrepancy.request_id.in_(request_ids))
+                .order_by(BoxRequestDiscrepancy.id)
+            ).all()
+        )
+        if request_ids
+        else []
+    )
+
+    def rows(statement) -> list[list[object]]:
+        return [list(row) for row in db.execute(statement).all()]
+
+    graph: dict[str, object] = {
+        "lot": [
+            lot.id,
+            lot.name,
+            lot.version,
+            lot.merged_into_lot_id,
+            lot.merged_at,
+        ],
+        "boxes": [
+            [
+                box.id,
+                box.lot_id,
+                box.current_warehouse_id,
+                _enum_text(box.status),
+                box.archived_at,
+            ]
+            for box in boxes
+        ],
+        "requests": (
+            rows(
+                select(
+                    BoxRequest.id,
+                    BoxRequest.version,
+                    BoxRequest.status,
+                    BoxRequest.origin,
+                    BoxRequest.direction,
+                    BoxRequest.warehouse_id,
+                    BoxRequest.source_inbound_request_id,
+                    BoxRequest.parent_request_id,
+                    BoxRequest.root_request_id,
+                )
+                .where(BoxRequest.id.in_(request_ids))
+                .order_by(BoxRequest.id)
+            )
+            if request_ids
+            else []
+        ),
+        "items": (
+            rows(
+                select(
+                    BoxRequestItem.id,
+                    BoxRequestItem.request_id,
+                    BoxRequestItem.box_id,
+                    BoxRequestItem.lot_id,
+                )
+                .where(BoxRequestItem.request_id.in_(request_ids))
+                .order_by(BoxRequestItem.id)
+            )
+            if request_ids
+            else []
+        ),
+        "request_events": (
+            rows(
+                select(
+                    BoxRequestEvent.id,
+                    BoxRequestEvent.request_id,
+                    BoxRequestEvent.event_type,
+                    BoxRequestEvent.from_status,
+                    BoxRequestEvent.to_status,
+                )
+                .where(BoxRequestEvent.request_id.in_(request_ids))
+                .order_by(BoxRequestEvent.id)
+            )
+            if request_ids
+            else []
+        ),
+        "documents": (
+            rows(
+                select(
+                    BoxRequestDocument.id,
+                    BoxRequestDocument.request_id,
+                    BoxRequestDocument.object_key,
+                )
+                .where(BoxRequestDocument.request_id.in_(request_ids))
+                .order_by(BoxRequestDocument.id)
+            )
+            if request_ids
+            else []
+        ),
+        "attachments": (
+            rows(
+                select(
+                    BoxRequestAttachment.id,
+                    BoxRequestAttachment.request_id,
+                    BoxRequestAttachment.object_key,
+                )
+                .where(BoxRequestAttachment.request_id.in_(request_ids))
+                .order_by(BoxRequestAttachment.id)
+            )
+            if request_ids
+            else []
+        ),
+        "comments": (
+            rows(
+                select(BoxRequestComment.id, BoxRequestComment.request_id)
+                .where(BoxRequestComment.request_id.in_(request_ids))
+                .order_by(BoxRequestComment.id)
+            )
+            if request_ids
+            else []
+        ),
+        "exceptions": (
+            rows(
+                select(BoxRequestException.id, BoxRequestException.request_id)
+                .where(BoxRequestException.request_id.in_(request_ids))
+                .order_by(BoxRequestException.id)
+            )
+            if request_ids
+            else []
+        ),
+        "discrepancies": (
+            rows(
+                select(
+                    BoxRequestDiscrepancy.id,
+                    BoxRequestDiscrepancy.request_id,
+                    BoxRequestDiscrepancy.request_item_id,
+                    BoxRequestDiscrepancy.box_id,
+                )
+                .where(BoxRequestDiscrepancy.request_id.in_(request_ids))
+                .order_by(BoxRequestDiscrepancy.id)
+            )
+            if request_ids
+            else []
+        ),
+        "discrepancy_photos": (
+            rows(
+                select(
+                    BoxRequestDiscrepancyPhoto.id,
+                    BoxRequestDiscrepancyPhoto.discrepancy_id,
+                    BoxRequestDiscrepancyPhoto.object_key,
+                )
+                .where(
+                    BoxRequestDiscrepancyPhoto.discrepancy_id.in_(discrepancy_ids)
+                )
+                .order_by(BoxRequestDiscrepancyPhoto.id)
+            )
+            if discrepancy_ids
+            else []
+        ),
+        "notifications": (
+            rows(
+                select(InAppNotification.id, InAppNotification.request_id)
+                .where(InAppNotification.request_id.in_(request_ids))
+                .order_by(InAppNotification.id)
+            )
+            if request_ids
+            else []
+        ),
+        "email_outbox": (
+            rows(
+                select(RequestEmailOutbox.id, RequestEmailOutbox.request_id)
+                .where(RequestEmailOutbox.request_id.in_(request_ids))
+                .order_by(RequestEmailOutbox.id)
+            )
+            if request_ids
+            else []
+        ),
+        "box_events": (
+            rows(
+                select(BoxEvent.id, BoxEvent.box_id, BoxEvent.event_type)
+                .where(BoxEvent.box_id.in_(box_ids))
+                .order_by(BoxEvent.id)
+            )
+            if box_ids
+            else []
+        ),
+        "lot_events": rows(
+            select(LotEvent.id, LotEvent.event_type)
+            .where(LotEvent.lot_id == lot.id)
+            .order_by(LotEvent.id)
+        ),
+        "blockers": [
+            [
+                blocker.code,
+                [[entity.entity_type, entity.entity_id] for entity in blocker.entities],
+                blocker.entity_count,
+            ]
+            for blocker in blockers
+        ],
+    }
+    encoded = json.dumps(graph, default=str, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode()).hexdigest()
+
+
+def analyze_lot_purge_eligibility(
+    db: Session,
+    *,
+    lot_id: int,
+    lock_for_update: bool = False,
+) -> LotPurgeEligibility:
+    """Analyze the only safely purgeable Lot shape without deleting anything.
+
+    ``lock_for_update`` is the execution-time revalidation mode. It acquires
+    deterministic exclusive Lot, Box, then request locks using explicit
+    PostgreSQL ``OF`` targets; preview callers leave it false and remain
+    read-only.
+    """
+    lot = db.scalar(
+        _purge_lot_lock_statement(lot_id)
+        if lock_for_update
+        else select(Lot).where(Lot.id == lot_id)
+    )
+    if lot is None:
+        raise LotPurgeNotFoundError(f"lot {lot_id} not found")
+
+    boxes = list(
+        db.scalars(
+            _purge_box_lock_statement(lot_id)
+            if lock_for_update
+            else select(Box).where(Box.lot_id == lot_id).order_by(Box.id)
+        ).all()
+    )
+    box_ids = [box.id for box in boxes]
+    active_box_ids_all = [box.id for box in boxes if box.archived_at is None]
+    archived_box_ids_all = [box.id for box in boxes if box.archived_at is not None]
+    active_box_ids, active_truncated = _bounded_ids(active_box_ids_all)
+    archived_box_ids, archived_truncated = _bounded_ids(archived_box_ids_all)
+
+    linked_item = BoxRequestItem.lot_id == lot_id
+    if box_ids:
+        linked_item = or_(linked_item, BoxRequestItem.box_id.in_(box_ids))
+    request_ids = list(
+        db.scalars(
+            select(BoxRequestItem.request_id)
+            .where(linked_item)
+            .distinct()
+            .order_by(BoxRequestItem.request_id)
+        ).all()
+    )
+    if lock_for_update and request_ids:
+        db.execute(_purge_request_lock_statement(request_ids)).all()
+        db.execute(_purge_request_item_lock_statement(request_ids)).all()
+        _lock_purge_owned_rows(
+            db,
+            lot_id=lot_id,
+            box_ids=box_ids,
+            request_ids=request_ids,
+        )
+
+    lot_item = BoxRequestItem.lot_id == lot_id
+    if box_ids:
+        lot_item = or_(lot_item, BoxRequestItem.box_id.in_(box_ids))
+    request_rows = (
+        db.execute(
+            select(
+                BoxRequest.id,
+                BoxRequest.origin,
+                BoxRequest.status,
+                BoxRequest.direction,
+                BoxRequest.source_inbound_request_id,
+                BoxRequest.parent_request_id,
+                BoxRequest.root_request_id,
+                func.count(BoxRequestItem.id).label("item_count"),
+                func.sum(case((lot_item, 1), else_=0)).label("lot_item_count"),
+            )
+            .join(BoxRequestItem, BoxRequestItem.request_id == BoxRequest.id)
+            .where(BoxRequest.id.in_(request_ids))
+            .group_by(
+                BoxRequest.id,
+                BoxRequest.origin,
+                BoxRequest.status,
+                BoxRequest.direction,
+                BoxRequest.source_inbound_request_id,
+                BoxRequest.parent_request_id,
+                BoxRequest.root_request_id,
+            )
+            .order_by(BoxRequest.id)
+        ).all()
+        if request_ids
+        else []
+    )
+
+    blockers: list[LotPurgeBlocker] = []
+
+    def add_blocker(
+        code: str,
+        message: str,
+        *,
+        entity_type: str,
+        entity_ids: list[int],
+    ) -> None:
+        entities = _purge_entities(entity_type, entity_ids)
+        blockers.append(
+            LotPurgeBlocker(
+                code=code,
+                message=message,
+                remediation=message,
+                entities=entities,
+                entity_count=len(set(entity_ids)),
+                entities_truncated=len(set(entity_ids)) > len(entities),
+            )
+        )
+
+    if lot.merged_into_lot_id is not None:
+        add_blocker(
+            "merged_tombstone",
+            "Merged source tombstones cannot be purged.",
+            entity_type="lot",
+            entity_ids=[lot.id, lot.merged_into_lot_id],
+        )
+    merged_source_ids = list(
+        db.scalars(
+            select(Lot.id)
+            .where(Lot.merged_into_lot_id == lot.id)
+            .order_by(Lot.id)
+        ).all()
+    )
+    if merged_source_ids:
+        add_blocker(
+            "merge_target",
+            "This lot is the target of one or more merged tombstones.",
+            entity_type="lot",
+            entity_ids=merged_source_ids,
+        )
+    if active_box_ids_all:
+        add_blocker(
+            "active_boxes",
+            "Archive every box in the lot before purge.",
+            entity_type="box",
+            entity_ids=active_box_ids_all,
+        )
+    if not archived_box_ids_all:
+        add_blocker(
+            "no_archived_boxes",
+            "A self-receipt purge requires at least one archived box.",
+            entity_type="lot",
+            entity_ids=[lot.id],
+        )
+    if not request_ids:
+        add_blocker(
+            "no_self_receipts",
+            "No linked completed self-receipt was found for this lot.",
+            entity_type="lot",
+            entity_ids=[lot.id],
+        )
+
+    staged_ids: list[int] = []
+    open_ids: list[int] = []
+    terminal_ids: list[int] = []
+    unsupported_origin_ids: list[int] = []
+    unsupported_direction_ids: list[int] = []
+    mixed_lot_ids: list[int] = []
+    incomplete_provenance_ids: list[int] = []
+    family_ids: list[int] = []
+    request_previews: list[LotPurgeRequestPreview] = []
+    incomplete_provenance_request_ids = (
+        set(
+            db.scalars(
+                select(BoxRequestItem.request_id)
+                .where(
+                    BoxRequestItem.request_id.in_(request_ids),
+                    BoxRequestItem.box_id.is_(None),
+                )
+                .distinct()
+            ).all()
+        )
+        if request_ids
+        else set()
+    )
+    for row in request_rows:
+        request_id = int(row.id)
+        item_count = int(row.item_count)
+        lot_item_count = int(row.lot_item_count or 0)
+        if len(request_previews) < _PURGE_LIST_LIMIT:
+            request_previews.append(
+                LotPurgeRequestPreview(
+                    request_id=request_id,
+                    origin=_enum_text(row.origin),
+                    status=_enum_text(row.status),
+                    direction=_enum_text(row.direction),
+                    item_count=item_count,
+                    lot_item_count=lot_item_count,
+                )
+            )
+        if row.status in (BoxRequestStatus.draft, BoxRequestStatus.submitted):
+            staged_ids.append(request_id)
+        elif row.status != BoxRequestStatus.completed:
+            if row.status in (
+                BoxRequestStatus.approved,
+                BoxRequestStatus.preparing,
+                BoxRequestStatus.ready_for_transport,
+                BoxRequestStatus.in_transit,
+                BoxRequestStatus.awaiting_confirmation,
+            ):
+                open_ids.append(request_id)
+            else:
+                terminal_ids.append(request_id)
+        if row.origin not in _PURGE_RECEIPT_ORIGINS:
+            unsupported_origin_ids.append(request_id)
+        if row.direction != BoxRequestDirection.inbound:
+            unsupported_direction_ids.append(request_id)
+        if lot_item_count != item_count:
+            mixed_lot_ids.append(request_id)
+        if request_id in incomplete_provenance_request_ids:
+            incomplete_provenance_ids.append(request_id)
+        if (
+            row.source_inbound_request_id is not None
+            or row.parent_request_id is not None
+            or row.root_request_id != request_id
+        ):
+            family_ids.append(request_id)
+
+    if staged_ids:
+        add_blocker(
+            "staged_requests",
+            "Staged receipts must be resolved before purge.",
+            entity_type="request",
+            entity_ids=staged_ids,
+        )
+    if open_ids:
+        add_blocker(
+            "open_requests",
+            "Open request workflow prevents purge.",
+            entity_type="request",
+            entity_ids=open_ids,
+        )
+    if terminal_ids:
+        add_blocker(
+            "requests_not_completed",
+            "Every linked request must be completed.",
+            entity_type="request",
+            entity_ids=terminal_ids,
+        )
+    if unsupported_origin_ids:
+        add_blocker(
+            "unsupported_request_origin",
+            "Only manual-entry and XLSX-import self-receipts may be purged.",
+            entity_type="request",
+            entity_ids=unsupported_origin_ids,
+        )
+    if unsupported_direction_ids:
+        add_blocker(
+            "unsupported_request_direction",
+            "Return and other non-inbound requests prevent purge.",
+            entity_type="request",
+            entity_ids=unsupported_direction_ids,
+        )
+    if mixed_lot_ids:
+        add_blocker(
+            "mixed_lot_receipt",
+            "A linked request contains items outside this lot.",
+            entity_type="request",
+            entity_ids=mixed_lot_ids,
+        )
+    if incomplete_provenance_ids:
+        add_blocker(
+            "incomplete_receipt_provenance",
+            "Every self-receipt item must reference one archived physical box.",
+            entity_type="request",
+            entity_ids=incomplete_provenance_ids,
+        )
+    if family_ids:
+        add_blocker(
+            "request_family",
+            "Follow-ups, returns, and request-family members prevent purge.",
+            entity_type="request",
+            entity_ids=family_ids,
+        )
+
+    incoming_reference_ids = (
+        list(
+            db.scalars(
+                select(BoxRequest.id)
+                .where(
+                    or_(
+                        BoxRequest.source_inbound_request_id.in_(request_ids),
+                        BoxRequest.parent_request_id.in_(request_ids),
+                        and_(
+                            BoxRequest.root_request_id.in_(request_ids),
+                            BoxRequest.id != BoxRequest.root_request_id,
+                        ),
+                    ),
+                )
+                .order_by(BoxRequest.id)
+            ).all()
+        )
+        if request_ids
+        else []
+    )
+    foreign_item_request_ids = (
+        list(
+            db.scalars(
+                select(BoxRequestItem.request_id)
+                .join(Box, Box.id == BoxRequestItem.box_id)
+                .where(
+                    linked_item,
+                    BoxRequestItem.box_id.is_not(None),
+                    or_(
+                        BoxRequestItem.lot_id.is_distinct_from(lot_id),
+                        Box.lot_id.is_distinct_from(lot_id),
+                    ),
+                )
+                .distinct()
+                .order_by(BoxRequestItem.request_id)
+            ).all()
+        )
+        if request_ids
+        else []
+    )
+    foreign_reference_ids = sorted(
+        set(incoming_reference_ids) | set(foreign_item_request_ids)
+    )
+    if foreign_reference_ids:
+        add_blocker(
+            "foreign_request_reference",
+            "A foreign request or inconsistent item points into this lot's receipts.",
+            entity_type="request",
+            entity_ids=foreign_reference_ids,
+        )
+
+    linked_box_ids = (
+        set(
+            db.scalars(
+                select(BoxRequestItem.box_id)
+                .where(
+                    BoxRequestItem.request_id.in_(request_ids),
+                    BoxRequestItem.box_id.in_(box_ids),
+                )
+                .distinct()
+            ).all()
+        )
+        if request_ids and box_ids
+        else set()
+    )
+    unlinked_archived_box_ids = sorted(set(archived_box_ids_all) - linked_box_ids)
+    if unlinked_archived_box_ids:
+        add_blocker(
+            "unlinked_archived_boxes",
+            "Every archived box must have completed self-receipt provenance.",
+            entity_type="box",
+            entity_ids=unlinked_archived_box_ids,
+        )
+
+    event_rows = (
+        db.execute(
+            select(
+                BoxRequestEvent.request_id,
+                func.count(BoxRequestEvent.id).label("event_count"),
+                func.sum(
+                    case(
+                        (
+                            or_(
+                                BoxRequestEvent.event_type
+                                != BoxRequestEventType.completed,
+                                BoxRequestEvent.to_status.is_distinct_from(
+                                    BoxRequestStatus.completed
+                                ),
+                            ),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ).label("unsupported_count"),
+            )
+            .where(BoxRequestEvent.request_id.in_(request_ids))
+            .group_by(BoxRequestEvent.request_id)
+        ).all()
+        if request_ids
+        else []
+    )
+    event_shape = {
+        int(row.request_id): (int(row.event_count), int(row.unsupported_count or 0))
+        for row in event_rows
+    }
+    request_history_ids = [
+        request_id
+        for request_id in request_ids
+        if event_shape.get(request_id) != (1, 0)
+    ]
+    if request_history_ids:
+        add_blocker(
+            "workflow_history",
+            "Only the initial completed self-receipt event is allowed.",
+            entity_type="request",
+            entity_ids=request_history_ids,
+        )
+
+    lot_history_rows = db.execute(
+        select(LotEvent.event_type, LotEvent.id)
+        .where(
+            LotEvent.lot_id == lot.id,
+            LotEvent.event_type.in_(
+                (LotEventType.reassigned, LotEventType.merged)
+            ),
+        )
+        .order_by(LotEvent.id)
+    ).all()
+    reassigned_event_ids = [
+        int(event_id)
+        for event_type, event_id in lot_history_rows
+        if event_type == LotEventType.reassigned
+    ]
+    merged_event_ids = [
+        int(event_id)
+        for event_type, event_id in lot_history_rows
+        if event_type == LotEventType.merged
+    ]
+    box_reassignment_event_ids = (
+        list(
+            db.scalars(
+                select(BoxEvent.id)
+                .where(
+                    BoxEvent.box_id.in_(box_ids),
+                    BoxEvent.event_type == BoxEventType.lot_reassigned,
+                )
+                .order_by(BoxEvent.id)
+            ).all()
+        )
+        if box_ids
+        else []
+    )
+    if reassigned_event_ids or box_reassignment_event_ids:
+        add_blocker(
+            "box_reassignment_history",
+            "Per-box lot reassignment history prevents purge.",
+            entity_type="event",
+            entity_ids=reassigned_event_ids + box_reassignment_event_ids,
+        )
+    if merged_event_ids:
+        add_blocker(
+            "merge_history",
+            "Lot merge history prevents purge.",
+            entity_type="event",
+            entity_ids=merged_event_ids,
+        )
+
+    noninitial_box_event_ids = (
+        list(
+            db.scalars(
+                select(BoxEvent.id)
+                .where(
+                    BoxEvent.box_id.in_(box_ids),
+                    BoxEvent.event_type.not_in(
+                        (
+                            BoxEventType.created,
+                            BoxEventType.archived,
+                            BoxEventType.lot_reassigned,
+                        )
+                    ),
+                )
+                .order_by(BoxEvent.id)
+            ).all()
+        )
+        if box_ids
+        else []
+    )
+    if noninitial_box_event_ids:
+        add_blocker(
+            "box_workflow_history",
+            "Box movement, restoration, return, or status history prevents purge.",
+            entity_type="event",
+            entity_ids=noninitial_box_event_ids,
+        )
+
+    linked_request_ids, request_ids_truncated = _bounded_ids(request_ids)
+    object_keys = _purge_object_keys(db, request_ids)
+    if object_keys:
+        references = _purge_object_key_references(db)
+        shared_request_ids = list(
+            db.scalars(
+                select(references.c.request_id)
+                .where(
+                    references.c.object_key.in_(object_keys),
+                    references.c.request_id.not_in(request_ids),
+                )
+                .distinct()
+                .order_by(references.c.request_id)
+            ).all()
+        )
+        if shared_request_ids:
+            add_blocker(
+                "shared_object_key",
+                "Stored objects referenced by another request cannot be purged.",
+                entity_type="request",
+                entity_ids=shared_request_ids,
+            )
+    graph_signature = _purge_graph_signature(
+        db,
+        lot=lot,
+        boxes=boxes,
+        request_ids=request_ids,
+        blockers=blockers,
+    )
+    return LotPurgeEligibility(
+        lot_id=lot.id,
+        lot_name=lot.name,
+        lot_version=lot.version,
+        active_box_count=len(active_box_ids_all),
+        active_box_ids=active_box_ids,
+        active_box_ids_truncated=active_truncated,
+        archived_box_count=len(archived_box_ids_all),
+        archived_box_ids=archived_box_ids,
+        archived_box_ids_truncated=archived_truncated,
+        linked_request_count=len(request_ids),
+        linked_request_ids=linked_request_ids,
+        linked_request_ids_truncated=request_ids_truncated,
+        requests=request_previews,
+        requests_truncated=len(request_rows) > len(request_previews),
+        object_key_count=len(object_keys),
+        graph_signature=graph_signature,
+        eligible=not blockers,
+        blockers=blockers,
+    )
+
+
+def _delete_count(db: Session, statement) -> int:
+    result = db.execute(statement.execution_options(synchronize_session=False))
+    return int(result.rowcount or 0)
+
+
+def _delete_purge_graph(
+    db: Session,
+    *,
+    lot_id: int,
+    box_ids: list[int],
+    request_ids: list[int],
+    expected_version: int,
+    locked: LotPurgeEligibility,
+) -> dict[str, int]:
+    """Delete one already-locked eligible graph in strict FK order."""
+    deleted_counts: dict[str, int] = {}
+    discrepancy_ids = (
+        list(
+            db.scalars(
+                select(BoxRequestDiscrepancy.id)
+                .where(BoxRequestDiscrepancy.request_id.in_(request_ids))
+                .order_by(BoxRequestDiscrepancy.id)
+            ).all()
+        )
+        if request_ids
+        else []
+    )
+    if discrepancy_ids:
+        deleted_counts["box_request_discrepancy_photos"] = _delete_count(
+            db,
+            delete(BoxRequestDiscrepancyPhoto).where(
+                BoxRequestDiscrepancyPhoto.discrepancy_id.in_(discrepancy_ids)
+            ),
+        )
+    if request_ids:
+        for name, model in (
+            ("box_request_discrepancies", BoxRequestDiscrepancy),
+            ("in_app_notifications", InAppNotification),
+            ("request_email_outbox", RequestEmailOutbox),
+            ("box_request_documents", BoxRequestDocument),
+            ("box_request_attachments", BoxRequestAttachment),
+            ("box_request_comments", BoxRequestComment),
+            ("box_request_exceptions", BoxRequestException),
+            ("box_request_events", BoxRequestEvent),
+        ):
+            deleted_counts[name] = _delete_count(
+                db,
+                delete(model).where(model.request_id.in_(request_ids)),
+            )
+        deleted_counts["box_request_items"] = _delete_count(
+            db,
+            delete(BoxRequestItem).where(BoxRequestItem.request_id.in_(request_ids)),
+        )
+        # Eligible requests are roots that self-reference through root_request_id.
+        # Clear every self-FK explicitly before deleting the roots; incoming
+        # references were already rejected by the locked analyzer.
+        db.execute(
+            update(BoxRequest)
+            .where(BoxRequest.id.in_(request_ids))
+            .values(
+                source_inbound_request_id=None,
+                parent_request_id=None,
+                root_request_id=None,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        deleted_counts["box_requests"] = _delete_count(
+            db,
+            delete(BoxRequest).where(BoxRequest.id.in_(request_ids)),
+        )
+    if box_ids:
+        deleted_counts["box_events"] = _delete_count(
+            db,
+            delete(BoxEvent).where(BoxEvent.box_id.in_(box_ids)),
+        )
+        deleted_counts["boxes"] = _delete_count(
+            db,
+            delete(Box).where(Box.id.in_(box_ids)),
+        )
+    deleted_counts["lot_events"] = _delete_count(
+        db,
+        delete(LotEvent).where(LotEvent.lot_id == lot_id),
+    )
+    deleted_counts["lots"] = _delete_count(
+        db,
+        delete(Lot).where(Lot.id == lot_id, Lot.version == expected_version),
+    )
+    if deleted_counts["lots"] != 1:
+        raise LotPurgeConflictError(
+            "the locked lot changed before deletion",
+            code="graph_changed",
+            preview=locked,
+        )
+    return deleted_counts
+
+
+def _force_purge_conflict(
+    message: str,
+    *,
+    code: str,
+    preview: LotForcePurgeImpactPlan,
+) -> None:
+    raise LotPurgeConflictError(message, code=code, preview=preview)
+
+
+def _delete_force_request_graph(
+    db: Session,
+    *,
+    request_ids: list[int],
+) -> dict[str, int]:
+    deleted_counts: dict[str, int] = {}
+    if not request_ids:
+        return deleted_counts
+    discrepancy_ids = list(
+        db.scalars(
+            select(BoxRequestDiscrepancy.id)
+            .where(BoxRequestDiscrepancy.request_id.in_(request_ids))
+            .order_by(BoxRequestDiscrepancy.id)
+        ).all()
+    )
+    if discrepancy_ids:
+        deleted_counts["box_request_discrepancy_photos"] = _delete_count(
+            db,
+            delete(BoxRequestDiscrepancyPhoto).where(
+                BoxRequestDiscrepancyPhoto.discrepancy_id.in_(discrepancy_ids)
+            ),
+        )
+    for name, model in (
+        ("box_request_discrepancies", BoxRequestDiscrepancy),
+        ("in_app_notifications", InAppNotification),
+        ("request_email_outbox", RequestEmailOutbox),
+        ("box_request_documents", BoxRequestDocument),
+        ("box_request_attachments", BoxRequestAttachment),
+        ("box_request_comments", BoxRequestComment),
+        ("box_request_exceptions", BoxRequestException),
+        ("box_request_events", BoxRequestEvent),
+    ):
+        deleted_counts[name] = _delete_count(
+            db,
+            delete(model).where(model.request_id.in_(request_ids)),
+        )
+    deleted_counts["box_request_items"] = _delete_count(
+        db,
+        delete(BoxRequestItem).where(BoxRequestItem.request_id.in_(request_ids)),
+    )
+    db.execute(
+        update(BoxRequest)
+        .where(BoxRequest.id.in_(request_ids))
+        .values(
+            source_inbound_request_id=None,
+            parent_request_id=None,
+            root_request_id=None,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    deleted_counts["box_requests"] = _delete_count(
+        db,
+        delete(BoxRequest).where(BoxRequest.id.in_(request_ids)),
+    )
+    return deleted_counts
+
+
+def _force_deleted_entity_ids(
+    db: Session,
+    *,
+    plan: LotForcePurgeImpactPlan,
+    box_ids: list[int],
+) -> dict[str, list[int]]:
+    """Snapshot every row ID force purge will remove before mutation."""
+    request_ids = plan.fully_deleted_request_ids
+
+    def request_owned_ids(model) -> list[int]:
+        if not request_ids:
+            return []
+        return list(
+            db.scalars(
+                select(model.id)
+                .where(model.request_id.in_(request_ids))
+                .order_by(model.id)
+            ).all()
+        )
+
+    full_item_ids = request_owned_ids(BoxRequestItem)
+    full_discrepancy_ids = request_owned_ids(BoxRequestDiscrepancy)
+    removed_item_ids = sorted(
+        {
+            item_id
+            for rewrite in plan.request_rewrites
+            for item_id in rewrite.removed_item_ids
+        }
+    )
+    removed_discrepancy_ids = sorted(
+        {
+            discrepancy_id
+            for rewrite in plan.request_rewrites
+            for discrepancy_id in rewrite.removed_discrepancy_ids
+        }
+    )
+    deleted_discrepancy_ids = sorted(
+        set(full_discrepancy_ids) | set(removed_discrepancy_ids)
+    )
+    deleted_photo_ids = (
+        list(
+            db.scalars(
+                select(BoxRequestDiscrepancyPhoto.id)
+                .where(
+                    BoxRequestDiscrepancyPhoto.discrepancy_id.in_(
+                        deleted_discrepancy_ids
+                    )
+                )
+                .order_by(BoxRequestDiscrepancyPhoto.id)
+            ).all()
+        )
+        if deleted_discrepancy_ids
+        else []
+    )
+    return {
+        "lots": [plan.lot_id],
+        "boxes": sorted(box_ids),
+        "box_events": (
+            list(
+                db.scalars(
+                    select(BoxEvent.id)
+                    .where(BoxEvent.box_id.in_(box_ids))
+                    .order_by(BoxEvent.id)
+                ).all()
+            )
+            if box_ids
+            else []
+        ),
+        "lot_events": list(
+            db.scalars(
+                select(LotEvent.id)
+                .where(LotEvent.lot_id == plan.lot_id)
+                .order_by(LotEvent.id)
+            ).all()
+        ),
+        "box_requests": sorted(request_ids),
+        "box_request_items": sorted(set(full_item_ids) | set(removed_item_ids)),
+        "box_request_discrepancies": deleted_discrepancy_ids,
+        "box_request_discrepancy_photos": deleted_photo_ids,
+        "box_request_events": request_owned_ids(BoxRequestEvent),
+        "box_request_exceptions": request_owned_ids(BoxRequestException),
+        "box_request_documents": request_owned_ids(BoxRequestDocument),
+        "box_request_comments": request_owned_ids(BoxRequestComment),
+        "box_request_attachments": request_owned_ids(BoxRequestAttachment),
+        "in_app_notifications": request_owned_ids(InAppNotification),
+        "request_email_outbox": request_owned_ids(RequestEmailOutbox),
+    }
+
+
+def _apply_force_request_adjustments(
+    db: Session,
+    *,
+    user: User,
+    audit_id: int,
+    plan: LotForcePurgeImpactPlan,
+) -> dict[str, int]:
+    deleted_counts: dict[str, int] = {}
+    rewrites = {rewrite.request_id: rewrite for rewrite in plan.request_rewrites}
+    detachments_by_request: dict[int, list[LotForcePurgeLineageDetach]] = {}
+    for detachment in plan.incoming_lineage_detachments:
+        detachments_by_request.setdefault(detachment.request_id, []).append(detachment)
+    adjusted_request_ids = sorted(set(rewrites) | set(detachments_by_request))
+    request_state = {
+        int(row.id): (int(row.version), row.status)
+        for row in db.execute(
+            select(BoxRequest.id, BoxRequest.version, BoxRequest.status).where(
+                BoxRequest.id.in_(adjusted_request_ids)
+            )
+        ).all()
+    }
+    now = datetime.now(UTC)
+
+    for request_id in adjusted_request_ids:
+        rewrite = rewrites.get(request_id)
+        detachments = detachments_by_request.get(request_id, [])
+        if request_id not in request_state:
+            _force_purge_conflict(
+                "a preserved request disappeared during force purge",
+                code="graph_changed",
+                preview=plan,
+            )
+        before_version, request_status = request_state[request_id]
+        values: dict[str, object] = {
+            "version": before_version + 1,
+            "updated_at": now,
+        }
+        metadata: dict[str, object] = {
+            "operation": "lot_force_purge_adjustment",
+            "purge_audit_id": audit_id,
+            "lot_id": plan.lot_id,
+            "before_version": before_version,
+            "after_version": before_version + 1,
+        }
+
+        if rewrite is not None:
+            if rewrite.removed_discrepancy_photo_ids:
+                deleted_counts["box_request_discrepancy_photos"] = (
+                    deleted_counts.get("box_request_discrepancy_photos", 0)
+                    + _delete_count(
+                        db,
+                        delete(BoxRequestDiscrepancyPhoto).where(
+                            BoxRequestDiscrepancyPhoto.id.in_(
+                                rewrite.removed_discrepancy_photo_ids
+                            )
+                        ),
+                    )
+                )
+            if rewrite.removed_discrepancy_ids:
+                deleted_counts["box_request_discrepancies"] = (
+                    deleted_counts.get("box_request_discrepancies", 0)
+                    + _delete_count(
+                        db,
+                        delete(BoxRequestDiscrepancy).where(
+                            BoxRequestDiscrepancy.id.in_(
+                                rewrite.removed_discrepancy_ids
+                            )
+                        ),
+                    )
+                )
+            if rewrite.removed_item_ids:
+                deleted_counts["box_request_items"] = (
+                    deleted_counts.get("box_request_items", 0)
+                    + _delete_count(
+                        db,
+                        delete(BoxRequestItem).where(
+                            BoxRequestItem.id.in_(rewrite.removed_item_ids)
+                        ),
+                    )
+                )
+                surviving_positions = [
+                    position
+                    for position in rewrite.item_positions
+                    if position.after_position is not None
+                ]
+                if surviving_positions:
+                    offset = (
+                        max(position.before_position for position in rewrite.item_positions)
+                        + len(surviving_positions)
+                        + 1
+                    )
+                    db.execute(
+                        update(BoxRequestItem)
+                        .where(
+                            BoxRequestItem.id.in_(
+                                [position.item_id for position in surviving_positions]
+                            )
+                        )
+                        .values(position=BoxRequestItem.position + offset)
+                        .execution_options(synchronize_session=False)
+                    )
+                    for position in surviving_positions:
+                        db.execute(
+                            update(BoxRequestItem)
+                            .where(BoxRequestItem.id == position.item_id)
+                            .values(position=position.after_position)
+                            .execution_options(synchronize_session=False)
+                        )
+            values.update(
+                {
+                    "quantity": rewrite.after_quantity,
+                    "actual_received_quantity": (
+                        rewrite.after_actual_received_quantity
+                    ),
+                    "variance_quantity": rewrite.after_variance_quantity,
+                }
+            )
+            metadata["rewrite"] = {
+                "before": {
+                    "item_count": rewrite.before_item_count,
+                    "quantity": rewrite.before_quantity,
+                    "actual_received_quantity": (
+                        rewrite.before_actual_received_quantity
+                    ),
+                    "variance_quantity": rewrite.before_variance_quantity,
+                },
+                "after": {
+                    "item_count": rewrite.after_item_count,
+                    "quantity": rewrite.after_quantity,
+                    "actual_received_quantity": (
+                        rewrite.after_actual_received_quantity
+                    ),
+                    "variance_quantity": rewrite.after_variance_quantity,
+                },
+                "removed_item_ids": rewrite.removed_item_ids,
+                "removed_discrepancy_ids": rewrite.removed_discrepancy_ids,
+                "removed_discrepancy_photo_ids": (
+                    rewrite.removed_discrepancy_photo_ids
+                ),
+                "positions": [
+                    {
+                        "item_id": position.item_id,
+                        "before": position.before_position,
+                        "after": position.after_position,
+                    }
+                    for position in rewrite.item_positions
+                ],
+                "preserved_sibling_lot_ids": rewrite.preserved_sibling_lot_ids,
+            }
+        if detachments:
+            detached_fields: list[dict[str, object]] = []
+            for detachment in detachments:
+                values[detachment.field_name] = None
+                detached_fields.append(
+                    {
+                        "field": detachment.field_name,
+                        "before": (
+                            detachment.deleted_target_request_id
+                        ),
+                        "after": None,
+                    }
+                )
+            metadata["lineage_detachments"] = detached_fields
+
+        result = db.execute(
+            update(BoxRequest)
+            .where(
+                BoxRequest.id == request_id,
+                BoxRequest.version == before_version,
+            )
+            .values(**values)
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount != 1:
+            _force_purge_conflict(
+                "a preserved request changed during force purge",
+                code="graph_changed",
+                preview=plan,
+            )
+        db.add(
+            BoxRequestEvent(
+                request_id=request_id,
+                event_type=BoxRequestEventType.force_purge_adjusted,
+                from_status=request_status,
+                to_status=request_status,
+                user_id=user.id,
+                note="Request adjusted by administrative Lot force purge.",
+                occurred_at=now,
+                event_metadata=metadata,
+            )
+        )
+    return deleted_counts
+
+
+def force_purge_lot(
+    db: Session,
+    *,
+    user: User,
+    lot_id: int,
+    confirmation_name: str,
+    confirmation_phrase: str,
+    reason: str,
+    expected_version: int,
+    expected_graph_signature: str,
+    acknowledged_blocker_codes: list[str],
+) -> LotForcePurgeResult:
+    """Atomically execute a locked surgical force purge and durable audit."""
+    if user.role != UserRole.admin:
+        raise LotAccessError("lot force purge requires admin role")
+    cleaned_reason = reason.strip()
+    if len(cleaned_reason) < 20:
+        raise LotRuleError("force purge reason must be at least 20 characters")
+    if len(cleaned_reason) > 2000:
+        raise LotRuleError("force purge reason must be at most 2000 characters")
+
+    prelock = analyze_lot_force_purge_impact(db, lot_id=lot_id)
+    locked = analyze_lot_force_purge_impact(
+        db,
+        lot_id=lot_id,
+        lock_for_update=True,
+    )
+    if locked.lot_version != expected_version:
+        _force_purge_conflict(
+            (
+                "lot version conflict: expected "
+                f"{expected_version}, current {locked.lot_version}"
+            ),
+            code="version_conflict",
+            preview=locked,
+        )
+    if confirmation_name != locked.lot_name:
+        _force_purge_conflict(
+            "confirmation name must exactly match the current lot name",
+            code="confirmation_name_mismatch",
+            preview=locked,
+        )
+    if confirmation_phrase != locked.confirmation_phrase:
+        _force_purge_conflict(
+            "confirmation phrase must exactly match the server phrase",
+            code="confirmation_phrase_mismatch",
+            preview=locked,
+        )
+    if (
+        expected_graph_signature != locked.graph_signature
+        or prelock.graph_signature != locked.graph_signature
+    ):
+        _force_purge_conflict(
+            "the lot graph changed after preview; review the latest preview",
+            code="graph_changed",
+            preview=locked,
+        )
+    if locked.hard_blockers:
+        _force_purge_conflict(
+            "lot force purge is blocked by a non-overridable safeguard",
+            code="force_purge_blocked",
+            preview=locked,
+        )
+    required_codes = {blocker.code for blocker in locked.overridden_blockers}
+    supplied_codes = set(acknowledged_blocker_codes)
+    if (
+        supplied_codes != required_codes
+        or len(acknowledged_blocker_codes) != len(supplied_codes)
+    ):
+        _force_purge_conflict(
+            "every current overridden safeguard must be acknowledged exactly once",
+            code="acknowledgement_mismatch",
+            preview=locked,
+        )
+
+    lot = db.get(Lot, lot_id)
+    assert lot is not None
+    boxes = list(
+        db.scalars(select(Box).where(Box.lot_id == lot_id).order_by(Box.id)).all()
+    )
+    all_box_ids = [box.id for box in boxes]
+    request_rows = list(
+        db.scalars(
+            select(BoxRequest)
+            .where(BoxRequest.id.in_(locked.touched_request_ids))
+            .order_by(BoxRequest.id)
+        ).all()
+    )
+    warehouse_ids = sorted(
+        {box.current_warehouse_id for box in boxes}
+        | {request.warehouse_id for request in request_rows}
+    )
+    object_keys = list(locked.object_cleanup.deletable_keys)
+    deleted_entity_ids = _force_deleted_entity_ids(
+        db,
+        plan=locked,
+        box_ids=all_box_ids,
+    )
+    cleanup_status = (
+        LotPurgeCleanupStatus.pending
+        if object_keys
+        else LotPurgeCleanupStatus.not_required
+    )
+    audit = LotPurgeEvent(
+        lot_id=lot.id,
+        lot_name=lot.name,
+        lot_version=lot.version,
+        actor_user_id=user.id,
+        reason=cleaned_reason,
+        receipt_ids=list(locked.touched_request_ids),
+        receipt_count=locked.touched_request_count,
+        archived_box_ids=all_box_ids,
+        archived_box_count=len(all_box_ids),
+        object_keys=object_keys,
+        object_key_count=len(object_keys),
+        object_cleanup_status=cleanup_status,
+        object_cleanup_completed_at=(
+            datetime.now(UTC)
+            if cleanup_status == LotPurgeCleanupStatus.not_required
+            else None
+        ),
+        event_metadata={
+            "operation": "lot_force_purge",
+            "purge_mode": "force",
+            "confirmation_policy": "exact_case_sensitive_no_normalization",
+            "confirmation_phrase": locked.confirmation_phrase,
+            "graph_signature": locked.graph_signature,
+            "acknowledged_blocker_codes": sorted(supplied_codes),
+            "overridden_blocker_codes": sorted(required_codes),
+            "warehouse_ids": warehouse_ids,
+            "active_box_ids": locked.active_box_ids,
+            "archived_box_ids": locked.archived_box_ids,
+            "rewritten_request_ids": [
+                rewrite.request_id for rewrite in locked.request_rewrites
+            ],
+            "request_rewrites": [
+                {
+                    "request_id": rewrite.request_id,
+                    "origin": rewrite.origin,
+                    "status": rewrite.status,
+                    "direction": rewrite.direction,
+                    "before": {
+                        "item_count": rewrite.before_item_count,
+                        "quantity": rewrite.before_quantity,
+                        "actual_received_quantity": (
+                            rewrite.before_actual_received_quantity
+                        ),
+                        "variance_quantity": rewrite.before_variance_quantity,
+                    },
+                    "after": {
+                        "item_count": rewrite.after_item_count,
+                        "quantity": rewrite.after_quantity,
+                        "actual_received_quantity": (
+                            rewrite.after_actual_received_quantity
+                        ),
+                        "variance_quantity": rewrite.after_variance_quantity,
+                    },
+                    "positions": [
+                        {
+                            "item_id": position.item_id,
+                            "before": position.before_position,
+                            "after": position.after_position,
+                        }
+                        for position in rewrite.item_positions
+                    ],
+                    "removed_item_ids": rewrite.removed_item_ids,
+                    "removed_discrepancy_ids": rewrite.removed_discrepancy_ids,
+                    "removed_discrepancy_photo_ids": (
+                        rewrite.removed_discrepancy_photo_ids
+                    ),
+                    "preserved_sibling_lot_ids": (
+                        rewrite.preserved_sibling_lot_ids
+                    ),
+                }
+                for rewrite in locked.request_rewrites
+            ],
+            "deleted_request_ids": locked.fully_deleted_request_ids,
+            "deleted_entity_ids": deleted_entity_ids,
+            "lineage_detachments": [
+                {
+                    "request_id": detachment.request_id,
+                    "field": detachment.field_name,
+                    "deleted_request_id": detachment.deleted_target_request_id,
+                }
+                for detachment in locked.incoming_lineage_detachments
+            ],
+            "shared_skipped_object_keys": (
+                locked.object_cleanup.shared_skipped_keys
+            ),
+            "shared_skipped_object_key_count": (
+                locked.object_cleanup.shared_skipped_key_count
+            ),
+            "object_cleanup": {
+                "status": cleanup_status.value,
+                "deletable_keys": object_keys,
+                "shared_skipped_keys": (
+                    locked.object_cleanup.shared_skipped_keys
+                ),
+            },
+        },
+    )
+    try:
+        db.add(audit)
+        db.flush()
+        deleted_counts = _apply_force_request_adjustments(
+            db,
+            user=user,
+            audit_id=audit.id,
+            plan=locked,
+        )
+        full_graph_counts = _delete_force_request_graph(
+            db,
+            request_ids=locked.fully_deleted_request_ids,
+        )
+        for name, count in full_graph_counts.items():
+            deleted_counts[name] = deleted_counts.get(name, 0) + count
+        remaining_item_references = int(
+            db.scalar(
+                select(func.count())
+                .select_from(BoxRequestItem)
+                .where(
+                    or_(
+                        BoxRequestItem.lot_id == lot_id,
+                        (
+                            BoxRequestItem.box_id.in_(all_box_ids)
+                            if all_box_ids
+                            else literal(False)
+                        ),
+                    )
+                )
+            )
+            or 0
+        )
+        remaining_discrepancy_references = (
+            int(
+                db.scalar(
+                    select(func.count())
+                    .select_from(BoxRequestDiscrepancy)
+                    .where(BoxRequestDiscrepancy.box_id.in_(all_box_ids))
+                )
+                or 0
+            )
+            if all_box_ids
+            else 0
+        )
+        if remaining_item_references or remaining_discrepancy_references:
+            _force_purge_conflict(
+                "the locked lot graph gained an unplanned reference",
+                code="graph_changed",
+                preview=locked,
+            )
+        if all_box_ids:
+            deleted_counts["box_events"] = _delete_count(
+                db,
+                delete(BoxEvent).where(BoxEvent.box_id.in_(all_box_ids)),
+            )
+            deleted_counts["boxes"] = _delete_count(
+                db,
+                delete(Box).where(Box.id.in_(all_box_ids)),
+            )
+        deleted_counts["lot_events"] = _delete_count(
+            db,
+            delete(LotEvent).where(LotEvent.lot_id == lot_id),
+        )
+        deleted_counts["lots"] = _delete_count(
+            db,
+            delete(Lot).where(
+                Lot.id == lot_id,
+                Lot.version == expected_version,
+            ),
+        )
+        if deleted_counts["lots"] != 1:
+            _force_purge_conflict(
+                "the locked lot changed before deletion",
+                code="graph_changed",
+                preview=locked,
+            )
+        audit.event_metadata = {
+            **audit.event_metadata,
+            "deleted_counts": deleted_counts,
+            "impact_counts": {
+                "active_boxes": locked.active_box_count,
+                "archived_boxes": locked.archived_box_count,
+                "touched_requests": locked.touched_request_count,
+                "rewritten_requests": locked.request_rewrite_count,
+                "deleted_requests": locked.fully_deleted_request_count,
+                "lineage_detachments": (
+                    locked.incoming_lineage_detachment_count
+                ),
+                "deletable_objects": locked.object_cleanup.deletable_key_count,
+                "skipped_shared_objects": (
+                    locked.object_cleanup.shared_skipped_key_count
+                ),
+            },
+        }
+        db.flush()
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    return LotForcePurgeResult(
+        audit_id=audit.id,
+        lot_id=locked.lot_id,
+        lot_name=locked.lot_name,
+        lot_version=locked.lot_version,
+        active_box_count=locked.active_box_count,
+        archived_box_count=locked.archived_box_count,
+        touched_request_count=locked.touched_request_count,
+        rewritten_request_count=locked.request_rewrite_count,
+        deleted_request_count=locked.fully_deleted_request_count,
+        lineage_detachment_count=locked.incoming_lineage_detachment_count,
+        deletable_object_count=locked.object_cleanup.deletable_key_count,
+        skipped_object_count=locked.object_cleanup.shared_skipped_key_count,
+        object_cleanup_status=cleanup_status,
+        object_cleanup_failures=[],
+        warehouse_ids=warehouse_ids,
+    )
+
+
+def purge_lot(
+    db: Session,
+    *,
+    user: User,
+    lot_id: int,
+    confirmation_name: str,
+    reason: str,
+    expected_version: int,
+    expected_graph_signature: str | None = None,
+) -> LotPurgeResult:
+    """Atomically remove one eligible lot graph and write its independent audit."""
+    if user.role != UserRole.admin:
+        raise LotAccessError("lot purge requires admin role")
+    cleaned_reason = reason.strip()
+    if not cleaned_reason:
+        raise LotRuleError("a reason is required to purge a lot")
+    if len(cleaned_reason) > 2000:
+        raise LotRuleError("purge reason must be at most 2000 characters")
+
+    # This first snapshot lets execution detect a graph that changes while it is
+    # waiting to acquire the deterministic Lot/Box/request/item lock set.
+    prelock = analyze_lot_purge_eligibility(db, lot_id=lot_id)
+    locked = analyze_lot_purge_eligibility(
+        db,
+        lot_id=lot_id,
+        lock_for_update=True,
+    )
+
+    if locked.lot_version != expected_version:
+        raise LotPurgeConflictError(
+            (
+                "lot version conflict: expected "
+                f"{expected_version}, current {locked.lot_version}"
+            ),
+            code="version_conflict",
+            preview=locked,
+        )
+    # Confirmation is intentionally strict: Unicode code points and case must
+    # exactly equal the locked canonical display name. No trimming, whitespace
+    # collapsing, or case folding is applied to destructive confirmation.
+    if confirmation_name != locked.lot_name:
+        raise LotPurgeConflictError(
+            "confirmation name must exactly match the current lot name",
+            code="confirmation_name_mismatch",
+            preview=locked,
+        )
+    if (
+        prelock.graph_signature != locked.graph_signature
+        or (
+            expected_graph_signature is not None
+            and expected_graph_signature != locked.graph_signature
+        )
+    ):
+        raise LotPurgeConflictError(
+            "the lot graph changed after preview; review the latest preview",
+            code="graph_changed",
+            preview=locked,
+        )
+    if not locked.eligible:
+        raise LotPurgeConflictError(
+            "lot is not eligible for purge",
+            code="purge_blocked",
+            preview=locked,
+        )
+
+    lot = db.get(Lot, lot_id)
+    assert lot is not None
+    boxes = list(
+        db.scalars(select(Box).where(Box.lot_id == lot_id).order_by(Box.id)).all()
+    )
+    box_ids = [box.id for box in boxes]
+    request_ids = list(
+        db.scalars(
+            select(BoxRequestItem.request_id)
+            .where(
+                or_(
+                    BoxRequestItem.lot_id == lot_id,
+                    BoxRequestItem.box_id.in_(box_ids) if box_ids else literal(False),
+                )
+            )
+            .distinct()
+            .order_by(BoxRequestItem.request_id)
+        ).all()
+    )
+    object_keys = _purge_object_keys(db, request_ids)
+    receipt_snapshots = (
+        [
+            {
+                "id": request.id,
+                "warehouse_id": request.warehouse_id,
+                "origin": _enum_text(request.origin),
+                "direction": _enum_text(request.direction),
+                "status": _enum_text(request.status),
+                "version": request.version,
+            }
+            for request in db.scalars(
+                select(BoxRequest)
+                .where(BoxRequest.id.in_(request_ids))
+                .order_by(BoxRequest.id)
+            ).all()
+        ]
+        if request_ids
+        else []
+    )
+    warehouse_ids = sorted(
+        {
+            box.current_warehouse_id for box in boxes
+        }
+        | {
+            int(snapshot["warehouse_id"])
+            for snapshot in receipt_snapshots
+        }
+    )
+    lot_snapshot = {
+        "id": lot.id,
+        "name": lot.name,
+        "normalized_name": lot.normalized_name,
+        "version": lot.version,
+        "created_at": lot.created_at.isoformat(),
+        "updated_at": lot.updated_at.isoformat(),
+        "created_by_user_id": lot.created_by_user_id,
+        "updated_by_user_id": lot.updated_by_user_id,
+    }
+    box_snapshots = [
+        {
+            "id": box.id,
+            "box_number": box.box_number,
+            "warehouse_id": box.current_warehouse_id,
+            "status": _enum_text(box.status),
+            "archived_at": (
+                box.archived_at.isoformat() if box.archived_at is not None else None
+            ),
+        }
+        for box in boxes
+    ]
+
+    cleanup_status = (
+        LotPurgeCleanupStatus.pending
+        if object_keys
+        else LotPurgeCleanupStatus.not_required
+    )
+    audit = LotPurgeEvent(
+        lot_id=lot.id,
+        lot_name=lot.name,
+        lot_version=lot.version,
+        actor_user_id=user.id,
+        reason=cleaned_reason,
+        receipt_ids=request_ids,
+        receipt_count=len(request_ids),
+        archived_box_ids=box_ids,
+        archived_box_count=len(box_ids),
+        object_keys=object_keys,
+        object_key_count=len(object_keys),
+        object_cleanup_status=cleanup_status,
+        object_cleanup_completed_at=(
+            datetime.now(UTC)
+            if cleanup_status == LotPurgeCleanupStatus.not_required
+            else None
+        ),
+        event_metadata={
+            "operation": "lot_purge",
+            "confirmation_policy": "exact_case_sensitive_no_normalization",
+            "graph_signature": locked.graph_signature,
+            "warehouse_ids": warehouse_ids,
+            "lot_snapshot": lot_snapshot,
+            "box_snapshots": box_snapshots,
+            "receipt_snapshots": receipt_snapshots,
+        },
+    )
+    try:
+        db.add(audit)
+        db.flush()
+        deleted_counts = _delete_purge_graph(
+            db,
+            lot_id=lot_id,
+            box_ids=box_ids,
+            request_ids=request_ids,
+            expected_version=expected_version,
+            locked=locked,
+        )
+        audit.event_metadata = {
+            **audit.event_metadata,
+            "deleted_counts": deleted_counts,
+        }
+        db.flush()
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    return LotPurgeResult(
+        audit_id=audit.id,
+        lot_id=lot_id,
+        lot_name=locked.lot_name,
+        lot_version=locked.lot_version,
+        archived_box_count=len(box_ids),
+        receipt_count=len(request_ids),
+        object_key_count=len(object_keys),
+        object_cleanup_status=cleanup_status,
+        object_cleanup_failures=[],
+        warehouse_ids=warehouse_ids,
+    )
+
+
+def cleanup_lot_purge_objects(
+    db: Session,
+    *,
+    user: User,
+    audit_id: int,
+) -> LotPurgeCleanupResult:
+    """Idempotently retry pending object deletion without touching purge data."""
+    if user.role != UserRole.admin:
+        raise LotAccessError("lot purge cleanup requires admin role")
+    audit = db.scalar(
+        select(LotPurgeEvent)
+        .where(LotPurgeEvent.id == audit_id)
+        .with_for_update(of=LotPurgeEvent)
+    )
+    if audit is None:
+        raise LotPurgeNotFoundError(f"lot purge audit {audit_id} not found")
+    if audit.object_cleanup_status in (
+        LotPurgeCleanupStatus.not_required,
+        LotPurgeCleanupStatus.completed,
+    ):
+        return LotPurgeCleanupResult(
+            audit_id=audit.id,
+            status=audit.object_cleanup_status,
+            failures=list(audit.object_cleanup_failures),
+        )
+
+    failed_keys = [
+        str(failure["object_key"])
+        for failure in audit.object_cleanup_failures
+        if isinstance(failure, dict) and failure.get("object_key")
+    ]
+    target_keys = (
+        failed_keys
+        if failed_keys
+        and audit.object_cleanup_status
+        in (LotPurgeCleanupStatus.partial_failure, LotPurgeCleanupStatus.failed)
+        else [str(key) for key in audit.object_keys]
+    )
+    audit.object_cleanup_status = LotPurgeCleanupStatus.in_progress
+    db.commit()
+
+    failures: list[dict[str, object]] = []
+    for object_key in target_keys:
+        if _purge_object_key_reference_count(db, object_key):
+            failures.append(
+                {
+                    "object_key": object_key,
+                    "error": "object storage deletion skipped because the key is still referenced",
+                }
+            )
+            continue
+        try:
+            delete_document_strict(object_key)
+        except Exception:
+            failures.append(
+                {
+                    "object_key": object_key,
+                    "error": "object storage deletion failed",
+                }
+            )
+
+    audit = db.scalar(
+        select(LotPurgeEvent)
+        .where(LotPurgeEvent.id == audit_id)
+        .with_for_update(of=LotPurgeEvent)
+    )
+    if audit is None:
+        raise LotPurgeNotFoundError(f"lot purge audit {audit_id} not found")
+    # Another idempotent worker may have completed the same keys while this
+    # worker was outside the transaction performing network I/O. Completion is
+    # monotonic: a slower failing worker must never overwrite confirmed success.
+    if audit.object_cleanup_status in (
+        LotPurgeCleanupStatus.not_required,
+        LotPurgeCleanupStatus.completed,
+    ):
+        return LotPurgeCleanupResult(
+            audit_id=audit.id,
+            status=audit.object_cleanup_status,
+            failures=list(audit.object_cleanup_failures),
+        )
+    audit.object_cleanup_failures = failures
+    if not failures:
+        audit.object_cleanup_status = LotPurgeCleanupStatus.completed
+        audit.object_cleanup_completed_at = datetime.now(UTC)
+    elif len(failures) >= audit.object_key_count:
+        audit.object_cleanup_status = LotPurgeCleanupStatus.failed
+        audit.object_cleanup_completed_at = None
+    else:
+        audit.object_cleanup_status = LotPurgeCleanupStatus.partial_failure
+        audit.object_cleanup_completed_at = None
+    audit.event_metadata = {
+        **audit.event_metadata,
+        "object_cleanup_attempted_at": datetime.now(UTC).isoformat(),
+        "object_cleanup_attempted_key_count": len(target_keys),
+        "object_cleanup_failure_count": len(failures),
+    }
+    db.commit()
+    return LotPurgeCleanupResult(
+        audit_id=audit.id,
+        status=audit.object_cleanup_status,
+        failures=list(audit.object_cleanup_failures),
+    )
 
 
 _OVERLAP_LIST_LIMIT = 100
@@ -1113,9 +4269,27 @@ __all__ = [
     "LotNameCollisionError",
     "LotOption",
     "LotNotFoundError",
+    "LotForcePurgeBlocker",
+    "LotForcePurgeImpactPlan",
+    "LotForcePurgeItemPosition",
+    "LotForcePurgeLineageDetach",
+    "LotForcePurgeObjectCleanupPlan",
+    "LotForcePurgeRequestRewrite",
+    "LotPurgeAnalysisError",
+    "LotPurgeBlocker",
+    "LotPurgeCleanupResult",
+    "LotPurgeConflictError",
+    "LotPurgeEligibility",
+    "LotPurgeEntity",
+    "LotPurgeNotFoundError",
+    "LotPurgeRequestPreview",
+    "LotPurgeResult",
     "LotRuleError",
     "LotSummary",
     "LotVersionConflictError",
+    "analyze_lot_force_purge_impact",
+    "analyze_lot_purge_eligibility",
+    "cleanup_lot_purge_objects",
     "find_lot",
     "get_lot",
     "get_or_create_lot",
@@ -1128,6 +4302,7 @@ __all__ = [
     "lot_warehouse_ids",
     "merge_lots",
     "normalize_lot_name",
+    "purge_lot",
     "rename_lot",
     "resolve_lot",
     "resolve_lot_names_for_use",

@@ -50,6 +50,15 @@ class LotEventType(str, enum.Enum):
     merged = "merged"
 
 
+class LotPurgeCleanupStatus(str, enum.Enum):
+    pending = "pending"
+    not_required = "not_required"
+    in_progress = "in_progress"
+    completed = "completed"
+    partial_failure = "partial_failure"
+    failed = "failed"
+
+
 class Lot(Base):
     __tablename__ = "lots"
     __table_args__ = (
@@ -170,10 +179,100 @@ class LotEvent(Base):
     lot: Mapped[Lot] = relationship(back_populates="events")
 
 
+class LotPurgeEvent(Base):
+    """Durable purge ledger that deliberately does not reference ``lots``."""
+
+    __tablename__ = "lot_purge_events"
+    __table_args__ = (
+        CheckConstraint("lot_version > 0", name="ck_lot_purge_events_version_positive"),
+        CheckConstraint(
+            "length(trim(reason)) > 0",
+            name="ck_lot_purge_events_reason_not_blank",
+        ),
+        CheckConstraint(
+            "receipt_count >= 0",
+            name="ck_lot_purge_events_receipt_count_nonnegative",
+        ),
+        CheckConstraint(
+            "archived_box_count >= 0",
+            name="ck_lot_purge_events_box_count_nonnegative",
+        ),
+        CheckConstraint(
+            "object_key_count >= 0",
+            name="ck_lot_purge_events_object_key_count_nonnegative",
+        ),
+        Index("ix_lot_purge_events_lot_created", "lot_id", "created_at"),
+        Index("ix_lot_purge_events_actor_created", "actor_user_id", "created_at"),
+        Index(
+            "ix_lot_purge_events_cleanup_updated",
+            "object_cleanup_status",
+            "updated_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    # Snapshot only: no FK is intentional because the corresponding Lot is gone.
+    lot_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    lot_name: Mapped[str] = mapped_column(String(MAX_LOT_NAME_LENGTH), nullable=False)
+    lot_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    actor_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    receipt_ids: Mapped[list[int]] = mapped_column(
+        JSON, nullable=False, default=list, server_default="[]"
+    )
+    receipt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    archived_box_ids: Mapped[list[int]] = mapped_column(
+        JSON, nullable=False, default=list, server_default="[]"
+    )
+    archived_box_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    object_keys: Mapped[list[str]] = mapped_column(
+        JSON, nullable=False, default=list, server_default="[]"
+    )
+    object_key_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    object_cleanup_status: Mapped[LotPurgeCleanupStatus] = mapped_column(
+        Enum(
+            LotPurgeCleanupStatus,
+            name="lot_purge_cleanup_status",
+            native_enum=False,
+            create_constraint=True,
+            values_callable=lambda enum_cls: [item.value for item in enum_cls],
+        ),
+        nullable=False,
+        default=LotPurgeCleanupStatus.pending,
+    )
+    object_cleanup_failures: Mapped[list[dict[str, object]]] = mapped_column(
+        JSON, nullable=False, default=list, server_default="[]"
+    )
+    object_cleanup_completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+    event_metadata: Mapped[dict[str, object]] = mapped_column(
+        "metadata", JSON, nullable=False, default=dict, server_default="{}"
+    )
+
+
+# Domain-language alias retained for callers that refer to the ledger as an audit.
+LotPurgeAudit = LotPurgeEvent
+
+
 __all__ = [
     "Lot",
     "LotEvent",
     "LotEventType",
+    "LotPurgeAudit",
+    "LotPurgeCleanupStatus",
+    "LotPurgeEvent",
     "clean_lot_name",
     "normalize_lot_name",
 ]

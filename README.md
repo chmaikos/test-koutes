@@ -18,6 +18,9 @@ and threshold alerts (in-app + email via Microsoft Graph).
   safe explicit merge-on-rename (blocked by active or archived box-number
   overlap), and audited per-box reassignment. Merged source identities remain
   hidden audit tombstones; historical request/XLSX text is never rewritten.
+  Admins also have a guarded permanent purge for erroneous Lots that contain
+  only archived boxes and completed, exclusive manual/XLSX self-receipts with
+  no later workflow, lineage, merge, or reassignment history.
 - Full audit trail per box (timeline of events).
 - Audited inbound box orders and return requests with the explicit lifecycle
   `submitted → approved → preparing → ready_for_transport → in_transit →
@@ -486,6 +489,50 @@ reassign one box to another lot; both operations require a reason, optimistic
 version, collision checks, and audit events. Renaming never merges/deletes
 identities, and box reassignment never rewrites request snapshots.
 
+Only an **Admin** can permanently purge an erroneous Lot. The Danger Zone first
+loads a server-side safe-purge preview. A Lot is safely eligible only when it is
+active and unmerged, every physical box is archived and
+traceable to a concrete self-receipt line, and every linked request is a
+completed `manual_entry` or `xlsx_import` inbound self-receipt containing no
+other Lot. Mixed receipts, staged/open/non-completed requests, returns,
+parent/child/root or source lineage, later workflow events, box movement or
+reassignment, merge tombstones/history, foreign references, unlinked boxes, and
+shared storage keys block the purge.
+
+Confirmation requires the current Lot version, a mandatory reason (maximum
+2,000 characters), and typing the current displayed Lot name exactly,
+case-sensitive and without trimming or normalization. A successful purge
+permanently removes the Lot, its archived boxes/events, and all records owned by
+the exclusive self-receipts, including items, events, documents, attachments,
+comments, discrepancies/photos, exceptions, notifications, and email outbox
+rows. It cannot be undone. The independent purge audit is committed atomically
+with the database deletion. Stored objects are deleted after that commit;
+failures remain visible as pending/failed cleanup and can be retried
+idempotently by an Admin without implying that the database purge rolled back.
+
+When safe purge is blocked, the UI can disclose a separate **Administrative
+force purge** impact review. Force purge is selected-Lot-only: it removes only
+the chosen Lot, its boxes and selected request items/discrepancies. Sibling
+Lots, boxes, retained request artifacts, notifications, documents, and
+unrelated discrepancies survive. Mixed requests are rewritten in place with
+stable status and lifecycle timestamps, compacted item positions, recalculated
+quantity/actual/variance fields, a version increment, and a dedicated
+`force_purge_adjusted` audit event. Requests left with zero items are removed
+with their complete FK-owned graph; preserved incoming source/parent/root links
+are detached and audited.
+
+Force remains permanently blocked for merged sources and merge targets. It
+requires the exact current Lot name, the exact server phrase
+`FORCE DELETE LOT <id>`, a reason of at least 20 characters, and one explicit
+acknowledgement for every overridden safeguard. Version, graph signature, and
+acknowledgements are revalidated under deterministic PostgreSQL locks before
+mutation; stale conflicts clear the destructive confirmations. The independent
+purge ledger atomically records the force plan, before/after rewrites, deleted
+IDs, lineage detachments, overridden safeguards, sibling preservation, actor,
+reason, signature, and cleanup state. This is permanent recovery, not a general
+cleanup tool, and cannot be undone. Shared object keys are preserved; only
+deleted-only keys enter durable post-commit cleanup and Admin retry.
+
 ## ERP delivery and return notes
 
 The ERP remains the system that creates official delivery/return documents.
@@ -550,6 +597,14 @@ Lot endpoints are:
   `GET /api/lots/{lot_id}`,
 - `GET /api/lots/{lot_id}/boxes`,
 - `PATCH /api/lots/{lot_id}/rename` (admin, reason + `expected_version`),
+- `GET /api/lots/{lot_id}/purge-preview` and
+  `POST /api/lots/{lot_id}/purge` (admin-only permanent purge with exact typed
+  name, reason, version, and locked preview revalidation),
+- `GET /api/lots/{lot_id}/force-purge-preview` and
+  `POST /api/lots/{lot_id}/force-purge` (admin-only selected-Lot recovery,
+  exposed after safe purge is blocked and subject to strong confirmation),
+- `POST /api/lots/purge-audits/{audit_id}/cleanup-retry` (admin-only,
+  idempotent stored-object cleanup retry),
 - `POST /api/boxes/{box_id}/reassign-lot` (admin, reason +
   `expected_lot_version`),
 - ACL-scoped `GET /api/exports/lots.csv` and `/api/exports/lots.xlsx`.
@@ -568,7 +623,7 @@ invalidate the relevant request, inventory, and dashboard queries.
 You can run things directly without Docker if you prefer; see
 [`api/README.md`](api/README.md) and [`web/README.md`](web/README.md).
 
-## Deploying migration 0027
+## Deploying Lot migrations 0027–0030
 
 `0027_first_class_lots` is a coordinated cutover from `boxes.lot` to the
 required `boxes.lot_id` foreign key. Stop old API instances, run the read-only
@@ -578,3 +633,17 @@ boxes), apply Alembic, and then deploy the matching API/web build. Generate
 offline SQL with the production PostgreSQL dialect. Full commands, rollback
 constraints, and operator checks are documented in
 [`docs/FIRST_CLASS_LOTS_DEPLOYMENT.md`](docs/FIRST_CLASS_LOTS_DEPLOYMENT.md).
+
+`0028_safe_lot_merge`, `0029_lot_purge_audit`, and
+`0030_force_purge_adjustment` must then be applied in normal Alembic order
+before starting the API build that exposes merge/purge routes.
+For a normal deployment: stop or drain old API writers, back up PostgreSQL and
+RustFS together, run `alembic upgrade head` through
+`0030_force_purge_adjustment`,
+deploy/restart the matching API, then deploy the web build. Do not serve the new
+API against a database below `0030`, and do not run the new web UI against an
+old API. Migration `0029` is additive and its downgrade is intentionally
+blocked once any purge audit exists. Migration `0030` adds the durable
+`force_purge_adjusted` request-event value; downgrade is blocked when such
+events exist. Object cleanup retries require the normal API service and RustFS
+connectivity after the database upgrade.

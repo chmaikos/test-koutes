@@ -5,11 +5,12 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
 from app.deps import CurrentUser, DbSession, require_admin, require_operator
 from app.events import bus
 from app.models.boxes import Box, BoxStatus
-from app.models.lots import Lot, LotEvent
+from app.models.lots import Lot, LotEvent, LotPurgeEvent
 from app.models.users import User
 from app.models.warehouses import Warehouse
 from app.routers._filters import (
@@ -25,11 +26,22 @@ from app.schemas.lots import (
     LotCreate,
     LotDetailOut,
     LotEventOut,
+    LotForcePurge,
+    LotForcePurgeConflictOut,
+    LotForcePurgeConflictResponse,
+    LotForcePurgePreviewOut,
+    LotForcePurgeResultOut,
     LotIdentityOut,
     LotMerge,
     LotMergeOut,
     LotOptionOut,
     LotProgressState,
+    LotPurge,
+    LotPurgeCleanupOut,
+    LotPurgeConflictOut,
+    LotPurgeConflictResponse,
+    LotPurgePreviewOut,
+    LotPurgeResultOut,
     LotRename,
     LotSortField,
     LotSummaryOut,
@@ -43,14 +55,21 @@ from app.services.lots import (
     LotMergeConflictError,
     LotNameCollisionError,
     LotNotFoundError,
+    LotPurgeConflictError,
+    LotPurgeNotFoundError,
     LotRuleError,
     LotVersionConflictError,
+    analyze_lot_force_purge_impact,
+    analyze_lot_purge_eligibility,
+    cleanup_lot_purge_objects,
+    force_purge_lot,
     get_or_create_lot_result,
     get_visible_lot_summary,
     list_lot_options,
     list_lot_summaries,
     lot_warehouse_ids,
     merge_lots,
+    purge_lot,
     rename_lot,
 )
 
@@ -79,6 +98,14 @@ def _parse_lot_box_filters(
 
 def _summary_out(summary) -> LotSummaryOut:
     return LotSummaryOut.model_validate(summary, from_attributes=True)
+
+
+def _purge_preview_out(preview) -> LotPurgePreviewOut:
+    return LotPurgePreviewOut.model_validate(preview, from_attributes=True)
+
+
+def _force_purge_preview_out(preview) -> LotForcePurgePreviewOut:
+    return LotForcePurgePreviewOut.model_validate(preview, from_attributes=True)
 
 
 def _lot_error(exc: LotRuleError) -> HTTPException:
@@ -235,6 +262,305 @@ async def create_lot(
             },
         )
     return _summary_out(summary)
+
+
+@router.get("/{lot_id}/purge-preview", response_model=LotPurgePreviewOut)
+def purge_preview(
+    lot_id: int,
+    db: DbSession,
+    _user: Annotated[User, Depends(require_admin)],
+) -> LotPurgePreviewOut:
+    try:
+        preview = analyze_lot_purge_eligibility(db, lot_id=lot_id)
+    except LotPurgeNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return _purge_preview_out(preview)
+
+
+@router.get(
+    "/{lot_id}/force-purge-preview",
+    response_model=LotForcePurgePreviewOut,
+)
+def force_purge_preview(
+    lot_id: int,
+    db: DbSession,
+    _user: Annotated[User, Depends(require_admin)],
+) -> LotForcePurgePreviewOut:
+    try:
+        preview = analyze_lot_force_purge_impact(db, lot_id=lot_id)
+    except LotPurgeNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return _force_purge_preview_out(preview)
+
+
+@router.post(
+    "/{lot_id}/force-purge",
+    response_model=LotForcePurgeResultOut,
+    responses={409: {"model": LotForcePurgeConflictResponse}},
+)
+async def force_purge(
+    lot_id: int,
+    payload: LotForcePurge,
+    db: DbSession,
+    user: Annotated[User, Depends(require_admin)],
+) -> LotForcePurgeResultOut:
+    try:
+        result = force_purge_lot(
+            db,
+            user=user,
+            lot_id=lot_id,
+            confirmation_name=payload.confirmation_name,
+            confirmation_phrase=payload.confirmation_phrase,
+            reason=payload.reason,
+            expected_version=payload.expected_version,
+            expected_graph_signature=payload.expected_graph_signature,
+            acknowledged_blocker_codes=payload.acknowledged_blocker_codes,
+        )
+    except LotPurgeNotFoundError as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except LotPurgeConflictError as exc:
+        db.rollback()
+        detail = LotForcePurgeConflictOut(
+            code=exc.code,
+            message=str(exc),
+            current_preview=(
+                _force_purge_preview_out(exc.preview)
+                if exc.preview is not None
+                else None
+            ),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=detail.model_dump(mode="json"),
+        ) from exc
+    except IntegrityError as exc:
+        db.rollback()
+        try:
+            current = analyze_lot_force_purge_impact(db, lot_id=lot_id)
+        except LotPurgeNotFoundError:
+            current = None
+        detail = LotForcePurgeConflictOut(
+            code="force_purge_integrity_conflict",
+            message="the lot graph changed during force purge; review the latest preview",
+            current_preview=(
+                _force_purge_preview_out(current) if current is not None else None
+            ),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=detail.model_dump(mode="json"),
+        ) from exc
+    except LotRuleError as exc:
+        db.rollback()
+        raise _lot_error(exc) from exc
+
+    try:
+        cleanup = cleanup_lot_purge_objects(
+            db,
+            user=user,
+            audit_id=result.audit_id,
+        )
+        cleanup_status = cleanup.status
+        cleanup_failure_count = len(cleanup.failures)
+    except Exception:
+        db.rollback()
+        audit = db.get(LotPurgeEvent, result.audit_id)
+        cleanup_status = (
+            audit.object_cleanup_status
+            if audit is not None
+            else result.object_cleanup_status
+        )
+        cleanup_failure_count = (
+            len(audit.object_cleanup_failures)
+            if audit is not None
+            else len(result.object_cleanup_failures)
+        )
+
+    event_data = {
+        "id": result.lot_id,
+        "lot_id": result.lot_id,
+        "lot_name": result.lot_name,
+        "lot_version": result.lot_version,
+        "purge_mode": "force",
+        "active_box_count": result.active_box_count,
+        "archived_box_count": result.archived_box_count,
+        "touched_request_count": result.touched_request_count,
+        "rewritten_request_count": result.rewritten_request_count,
+        "deleted_request_count": result.deleted_request_count,
+        "lineage_detachment_count": result.lineage_detachment_count,
+        "deletable_object_count": result.deletable_object_count,
+        "skipped_object_count": result.skipped_object_count,
+        "purge_audit_id": result.audit_id,
+    }
+    if result.warehouse_ids:
+        for warehouse_id in result.warehouse_ids:
+            await bus.publish(
+                "lot.purged",
+                {**event_data, "warehouse_id": warehouse_id},
+            )
+    else:
+        await bus.publish("lot.purged", {**event_data, "warehouse_id": None})
+
+    return LotForcePurgeResultOut(
+        purge_audit_id=result.audit_id,
+        deleted_lot=LotIdentityOut(
+            id=result.lot_id,
+            name=result.lot_name,
+            version=result.lot_version,
+        ),
+        active_box_count=result.active_box_count,
+        archived_box_count=result.archived_box_count,
+        touched_request_count=result.touched_request_count,
+        rewritten_request_count=result.rewritten_request_count,
+        deleted_request_count=result.deleted_request_count,
+        lineage_detachment_count=result.lineage_detachment_count,
+        deletable_object_count=result.deletable_object_count,
+        skipped_object_count=result.skipped_object_count,
+        object_cleanup_status=cleanup_status,
+        object_cleanup_failure_count=cleanup_failure_count,
+    )
+
+
+@router.post(
+    "/{lot_id}/purge",
+    response_model=LotPurgeResultOut,
+    responses={409: {"model": LotPurgeConflictResponse}},
+)
+async def purge(
+    lot_id: int,
+    payload: LotPurge,
+    db: DbSession,
+    user: Annotated[User, Depends(require_admin)],
+) -> LotPurgeResultOut:
+    try:
+        result = purge_lot(
+            db,
+            user=user,
+            lot_id=lot_id,
+            confirmation_name=payload.confirmation_name,
+            reason=payload.reason,
+            expected_version=payload.expected_version,
+            expected_graph_signature=payload.expected_graph_signature,
+        )
+    except LotPurgeNotFoundError as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except LotPurgeConflictError as exc:
+        db.rollback()
+        detail = LotPurgeConflictOut(
+            code=exc.code,
+            message=str(exc),
+            current_preview=(
+                _purge_preview_out(exc.preview) if exc.preview is not None else None
+            ),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=detail.model_dump(mode="json"),
+        ) from exc
+    except IntegrityError as exc:
+        db.rollback()
+        try:
+            current = analyze_lot_purge_eligibility(db, lot_id=lot_id)
+        except LotPurgeNotFoundError:
+            current = None
+        detail = LotPurgeConflictOut(
+            code="purge_integrity_conflict",
+            message="the lot graph changed during purge; review the latest preview",
+            current_preview=(
+                _purge_preview_out(current) if current is not None else None
+            ),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=detail.model_dump(mode="json"),
+        ) from exc
+    except LotRuleError as exc:
+        db.rollback()
+        raise _lot_error(exc) from exc
+
+    try:
+        cleanup = cleanup_lot_purge_objects(
+            db,
+            user=user,
+            audit_id=result.audit_id,
+        )
+        cleanup_status = cleanup.status
+        cleanup_failures = cleanup.failures
+    except Exception:
+        # The lot and its ledger are already committed. Never turn a
+        # post-commit cleanup bookkeeping outage into an apparent DB rollback.
+        db.rollback()
+        audit = db.get(LotPurgeEvent, result.audit_id)
+        cleanup_status = (
+            audit.object_cleanup_status
+            if audit is not None
+            else result.object_cleanup_status
+        )
+        cleanup_failures = (
+            list(audit.object_cleanup_failures)
+            if audit is not None
+            else result.object_cleanup_failures
+        )
+
+    event_data = {
+        "id": result.lot_id,
+        "lot_id": result.lot_id,
+        "lot_name": result.lot_name,
+        "lot_version": result.lot_version,
+        "archived_box_count": result.archived_box_count,
+        "receipt_count": result.receipt_count,
+        "object_key_count": result.object_key_count,
+        "purge_audit_id": result.audit_id,
+    }
+    if result.warehouse_ids:
+        for warehouse_id in result.warehouse_ids:
+            await bus.publish(
+                "lot.purged",
+                {**event_data, "warehouse_id": warehouse_id},
+            )
+    else:
+        await bus.publish("lot.purged", {**event_data, "warehouse_id": None})
+
+    return LotPurgeResultOut(
+        purge_audit_id=result.audit_id,
+        deleted_lot=LotIdentityOut(
+            id=result.lot_id,
+            name=result.lot_name,
+            version=result.lot_version,
+        ),
+        archived_box_count=result.archived_box_count,
+        receipt_count=result.receipt_count,
+        object_key_count=result.object_key_count,
+        object_cleanup_status=cleanup_status,
+        object_cleanup_failures=cleanup_failures,
+    )
+
+
+@router.post(
+    "/purge-audits/{audit_id}/cleanup-retry",
+    response_model=LotPurgeCleanupOut,
+)
+def retry_purge_cleanup(
+    audit_id: int,
+    db: DbSession,
+    user: Annotated[User, Depends(require_admin)],
+) -> LotPurgeCleanupOut:
+    try:
+        cleanup = cleanup_lot_purge_objects(
+            db,
+            user=user,
+            audit_id=audit_id,
+        )
+    except LotPurgeNotFoundError as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return LotPurgeCleanupOut(
+        purge_audit_id=cleanup.audit_id,
+        object_cleanup_status=cleanup.status,
+        object_cleanup_failures=cleanup.failures,
+    )
 
 
 @router.get("/{lot_id}", response_model=LotDetailOut | MergedLotOut)

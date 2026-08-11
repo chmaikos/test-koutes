@@ -917,6 +917,242 @@ export interface LotRenamePayload {
   expected_version: number;
 }
 
+export type LotPurgeEntityType = "lot" | "box" | "request" | "event";
+
+export type LotPurgeBlockerCode =
+  | "merged_tombstone"
+  | "merge_target"
+  | "active_boxes"
+  | "no_archived_boxes"
+  | "no_self_receipts"
+  | "staged_requests"
+  | "open_requests"
+  | "requests_not_completed"
+  | "unsupported_request_origin"
+  | "unsupported_request_direction"
+  | "mixed_lot_receipt"
+  | "incomplete_receipt_provenance"
+  | "request_family"
+  | "foreign_request_reference"
+  | "unlinked_archived_boxes"
+  | "shared_object_key"
+  | "workflow_history"
+  | "box_reassignment_history"
+  | "merge_history"
+  | "box_workflow_history";
+
+export interface LotPurgeEntity {
+  entity_type: LotPurgeEntityType;
+  entity_id: number;
+}
+
+export interface LotPurgeBlocker {
+  code: LotPurgeBlockerCode;
+  message: string;
+  remediation: string;
+  entities: LotPurgeEntity[];
+  entity_count: number;
+  entities_truncated: boolean;
+}
+
+export interface LotPurgeRequestPreview {
+  request_id: number;
+  origin: string;
+  status: string;
+  direction: string;
+  item_count: number;
+  lot_item_count: number;
+}
+
+export interface LotPurgePreview {
+  lot_id: number;
+  lot_name: string;
+  lot_version: number;
+  active_box_count: number;
+  active_box_ids: number[];
+  active_box_ids_truncated: boolean;
+  archived_box_count: number;
+  archived_box_ids: number[];
+  archived_box_ids_truncated: boolean;
+  linked_request_count: number;
+  linked_request_ids: number[];
+  linked_request_ids_truncated: boolean;
+  requests: LotPurgeRequestPreview[];
+  requests_truncated: boolean;
+  object_key_count: number;
+  graph_signature: string;
+  eligible: boolean;
+  blockers: LotPurgeBlocker[];
+  confirmation_policy: "exact_case_sensitive_no_normalization";
+}
+
+export interface LotPurgePayload {
+  confirmation_name: string;
+  reason: string;
+  expected_version: number;
+  expected_graph_signature?: string | null;
+}
+
+export type LotPurgeCleanupStatus =
+  | "pending"
+  | "not_required"
+  | "in_progress"
+  | "completed"
+  | "partial_failure"
+  | "failed";
+
+export interface LotPurgeObjectFailure {
+  object_key: string;
+  error: string;
+}
+
+export interface LotPurgeResult {
+  purge_audit_id: number;
+  deleted_lot: LotIdentity;
+  archived_box_count: number;
+  receipt_count: number;
+  object_key_count: number;
+  object_cleanup_status: LotPurgeCleanupStatus;
+  object_cleanup_failures: LotPurgeObjectFailure[];
+}
+
+export interface LotPurgeCleanupResult {
+  purge_audit_id: number;
+  object_cleanup_status: LotPurgeCleanupStatus;
+  object_cleanup_failures: LotPurgeObjectFailure[];
+}
+
+export interface LotPurgeConflict {
+  code: string;
+  message: string;
+  current_preview: LotPurgePreview | null;
+}
+
+export type LotForcePurgeBlockerCode =
+  | LotPurgeBlockerCode
+  | "invalid_identity"
+  | "graph_changed";
+
+export interface LotForcePurgeBlocker {
+  code: LotForcePurgeBlockerCode;
+  message: string;
+  entity_ids: number[];
+  entity_count: number;
+  entity_ids_truncated: boolean;
+}
+
+export interface LotForcePurgeItemPosition {
+  item_id: number;
+  before_position: number;
+  after_position: number | null;
+}
+
+export interface LotForcePurgeRequestRewrite {
+  request_id: number;
+  adjustment_event_type: "force_purge_adjusted";
+  origin: string;
+  status: string;
+  direction: string;
+  before_item_count: number;
+  after_item_count: number;
+  before_quantity: number;
+  after_quantity: number;
+  before_actual_received_quantity: number | null;
+  after_actual_received_quantity: number | null;
+  before_variance_quantity: number | null;
+  after_variance_quantity: number | null;
+  item_positions: LotForcePurgeItemPosition[];
+  item_positions_truncated: boolean;
+  removed_item_ids: number[];
+  removed_item_count: number;
+  removed_item_ids_truncated: boolean;
+  removed_discrepancy_ids: number[];
+  removed_discrepancy_count: number;
+  removed_discrepancy_ids_truncated: boolean;
+  removed_discrepancy_photo_ids: number[];
+  removed_discrepancy_photo_count: number;
+  removed_discrepancy_photo_ids_truncated: boolean;
+  preserved_sibling_lot_ids: number[];
+  preserved_sibling_lot_count: number;
+  preserved_sibling_lot_ids_truncated: boolean;
+}
+
+export interface LotForcePurgeLineageDetachment {
+  request_id: number;
+  field_name:
+    | "source_inbound_request_id"
+    | "parent_request_id"
+    | "root_request_id";
+  deleted_target_request_id: number;
+}
+
+export interface LotForcePurgeObjectCleanupPlan {
+  deletable_key_count: number;
+  shared_skipped_key_count: number;
+}
+
+export interface LotForcePurgePreview {
+  lot_id: number;
+  lot_name: string;
+  lot_version: number;
+  confirmation_phrase: string;
+  active_box_ids: number[];
+  active_box_count: number;
+  active_box_ids_truncated: boolean;
+  archived_box_ids: number[];
+  archived_box_count: number;
+  archived_box_ids_truncated: boolean;
+  touched_request_ids: number[];
+  touched_request_count: number;
+  touched_request_ids_truncated: boolean;
+  request_rewrites: LotForcePurgeRequestRewrite[];
+  request_rewrite_count: number;
+  request_rewrites_truncated: boolean;
+  fully_deleted_request_ids: number[];
+  fully_deleted_request_count: number;
+  fully_deleted_request_ids_truncated: boolean;
+  incoming_lineage_detachments: LotForcePurgeLineageDetachment[];
+  incoming_lineage_detachment_count: number;
+  incoming_lineage_detachments_truncated: boolean;
+  object_cleanup: LotForcePurgeObjectCleanupPlan;
+  hard_blockers: LotForcePurgeBlocker[];
+  overridden_blockers: LotForcePurgeBlocker[];
+  graph_signature: string;
+  force_allowed: boolean;
+  confirmation_policy: "exact_case_sensitive_no_normalization";
+}
+
+export interface LotForcePurgePayload {
+  confirmation_name: string;
+  confirmation_phrase: string;
+  reason: string;
+  expected_version: number;
+  expected_graph_signature: string;
+  acknowledged_blocker_codes: string[];
+}
+
+export interface LotForcePurgeResult {
+  purge_audit_id: number;
+  deleted_lot: LotIdentity;
+  purge_mode: "force";
+  active_box_count: number;
+  archived_box_count: number;
+  touched_request_count: number;
+  rewritten_request_count: number;
+  deleted_request_count: number;
+  lineage_detachment_count: number;
+  deletable_object_count: number;
+  skipped_object_count: number;
+  object_cleanup_status: LotPurgeCleanupStatus;
+  object_cleanup_failure_count: number;
+}
+
+export interface LotForcePurgeConflict {
+  code: string;
+  message: string;
+  current_preview: LotForcePurgePreview | null;
+}
+
 export interface BoxLotReassignmentPayload {
   lot_id: number;
   reason: string;

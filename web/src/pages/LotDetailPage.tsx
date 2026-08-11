@@ -1,6 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { ArrowLeft, ChevronLeft, ChevronRight, Pencil, Search } from "lucide-react";
+import {
+  ArrowLeft,
+  ChevronLeft,
+  ChevronRight,
+  Pencil,
+  Search,
+  Trash2,
+} from "lucide-react";
 import { useLot, useLotBoxes, useLotEvents, useWarehouses } from "@/api/hooks";
 import {
   ALL_BOX_STATUSES,
@@ -10,6 +17,7 @@ import {
   type MergedLot,
 } from "@/api/types";
 import { LotStatusBar } from "@/components/LotStatusBar";
+import { PurgeLotDialog } from "@/components/PurgeLotDialog";
 import { RenameLotDialog } from "@/components/RenameLotDialog";
 import { STATUS_LABEL, StatusBadge } from "@/components/StatusBadge";
 import { useHasRole } from "@/components/RoleGate";
@@ -25,6 +33,7 @@ export function LotDetailPage() {
   const [params, setParams] = useSearchParams();
   const isAdmin = useHasRole(["admin"]);
   const [showRename, setShowRename] = useState(false);
+  const [showPurge, setShowPurge] = useState(false);
   const page = Math.max(1, Number(params.get("page")) || 1);
   const pageSize = 25;
   const filters = useMemo<BoxFilters>(() => {
@@ -263,7 +272,7 @@ export function LotDetailPage() {
         </div>
       </section>
 
-      <section className="card card-pad">
+      <section id="lot-audit-history" className="card card-pad">
         <h2 className="font-semibold">Lot audit history</h2>
         {!summary.audit_history_included ? (
           <p className="mt-2 text-sm text-slate-500">
@@ -296,11 +305,42 @@ export function LotDetailPage() {
         )}
       </section>
 
+      {isAdmin && (
+        <section className="rounded-xl border border-rose-200 bg-rose-50 p-5">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h2 className="font-semibold text-rose-950">Danger zone</h2>
+              <p className="mt-1 max-w-2xl text-sm text-rose-800">
+                Safe purge applies to archived boxes and exclusive
+                self-receipts. Eligibility is checked first; a separate
+                administrative recovery review appears only when safe purge is
+                blocked.
+              </p>
+            </div>
+            <button
+              type="button"
+              className="btn-danger shrink-0"
+              onClick={() => setShowPurge(true)}
+            >
+              <Trash2 className="h-4 w-4" aria-hidden="true" />
+              Purge lot
+            </button>
+          </div>
+        </section>
+      )}
+
       {showRename && (
         <RenameLotDialog
           lot={summary}
           onClose={() => setShowRename(false)}
           onMerged={(targetLotId) => navigate(`/lots/${targetLotId}`, { replace: true })}
+        />
+      )}
+      {isAdmin && showPurge && (
+        <PurgeLotDialog
+          lot={summary}
+          onClose={() => setShowPurge(false)}
+          onNavigateToLots={() => navigate("/lots", { replace: true })}
         />
       )}
     </div>

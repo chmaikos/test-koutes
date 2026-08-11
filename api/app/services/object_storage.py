@@ -96,3 +96,22 @@ def delete_document(object_key: str) -> None:
         # Best-effort cleanup after a DB failure; an orphan is preferable to
         # masking the original transactional error.
         return
+
+
+def delete_document_strict(object_key: str) -> None:
+    """Delete one object idempotently, surfacing failures to durable callers."""
+    settings = get_settings()
+    try:
+        _client().delete_object(Bucket=settings.object_storage_bucket, Key=object_key)
+    except (BotoCoreError, ClientError, StorageUnavailableError) as exc:
+        raise StorageUnavailableError("document deletion failed") from exc
+
+
+__all__ = [
+    "StorageUnavailableError",
+    "delete_document",
+    "delete_document_strict",
+    "ensure_bucket",
+    "get_document",
+    "put_document",
+]
