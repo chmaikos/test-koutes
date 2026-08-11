@@ -1,8 +1,14 @@
-import { useMemo, useState } from "react";
-import { Link, useParams, useSearchParams } from "react-router-dom";
+import { useEffect, useMemo, useState } from "react";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ArrowLeft, ChevronLeft, ChevronRight, Pencil, Search } from "lucide-react";
 import { useLot, useLotBoxes, useLotEvents, useWarehouses } from "@/api/hooks";
-import { ALL_BOX_STATUSES, type BoxFilters, type BoxStatus } from "@/api/types";
+import {
+  ALL_BOX_STATUSES,
+  type BoxFilters,
+  type BoxStatus,
+  type LotDetail,
+  type MergedLot,
+} from "@/api/types";
 import { LotStatusBar } from "@/components/LotStatusBar";
 import { RenameLotDialog } from "@/components/RenameLotDialog";
 import { STATUS_LABEL, StatusBadge } from "@/components/StatusBadge";
@@ -11,6 +17,7 @@ import { completionLabel } from "@/pages/lots";
 
 export function LotDetailPage() {
   const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
   const lotId = id ? Number(id) : undefined;
   const lot = useLot(lotId);
   const auditEvents = useLotEvents(lotId);
@@ -39,6 +46,16 @@ export function LotDetailPage() {
     1,
     Math.ceil((boxes.data?.total ?? 0) / pageSize),
   );
+  const mergedTarget =
+    lot.data && isMergedLot(lot.data)
+      ? lot.data.merged_into
+      : null;
+
+  useEffect(() => {
+    if (mergedTarget) {
+      navigate(`/lots/${mergedTarget.id}`, { replace: true });
+    }
+  }, [mergedTarget, navigate]);
 
   function setParam(name: string, value?: string) {
     const next = new URLSearchParams(params);
@@ -54,6 +71,13 @@ export function LotDetailPage() {
       <div className="card card-pad text-sm text-rose-700" role="alert">
         This lot could not be loaded. <Link className="underline" to="/lots">Back to lots</Link>
       </div>
+    );
+  }
+  if (isMergedLot(lot.data)) {
+    return (
+      <p className="text-sm text-slate-500">
+        This lot was merged into {lot.data.merged_into.name}. Redirecting…
+      </p>
     );
   }
   const summary = lot.data;
@@ -251,7 +275,13 @@ export function LotDetailPage() {
           <ol className="mt-4 space-y-4">
             {auditEvents.data?.map((event) => (
               <li key={event.id} className="border-l-2 border-brand-200 pl-3 text-sm">
-                <p className="font-medium capitalize">{event.event_type.replaceAll("_", " ")}</p>
+                <p className="font-medium">
+                  {event.event_type === "merged"
+                    ? event.metadata.event_side === "source"
+                      ? `Merged into “${String(event.metadata.target_lot_name ?? event.new_name ?? "")}”`
+                      : `Received merged lot “${String(event.metadata.source_lot_name ?? event.old_name ?? "")}”`
+                    : event.event_type.replaceAll("_", " ")}
+                </p>
                 {event.old_name && event.new_name && (
                   <p className="text-slate-600">“{event.old_name}” → “{event.new_name}”</p>
                 )}
@@ -267,7 +297,11 @@ export function LotDetailPage() {
       </section>
 
       {showRename && (
-        <RenameLotDialog lot={summary} onClose={() => setShowRename(false)} />
+        <RenameLotDialog
+          lot={summary}
+          onClose={() => setShowRename(false)}
+          onMerged={(targetLotId) => navigate(`/lots/${targetLotId}`, { replace: true })}
+        />
       )}
     </div>
   );
@@ -279,5 +313,9 @@ function Metric({ label, value }: { label: string; value: number }) {
 
 function Metadata({ label, value }: { label: string; value: string }) {
   return <div><dt className="text-xs uppercase tracking-wider text-slate-400">{label}</dt><dd className="mt-0.5 text-slate-700">{value}</dd></div>;
+}
+
+function isMergedLot(lot: LotDetail | MergedLot): lot is MergedLot {
+  return "state" in lot && lot.state === "merged";
 }
 

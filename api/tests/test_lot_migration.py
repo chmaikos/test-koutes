@@ -7,8 +7,10 @@ from types import ModuleType
 
 import pytest
 import sqlalchemy as sa
+from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
+from alembic.script import ScriptDirectory
 
 
 def _load_migration() -> ModuleType:
@@ -19,6 +21,20 @@ def _load_migration() -> ModuleType:
         / "0027_first_class_lots.py"
     )
     spec = importlib.util.spec_from_file_location("migration_0027_first_class_lots", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_merge_migration() -> ModuleType:
+    path = (
+        Path(__file__).parents[1]
+        / "alembic"
+        / "versions"
+        / "0028_safe_lot_merge.py"
+    )
+    spec = importlib.util.spec_from_file_location("migration_0028_safe_lot_merge", path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -148,3 +164,44 @@ def test_migration_shape_follows_0026() -> None:
     migration = _load_migration()
     assert migration.revision == "0027_first_class_lots"
     assert migration.down_revision == "0026_request_workflow_final"
+
+
+def test_merge_migration_sqlite_upgrade_and_safe_downgrade() -> None:
+    first_class = _load_migration()
+    merge = _load_merge_migration()
+    engine = _legacy_database()
+    with engine.begin() as connection:
+        first_class.op = _operations(connection)
+        first_class.upgrade()
+        merge.op = _operations(connection)
+        merge.upgrade()
+
+        columns = {
+            column["name"]: column
+            for column in sa.inspect(connection).get_columns("lots")
+        }
+        assert columns["normalized_name"]["nullable"] is True
+        assert {"merged_into_lot_id", "merged_at", "merged_by_user_id"} <= columns.keys()
+        assert any(
+            fk["constrained_columns"] == ["merged_into_lot_id"]
+            and fk["options"]["ondelete"] == "RESTRICT"
+            for fk in sa.inspect(connection).get_foreign_keys("lots")
+        )
+
+        merge.downgrade()
+        restored_columns = {
+            column["name"]: column
+            for column in sa.inspect(connection).get_columns("lots")
+        }
+        assert restored_columns["normalized_name"]["nullable"] is False
+        assert "merged_into_lot_id" not in restored_columns
+    engine.dispose()
+
+
+def test_merge_migration_is_single_head() -> None:
+    root = Path(__file__).parents[1]
+    config = Config(str(root / "alembic.ini"))
+    config.set_main_option("script_location", str(root / "alembic"))
+    assert ScriptDirectory.from_config(config).get_heads() == ["0028_safe_lot_merge"]
+    migration = _load_merge_migration()
+    assert migration.down_revision == "0027_first_class_lots"

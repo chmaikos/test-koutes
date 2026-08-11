@@ -838,7 +838,7 @@ export interface LotSummary {
 export interface LotEvent {
   id: number;
   lot_id: number;
-  event_type: "created" | "renamed" | "reassigned";
+  event_type: "created" | "renamed" | "reassigned" | "merged";
   old_name: string | null;
   new_name: string | null;
   actor_user_id: number | null;
@@ -850,6 +850,45 @@ export interface LotEvent {
 export interface LotDetail extends LotSummary {
   audit_history: LotEvent[];
   audit_history_included: boolean;
+}
+
+export interface LotIdentity {
+  id: number;
+  name: string;
+  version: number;
+}
+
+export interface MergedLot {
+  state: "merged";
+  id: number;
+  name: string;
+  version: number;
+  merged_at: string;
+  merged_by_user_id: number | null;
+  merged_into: LotIdentity;
+}
+
+export interface LotMergeCandidate {
+  source: LotIdentity;
+  target: LotIdentity;
+  merge_allowed: boolean;
+  overlapping_box_numbers: string[];
+  overlapping_box_count: number;
+  overlap_list_truncated: boolean;
+}
+
+export interface LotMergePayload {
+  target_lot_id: number;
+  reason: string;
+  expected_source_version: number;
+  expected_target_version: number;
+}
+
+export interface LotMergeResult {
+  source: LotIdentity;
+  target: LotIdentity;
+  moved_box_count: number;
+  moved_request_item_count: number;
 }
 
 export interface LotOption {

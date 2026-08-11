@@ -82,6 +82,36 @@ class LotRename(BaseModel):
     expected_version: int = Field(ge=1)
 
 
+class LotMerge(BaseModel):
+    target_lot_id: int = Field(ge=1)
+    reason: str = Field(min_length=1, max_length=2000)
+    expected_source_version: int = Field(ge=1)
+    expected_target_version: int = Field(ge=1)
+
+
+class LotIdentityOut(BaseModel):
+    id: int
+    name: str
+    version: int
+
+
+class LotMergeOut(BaseModel):
+    source: LotIdentityOut
+    target: LotIdentityOut
+    moved_box_count: int
+    moved_request_item_count: int
+
+
+class MergedLotOut(BaseModel):
+    state: Literal["merged"] = "merged"
+    id: int
+    name: str
+    version: int
+    merged_at: datetime
+    merged_by_user_id: int | None
+    merged_into: LotIdentityOut
+
+
 class BoxLotReassignment(BaseModel):
     lot_id: int = Field(ge=1)
     reason: str = Field(min_length=1, max_length=2000)
@@ -105,6 +135,10 @@ __all__ = [
     "LotDetailOut",
     "LotEventOut",
     "LotFilters",
+    "LotIdentityOut",
+    "LotMerge",
+    "LotMergeOut",
+    "MergedLotOut",
     "LotOptionOut",
     "LotProgressState",
     "LotRename",

@@ -51,7 +51,12 @@ from app.services.boxes import (
     restore_archived_box,
     update_box,
 )
-from app.services.lots import LotRuleError, get_or_create_lot, validate_lot_name
+from app.services.lots import (
+    LotRuleError,
+    lock_active_lots_for_use,
+    resolve_lot_names_for_use,
+    validate_lot_name,
+)
 from app.services.request_notifications import enqueue_request_event
 from app.services.warehouses import WarehouseRuleError, ensure_active_warehouse
 
@@ -66,6 +71,32 @@ class RequestAccessError(RequestRuleError):
 
 class RequestConflictError(RequestRuleError):
     pass
+
+
+def _lock_lots_for_current_links(db: Session, lot_ids: list[int | None]) -> None:
+    """Hold shared Lot locks before creating current request-item references."""
+    if any(lot_id is None for lot_id in lot_ids):
+        raise RequestConflictError("a current request item has no lot identity")
+    try:
+        lock_active_lots_for_use(
+            db,
+            [lot_id for lot_id in lot_ids if lot_id is not None],
+        )
+    except LotRuleError as exc:
+        raise RequestConflictError(str(exc)) from exc
+
+
+def _lock_lots_for_box_ids(db: Session, box_ids: list[int]) -> dict[int, int]:
+    rows = db.execute(
+        select(Box.id, Box.lot_id)
+        .where(Box.id.in_(sorted(set(box_ids))))
+        .order_by(Box.id)
+    ).all()
+    lot_by_box_id = {int(box_id): int(lot_id) for box_id, lot_id in rows}
+    if len(lot_by_box_id) != len(set(box_ids)):
+        raise RequestConflictError("one or more boxes no longer exist")
+    _lock_lots_for_current_links(db, list(lot_by_box_id.values()))
+    return lot_by_box_id
 
 
 @dataclass(frozen=True)
@@ -675,6 +706,9 @@ def create_completed_receipt(
         for box in boxes
     ):
         raise RequestRuleError("receipt boxes must be active in one warehouse")
+    current_lots = _lock_lots_for_box_ids(db, [box.id for box in boxes])
+    if any(current_lots[box.id] != box.lot_id for box in boxes):
+        raise RequestConflictError("a receipt box lot changed concurrently")
     snapshot = calculate_suggestion(
         db,
         user=user,
@@ -818,16 +852,17 @@ def create_staged_receipt(
     db.add(request)
     db.flush()
     request.root_request_id = request.id
+    try:
+        lots_by_name = resolve_lot_names_for_use(
+            db,
+            user=user,
+            names=[item.lot for item in rows],
+            warehouse_id=warehouse_id,
+        )
+    except LotRuleError as exc:
+        raise RequestRuleError(str(exc)) from exc
     for position, item in enumerate(rows, start=1):
-        try:
-            lot_record = get_or_create_lot(
-                db,
-                user=user,
-                name=item.lot,
-                warehouse_id=warehouse_id,
-            )
-        except LotRuleError as exc:
-            raise RequestRuleError(str(exc)) from exc
+        lot_record = lots_by_name[normalize_lot_name(item.lot)]
         db.add(
             BoxRequestItem(
                 request_id=request.id,
@@ -921,6 +956,7 @@ def finalize_staged_receipt(
             raise RequestRuleError("a current delivery_note is required")
 
     staged_items = sorted(request.items, key=lambda item: item.position)
+    _lock_lots_for_current_links(db, [item.lot_id for item in staged_items])
     identities = [(item.lot_id, item.box_number or "") for item in staged_items]
     if len(identities) != len(set(identities)):
         raise RequestConflictError("staged receipt contains duplicate box identities")
@@ -1095,6 +1131,7 @@ def create_request(
     return_boxes: list[Box] = []
     source_eligible_quantity = snapshot.eligible_return
     if direction == BoxRequestDirection.return_:
+        locked_lots_by_box = _lock_lots_for_box_ids(db, selected_box_ids)
         source = _source_inbound(
             db,
             user=user,
@@ -1115,6 +1152,11 @@ def create_request(
                 "source inbound request, or are already reserved"
             )
         return_boxes = [candidates_by_id[box_id] for box_id in selected_box_ids]
+        if any(
+            locked_lots_by_box[box.id] != box.lot_id
+            for box in return_boxes
+        ):
+            raise RequestConflictError("one or more selected box lots changed")
 
     now = datetime.now(UTC)
     recommendation_snapshot = snapshot.to_snapshot()
@@ -2243,12 +2285,19 @@ def complete_request(
         if request.items:
             raise RequestConflictError("inbound items have already been recorded")
         try:
+            lots_by_name = resolve_lot_names_for_use(
+                db,
+                user=user,
+                names=[item.lot for item in rows],
+                warehouse_id=request.warehouse_id,
+            )
             for position, item in enumerate(rows, start=1):
+                lot_record = lots_by_name[normalize_lot_name(item.lot)]
                 box = create_box(
                     db,
                     user=user,
                     box_number=item.box_number,
-                    lot=item.lot,
+                    lot_id=lot_record.id,
                     contents=item.contents,
                     warehouse_id=request.warehouse_id,
                     note=f"Received through request #{request.id}",
@@ -2527,6 +2576,7 @@ def submit_follow_up_draft(
         raise RequestRuleError("select exactly the draft quantity")
     if request.source_inbound_request_id is None:
         raise RequestRuleError("return follow-up has no inbound source")
+    locked_lots_by_box = _lock_lots_for_box_ids(db, box_ids)
     candidates = get_return_candidates(
         db,
         user=user,
@@ -2538,6 +2588,8 @@ def submit_follow_up_draft(
         raise RequestConflictError("one or more selected boxes are no longer available")
     for position, box_id in enumerate(box_ids, start=1):
         box = candidates_by_id[box_id]
+        if locked_lots_by_box[box_id] != box.lot_id:
+            raise RequestConflictError("one or more selected box lots changed")
         db.add(
             BoxRequestItem(
                 request_id=request.id,

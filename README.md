@@ -15,7 +15,9 @@ and threshold alerts (in-app + email via Microsoft Graph).
 - Searchable / filterable boxes table with inline status transitions.
 - First-class Lots list/detail views with globally case-insensitive identity,
   status distribution, ACL-scoped completion metrics, audited global rename,
-  and audited per-box reassignment.
+  safe explicit merge-on-rename (blocked by active or archived box-number
+  overlap), and audited per-box reassignment. Merged source identities remain
+  hidden audit tombstones; historical request/XLSX text is never rewritten.
 - Full audit trail per box (timeline of events).
 - Audited inbound box orders and return requests with the explicit lifecycle
   `submitted → approved → preparing → ready_for_transport → in_transit →

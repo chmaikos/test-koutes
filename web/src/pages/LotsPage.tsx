@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import {
   ArrowDown,
   ArrowUp,
@@ -27,6 +27,7 @@ const SORT_OPTIONS: { value: LotSortField; label: string }[] = [
 ];
 
 export function LotsPage() {
+  const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
   const parsed = useMemo(() => parseLotSearchParams(params), [params]);
   const lots = useLots(parsed.filters, parsed.page, parsed.pageSize);
@@ -290,7 +291,11 @@ export function LotsPage() {
       )}
 
       {renaming && (
-        <RenameLotDialog lot={renaming} onClose={() => setRenaming(null)} />
+        <RenameLotDialog
+          lot={renaming}
+          onClose={() => setRenaming(null)}
+          onMerged={(targetLotId) => navigate(`/lots/${targetLotId}`)}
+        />
       )}
     </div>
   );

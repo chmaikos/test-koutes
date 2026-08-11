@@ -5,6 +5,9 @@ import {
   completionLabel,
   exactLotMatch,
   lotConflictCurrent,
+  lotMergeCandidate,
+  lotMergeConflictCode,
+  lotMergePayload,
   lotRenamePayload,
   lotSelection,
   lotStatusSegments,
@@ -120,9 +123,70 @@ describe("audited lot changes", () => {
     };
     expect(
       lotConflictCurrent({
-        response: { status: 409, data: { detail: { current } } },
+        response: {
+          status: 409,
+          data: { detail: { code: "version_conflict", current } },
+        },
       }),
     ).toEqual(current);
+  });
+
+  it("parses an allowed collision and builds an explicit merge payload", () => {
+    const candidate = {
+      source: { id: 1, name: "Source", version: 3 },
+      target: { id: 2, name: "Target", version: 5 },
+      merge_allowed: true,
+      overlapping_box_numbers: [],
+      overlapping_box_count: 0,
+      overlap_list_truncated: false,
+    };
+    const error = {
+      response: {
+        status: 409,
+        data: {
+          detail: {
+            code: "name_collision",
+            merge_candidate: candidate,
+          },
+        },
+      },
+    };
+    expect(lotMergeCandidate(error)).toEqual(candidate);
+    expect(lotConflictCurrent(error)).toBeNull();
+    expect(lotMergePayload(candidate, " duplicate identity ")).toEqual({
+      target_lot_id: 2,
+      reason: "duplicate identity",
+      expected_source_version: 3,
+      expected_target_version: 5,
+    });
+  });
+
+  it("parses overlap-disabled and stale merge conflicts", () => {
+    const blocked = {
+      source: { id: 1, name: "Source", version: 4 },
+      target: { id: 2, name: "Target", version: 6 },
+      merge_allowed: false,
+      overlapping_box_numbers: ["001", "009"],
+      overlapping_box_count: 2,
+      overlap_list_truncated: false,
+    };
+    const error = {
+      response: {
+        status: 409,
+        data: {
+          detail: {
+            code: "target_version_conflict",
+            merge_candidate: blocked,
+          },
+        },
+      },
+    };
+    expect(lotMergeConflictCode(error)).toBe("target_version_conflict");
+    expect(lotMergeCandidate(error)?.merge_allowed).toBe(false);
+    expect(lotMergeCandidate(error)?.overlapping_box_numbers).toEqual([
+      "001",
+      "009",
+    ]);
   });
 
   it("gates reassignment and builds the audited payload", () => {

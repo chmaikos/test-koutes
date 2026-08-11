@@ -27,7 +27,7 @@ from app.models.requests import (
 from app.models.users import User, UserRole
 from app.models.warehouses import Warehouse
 from app.services.acl import can_access
-from app.services.lots import LotRuleError, resolve_lot
+from app.services.lots import LotRuleError, lock_lots_exclusively, resolve_lot
 from app.services.request_notifications import enqueue_request_event
 from app.services.warehouses import WarehouseRuleError, ensure_active_warehouse
 
@@ -550,30 +550,52 @@ def reassign_box_lot(
     if not cleaned_reason:
         raise BoxRuleError("a reason is required to reassign a box lot")
 
-    locked = db.scalar(select(Box).where(Box.id == box.id).with_for_update())
-    if locked is None:
+    source_lot_id = db.scalar(select(Box.lot_id).where(Box.id == box.id))
+    if source_lot_id is None:
         raise BoxRuleError("box not found")
-    if locked.archived_at is not None:
-        raise BoxConflictError("archived boxes cannot be reassigned")
-    source_lot = db.scalar(
-        select(Lot).where(Lot.id == locked.lot_id).with_for_update()
-    )
-    if source_lot is None:
-        raise BoxRuleError("box has no current lot")
-    if source_lot.version != expected_version:
-        raise BoxConflictError(
-            f"lot version conflict: expected {expected_version}, current {source_lot.version}"
+    if db.scalar(
+        select(Lot.id).where(
+            Lot.id == source_lot_id,
+            Lot.merged_into_lot_id.is_(None),
         )
+    ) is None:
+        raise BoxRuleError("box has no current lot")
     try:
         target_lot = resolve_lot(
             db,
             user=user,
             lot=lot,
             lot_id=lot_id,
-            warehouse_id=locked.current_warehouse_id,
+            warehouse_id=box.current_warehouse_id,
+            lock_for_use=False,
         )
     except LotRuleError as exc:
         raise BoxRuleError(str(exc)) from exc
+
+    # Merge and reassignment take the same deterministic lock order: all Lot
+    # identities first (ascending id), then the physical Box row.
+    locked_lots = lock_lots_exclusively(db, [source_lot_id, target_lot.id])
+    source_lot = locked_lots.get(source_lot_id)
+    target_lot = locked_lots.get(target_lot.id)
+    if (
+        source_lot is None
+        or target_lot is None
+        or source_lot.merged_into_lot_id is not None
+        or target_lot.merged_into_lot_id is not None
+    ):
+        raise BoxConflictError("source and target lots must both be active")
+
+    locked = db.scalar(select(Box).where(Box.id == box.id).with_for_update())
+    if locked is None:
+        raise BoxRuleError("box not found")
+    if locked.lot_id != source_lot.id:
+        raise BoxConflictError("box lot changed concurrently; refresh and retry")
+    if locked.archived_at is not None:
+        raise BoxConflictError("archived boxes cannot be reassigned")
+    if source_lot.version != expected_version:
+        raise BoxConflictError(
+            f"lot version conflict: expected {expected_version}, current {source_lot.version}"
+        )
     if target_lot.id == source_lot.id:
         return locked
 

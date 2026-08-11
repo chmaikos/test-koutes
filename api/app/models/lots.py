@@ -47,6 +47,7 @@ class LotEventType(str, enum.Enum):
     created = "created"
     renamed = "renamed"
     reassigned = "reassigned"
+    merged = "merged"
 
 
 class Lot(Base):
@@ -54,13 +55,35 @@ class Lot(Base):
     __table_args__ = (
         UniqueConstraint("normalized_name", name="uq_lots_normalized_name"),
         CheckConstraint("name <> ''", name="ck_lots_name_not_blank"),
-        CheckConstraint("normalized_name <> ''", name="ck_lots_normalized_name_not_blank"),
+        CheckConstraint(
+            "normalized_name IS NULL OR normalized_name <> ''",
+            name="ck_lots_normalized_name_not_blank",
+        ),
+        CheckConstraint(
+            """
+            (
+                merged_into_lot_id IS NULL
+                AND merged_at IS NULL
+                AND merged_by_user_id IS NULL
+                AND normalized_name IS NOT NULL
+            )
+            OR
+            (
+                merged_into_lot_id IS NOT NULL
+                AND merged_at IS NOT NULL
+                AND normalized_name IS NULL
+                AND merged_into_lot_id <> id
+            )
+            """,
+            name="ck_lots_merge_tombstone",
+        ),
+        Index("ix_lots_merged_into_lot_id", "merged_into_lot_id"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(MAX_LOT_NAME_LENGTH), nullable=False)
-    normalized_name: Mapped[str] = mapped_column(
-        String(MAX_LOT_NAME_LENGTH), nullable=False
+    normalized_name: Mapped[str | None] = mapped_column(
+        String(MAX_LOT_NAME_LENGTH), nullable=True
     )
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     created_at: Mapped[datetime] = mapped_column(
@@ -78,6 +101,13 @@ class Lot(Base):
     updated_by_user_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL")
     )
+    merged_into_lot_id: Mapped[int | None] = mapped_column(
+        ForeignKey("lots.id", ondelete="RESTRICT")
+    )
+    merged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    merged_by_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
 
     __mapper_args__ = {"version_id_col": version}
 
@@ -87,6 +117,14 @@ class Lot(Base):
         order_by="LotEvent.occurred_at",
         passive_deletes=True,
     )
+    merged_into: Mapped[Lot | None] = relationship(
+        remote_side="Lot.id",
+        foreign_keys=[merged_into_lot_id],
+    )
+
+    @property
+    def is_merged(self) -> bool:
+        return self.merged_into_lot_id is not None
 
     @validates("name")
     def _normalize_name(self, _key: str, value: str) -> str:

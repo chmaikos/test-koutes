@@ -28,6 +28,7 @@ from app.services.lots import (
     LotRuleError,
     find_lot,
     normalize_lot_name,
+    resolve_lot_names_for_use,
     validate_lot_name,
 )
 from app.services.requests import (
@@ -166,14 +167,24 @@ def import_mapped_boxes(
         )
         outcome.staged_receipt_ids.append(receipt.id)
         return outcome
+    try:
+        lots_by_name = resolve_lot_names_for_use(
+            db,
+            user=user,
+            names=[lot for _position, _box_number, lot, _contents in canonical_items],
+            warehouse_id=warehouse_id,
+        )
+    except LotRuleError as exc:
+        raise BoxRuleError(str(exc)) from exc
     for position, box_number, lot, contents in canonical_items:
+        lot_record = lots_by_name[normalize_lot_name(lot)]
         try:
             restored = (
                 restore_archived_box(
                     db,
                     user=user,
                     box_number=box_number,
-                    lot=lot,
+                    lot_id=lot_record.id,
                     contents=contents,
                     warehouse_id=warehouse_id,
                     note="Explicitly restored during mapped XLSX import.",
@@ -186,7 +197,7 @@ def import_mapped_boxes(
                 db,
                 user=user,
                 box_number=box_number,
-                lot=lot,
+                lot_id=lot_record.id,
                 contents=contents,
                 warehouse_id=warehouse_id,
                 commit=False,
@@ -488,14 +499,33 @@ def import_boxes_xlsx(
                 outcome.staged_receipt_ids.append(receipt.id)
             continue
 
+        try:
+            lots_by_name = resolve_lot_names_for_use(
+                db,
+                user=user,
+                names=[item.lot for _offset, item in pending_rows],
+                warehouse_id=warehouse_id,
+            )
+        except LotRuleError as exc:
+            for offset, item in pending_rows:
+                outcome.skipped.append(
+                    ImportSkipEntry(
+                        row=offset,
+                        box_number=item.box_number,
+                        reason=str(exc),
+                    )
+                )
+            continue
+
         for offset, item in pending_rows:
+            lot_record = lots_by_name[normalize_lot_name(item.lot)]
             try:
                 restored = (
                     restore_archived_box(
                         db,
                         user=user,
                         box_number=item.box_number,
-                        lot=item.lot,
+                        lot_id=lot_record.id,
                         contents=item.contents,
                         warehouse_id=warehouse_id,
                         note=f"Explicitly restored from XLSX row {offset}.",
@@ -508,7 +538,7 @@ def import_boxes_xlsx(
                     db,
                     user=user,
                     box_number=item.box_number,
-                    lot=item.lot,
+                    lot_id=lot_record.id,
                     contents=item.contents,
                     warehouse_id=warehouse_id,
                     commit=False,

@@ -85,11 +85,17 @@ function handleEvent(
       break;
     case "lot.created":
     case "lot.renamed":
-    case "lot.reassigned": {
+    case "lot.reassigned":
+    case "lot.merged": {
       qc.invalidateQueries({ queryKey: ["lots"] });
       qc.invalidateQueries({ queryKey: ["lot-options"] });
       qc.invalidateQueries({ queryKey: ["boxes"] });
       qc.invalidateQueries({ queryKey: ["requests"] });
+      qc.invalidateQueries({ queryKey: ["request"] });
+      qc.invalidateQueries({ queryKey: ["request-suggestion"] });
+      qc.invalidateQueries({ queryKey: ["return-sources"] });
+      qc.invalidateQueries({ queryKey: ["return-candidates"] });
+      qc.invalidateQueries({ queryKey: queryKeys.dashboard });
       const lotIds = [
         event.data.id,
         event.data.from_lot_id,

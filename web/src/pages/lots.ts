@@ -2,6 +2,8 @@ import type {
   BoxLotReassignmentPayload,
   BoxStatus,
   LotFilters,
+  LotMergeCandidate,
+  LotMergePayload,
   LotOption,
   LotProgressState,
   LotRenamePayload,
@@ -138,11 +140,53 @@ export function lotConflictCurrent(error: unknown): LotConflictCurrent | null {
     error as {
       response?: {
         status?: number;
-        data?: { detail?: { current?: LotConflictCurrent | null } };
+        data?: {
+          detail?: {
+            code?: string;
+            current?: LotConflictCurrent | null;
+          };
+        };
       };
     }
   ).response;
-  return detail?.status === 409 ? (detail.data?.detail?.current ?? null) : null;
+  return detail?.status === 409 &&
+    detail.data?.detail?.code === "version_conflict"
+    ? (detail.data.detail.current ?? null)
+    : null;
+}
+
+export function lotMergeCandidate(error: unknown): LotMergeCandidate | null {
+  const response = (
+    error as {
+      response?: {
+        status?: number;
+        data?: {
+          detail?: {
+            code?: string;
+            merge_candidate?: LotMergeCandidate | null;
+          };
+        };
+      };
+    }
+  ).response;
+  return response?.status === 409
+    ? (response.data?.detail?.merge_candidate ?? null)
+    : null;
+}
+
+export function lotMergeConflictCode(error: unknown): string | null {
+  const response = (
+    error as {
+      response?: {
+        status?: number;
+        data?: { detail?: { code?: unknown } };
+      };
+    }
+  ).response;
+  return response?.status === 409 &&
+    typeof response.data?.detail?.code === "string"
+    ? response.data.detail.code
+    : null;
 }
 
 export function lotRenamePayload(
@@ -154,6 +198,18 @@ export function lotRenamePayload(
     new_name: name.trim().replace(/\s+/g, " "),
     reason: reason.trim(),
     expected_version: version,
+  };
+}
+
+export function lotMergePayload(
+  candidate: LotMergeCandidate,
+  reason: string,
+): LotMergePayload {
+  return {
+    target_lot_id: candidate.target.id,
+    reason: reason.trim(),
+    expected_source_version: candidate.source.version,
+    expected_target_version: candidate.target.version,
   };
 }
 

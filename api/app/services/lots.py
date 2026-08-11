@@ -2,14 +2,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Literal
 
 from sqlalchemy import Float, case, cast, func, literal, or_, select, union_all
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.models.boxes import ACTIVE_STATUSES, Box, BoxStatus
+from app.models.boxes import (
+    ACTIVE_STATUSES,
+    Box,
+    BoxEvent,
+    BoxEventType,
+    BoxStatus,
+)
 from app.models.lots import (
     MAX_LOT_NAME_LENGTH,
     Lot,
@@ -47,6 +53,56 @@ class LotConflictError(LotRuleError):
 
 class LotVersionConflictError(LotConflictError):
     """The caller supplied a stale optimistic-lock version."""
+
+
+@dataclass(frozen=True)
+class LotMergeCandidate:
+    source_id: int
+    source_name: str
+    source_version: int
+    target_id: int
+    target_name: str
+    target_version: int
+    merge_allowed: bool
+    overlapping_box_numbers: list[str]
+    overlapping_box_count: int
+    overlap_list_truncated: bool
+
+
+class LotNameCollisionError(LotConflictError):
+    """A rename resolved to another active canonical lot."""
+
+    def __init__(self, message: str, candidate: LotMergeCandidate):
+        super().__init__(message)
+        self.candidate = candidate
+
+
+class LotMergeConflictError(LotConflictError):
+    """A merge failed its transactional integrity checks."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str,
+        source: Lot | None = None,
+        target: Lot | None = None,
+        candidate: LotMergeCandidate | None = None,
+    ):
+        super().__init__(message)
+        self.code = code
+        self.source = source
+        self.target = target
+        self.candidate = candidate
+
+
+@dataclass(frozen=True)
+class LotMergeResult:
+    source: Lot
+    target: Lot
+    moved_box_count: int
+    moved_request_item_count: int
+    warehouse_ids: list[int]
 
 
 LotProgressState = Literal["active", "in_progress", "complete", "no_eligible"]
@@ -94,17 +150,89 @@ def validate_lot_name(value: str) -> str:
         raise LotRuleError(message) from exc
 
 
-def find_lot(db: Session, name: str) -> Lot | None:
+def _active_lot_use_statement(lot_ids: list[int]):
+    """Build the deterministic PostgreSQL FOR SHARE identity-use lock."""
+    return (
+        select(Lot)
+        .where(
+            Lot.id.in_(sorted(set(lot_ids))),
+            Lot.merged_into_lot_id.is_(None),
+        )
+        .order_by(Lot.id)
+        .with_for_update(read=True)
+    )
+
+
+def _exclusive_lot_statement(lot_ids: list[int]):
+    """Build the deterministic exclusive lock used by identity mutations."""
+    return (
+        select(Lot)
+        .where(Lot.id.in_(sorted(set(lot_ids))))
+        .order_by(Lot.id)
+        .with_for_update()
+    )
+
+
+def lock_active_lots_for_use(db: Session, lot_ids: list[int]) -> dict[int, Lot]:
+    """Hold shared locks until transaction end before writing Lot references.
+
+    PostgreSQL compiles ``read=True`` as ``FOR SHARE``. SQLite omits the lock
+    clause but still executes the active-state validation used by tests.
+    """
+    ordered_ids = sorted(set(lot_ids))
+    if not ordered_ids:
+        return {}
+    locked = {
+        lot.id: lot
+        for lot in db.scalars(_active_lot_use_statement(ordered_ids)).all()
+    }
+    missing = [lot_id for lot_id in ordered_ids if lot_id not in locked]
+    if missing:
+        rendered = ", ".join(str(lot_id) for lot_id in missing)
+        raise LotConflictError(
+            f"lot identity is unavailable or already merged: {rendered}"
+        )
+    return locked
+
+
+def lock_lots_exclusively(db: Session, lot_ids: list[int]) -> dict[int, Lot]:
+    """Lock Lot rows exclusively in ascending id order."""
+    ordered_ids = sorted(set(lot_ids))
+    return {
+        lot.id: lot
+        for lot in db.scalars(_exclusive_lot_statement(ordered_ids)).all()
+    }
+
+
+def find_lot(db: Session, name: str, *, lock_for_use: bool = False) -> Lot | None:
     """Find a lot by trim/collapse/case-insensitive identity."""
     try:
         normalized = normalize_lot_name(name)
     except (AttributeError, TypeError, ValueError) as exc:
         raise LotRuleError(str(exc) or "lot is required") from exc
-    return db.scalar(select(Lot).where(Lot.normalized_name == normalized))
+    lot = db.scalar(
+        select(Lot).where(
+            Lot.normalized_name == normalized,
+            Lot.merged_into_lot_id.is_(None),
+        )
+    )
+    if lot is not None and lock_for_use:
+        return lock_active_lots_for_use(db, [lot.id])[lot.id]
+    return lot
 
 
-def get_lot(db: Session, lot_id: int) -> Lot:
-    lot = db.get(Lot, lot_id)
+def get_lot(db: Session, lot_id: int, *, lock_for_use: bool = False) -> Lot:
+    if lock_for_use:
+        try:
+            return lock_active_lots_for_use(db, [lot_id])[lot_id]
+        except LotConflictError as exc:
+            raise LotNotFoundError(f"active lot {lot_id} not found") from exc
+    lot = db.scalar(
+        select(Lot).where(
+            Lot.id == lot_id,
+            Lot.merged_into_lot_id.is_(None),
+        )
+    )
     if lot is None:
         raise LotNotFoundError(f"lot {lot_id} not found")
     return lot
@@ -121,6 +249,7 @@ def get_or_create_lot_result(
     user: User,
     name: str,
     warehouse_id: int | None = None,
+    lock_for_use: bool = True,
 ) -> tuple[Lot, bool]:
     """Resolve a canonical lot, safely recovering from racing inserts.
 
@@ -130,7 +259,7 @@ def get_or_create_lot_result(
     _ensure_receipt_access(user, warehouse_id)
     cleaned = validate_lot_name(name)
     normalized = normalize_lot_name(cleaned)
-    existing = db.scalar(select(Lot).where(Lot.normalized_name == normalized))
+    existing = find_lot(db, cleaned, lock_for_use=lock_for_use)
     if existing is not None:
         return existing, False
 
@@ -159,7 +288,7 @@ def get_or_create_lot_result(
             )
             db.flush()
     except IntegrityError:
-        existing = db.scalar(select(Lot).where(Lot.normalized_name == normalized))
+        existing = find_lot(db, cleaned, lock_for_use=lock_for_use)
         if existing is None:
             raise LotConflictError(
                 f"lot {cleaned!r} was created concurrently; retry the operation"
@@ -174,14 +303,47 @@ def get_or_create_lot(
     user: User,
     name: str,
     warehouse_id: int | None = None,
+    lock_for_use: bool = True,
 ) -> Lot:
     lot, _created = get_or_create_lot_result(
         db,
         user=user,
         name=name,
         warehouse_id=warehouse_id,
+        lock_for_use=lock_for_use,
     )
     return lot
+
+
+def resolve_lot_names_for_use(
+    db: Session,
+    *,
+    user: User,
+    names: list[str],
+    warehouse_id: int | None = None,
+) -> dict[str, Lot]:
+    """Resolve a batch, then acquire all shared identity locks by Lot id."""
+    cleaned_by_normalized = {
+        normalize_lot_name(name): validate_lot_name(name) for name in names
+    }
+    resolved: dict[str, Lot] = {}
+    for normalized in sorted(cleaned_by_normalized):
+        lot = get_or_create_lot(
+            db,
+            user=user,
+            name=cleaned_by_normalized[normalized],
+            warehouse_id=warehouse_id,
+            lock_for_use=False,
+        )
+        resolved[normalized] = lot
+    locked = lock_active_lots_for_use(
+        db,
+        [lot.id for lot in resolved.values()],
+    )
+    return {
+        normalized: locked[lot.id]
+        for normalized, lot in resolved.items()
+    }
 
 
 def resolve_lot(
@@ -192,13 +354,14 @@ def resolve_lot(
     lot_id: int | None = None,
     warehouse_id: int | None = None,
     create: bool = True,
+    lock_for_use: bool = True,
 ) -> Lot:
     """Resolve exactly one name/id input for a warehouse-authorized workflow."""
     _ensure_receipt_access(user, warehouse_id)
     if (lot is None) == (lot_id is None):
         raise LotRuleError("provide exactly one of lot or lot_id")
     if lot_id is not None:
-        return get_lot(db, lot_id)
+        return get_lot(db, lot_id, lock_for_use=lock_for_use)
     assert lot is not None
     if create:
         return get_or_create_lot(
@@ -206,11 +369,56 @@ def resolve_lot(
             user=user,
             name=lot,
             warehouse_id=warehouse_id,
+            lock_for_use=lock_for_use,
         )
-    existing = find_lot(db, lot)
+    existing = find_lot(db, lot, lock_for_use=lock_for_use)
     if existing is None:
         raise LotNotFoundError(f"lot {validate_lot_name(lot)!r} not found")
     return existing
+
+
+_OVERLAP_LIST_LIMIT = 100
+
+
+def _overlapping_box_numbers(
+    db: Session,
+    source_id: int,
+    target_id: int,
+) -> tuple[list[str], int]:
+    """Return a bounded sorted overlap across active and archived boxes."""
+    overlap = (
+        select(Box.box_number)
+        .where(Box.lot_id.in_((source_id, target_id)))
+        .group_by(Box.box_number)
+        .having(func.count(func.distinct(Box.lot_id)) == 2)
+        .order_by(Box.box_number)
+        .subquery()
+    )
+    total = int(db.scalar(select(func.count()).select_from(overlap)) or 0)
+    numbers = list(
+        db.scalars(select(overlap.c.box_number).limit(_OVERLAP_LIST_LIMIT)).all()
+    )
+    return numbers, total
+
+
+def _merge_candidate(
+    db: Session,
+    source: Lot,
+    target: Lot,
+) -> LotMergeCandidate:
+    overlaps, total = _overlapping_box_numbers(db, source.id, target.id)
+    return LotMergeCandidate(
+        source_id=source.id,
+        source_name=source.name,
+        source_version=source.version,
+        target_id=target.id,
+        target_name=target.name,
+        target_version=target.version,
+        merge_allowed=total == 0,
+        overlapping_box_numbers=overlaps,
+        overlapping_box_count=total,
+        overlap_list_truncated=total > len(overlaps),
+    )
 
 
 def rename_lot(
@@ -234,18 +442,24 @@ def rename_lot(
     lot = db.scalar(select(Lot).where(Lot.id == lot_id).with_for_update())
     if lot is None:
         raise LotNotFoundError(f"lot {lot_id} not found")
+    if lot.merged_into_lot_id is not None:
+        raise LotConflictError(f"lot {lot_id} has already been merged")
     if lot.version != expected_version:
         raise LotVersionConflictError(
             f"lot version conflict: expected {expected_version}, current {lot.version}"
         )
     collision = db.scalar(
-        select(Lot.id).where(
+        select(Lot).where(
             Lot.normalized_name == normalized,
             Lot.id != lot.id,
+            Lot.merged_into_lot_id.is_(None),
         )
     )
     if collision is not None:
-        raise LotConflictError(f"lot {cleaned_name!r} already exists")
+        raise LotNameCollisionError(
+            f"lot {collision.name!r} already exists",
+            _merge_candidate(db, lot, collision),
+        )
     old_name = lot.name
     if old_name == cleaned_name:
         return lot
@@ -269,11 +483,238 @@ def rename_lot(
             )
             db.flush()
     except IntegrityError as exc:
-        raise LotConflictError(f"lot {cleaned_name!r} already exists") from exc
+        collision = db.scalar(
+            select(Lot).where(
+                Lot.normalized_name == normalized,
+                Lot.id != lot.id,
+                Lot.merged_into_lot_id.is_(None),
+            )
+        )
+        if collision is not None:
+            raise LotNameCollisionError(
+                f"lot {collision.name!r} already exists",
+                _merge_candidate(db, lot, collision),
+            ) from exc
+        raise LotConflictError(
+            f"lot {cleaned_name!r} changed concurrently; retry the operation"
+        ) from exc
     if commit:
         db.commit()
         db.refresh(lot)
     return lot
+
+
+def merge_lots(
+    db: Session,
+    *,
+    user: User,
+    source_lot_id: int,
+    target_lot_id: int,
+    reason: str,
+    expected_source_version: int,
+    expected_target_version: int,
+    commit: bool = True,
+) -> LotMergeResult:
+    """Merge source into target after locking and revalidating every identity."""
+    if user.role != UserRole.admin:
+        raise LotAccessError("lot merge requires admin role")
+    cleaned_reason = reason.strip()
+    if not cleaned_reason:
+        raise LotRuleError("a reason is required to merge lots")
+    if source_lot_id == target_lot_id:
+        raise LotMergeConflictError(
+            "source and target lots must differ",
+            code="invalid_merge",
+        )
+
+    ordered_ids = sorted((source_lot_id, target_lot_id))
+    locked_lots = lock_lots_exclusively(db, ordered_ids)
+    source = locked_lots.get(source_lot_id)
+    target = locked_lots.get(target_lot_id)
+    if source is None or target is None:
+        raise LotMergeConflictError(
+            "source or target lot does not exist",
+            code="invalid_merge",
+            source=source,
+            target=target,
+        )
+    if source.merged_into_lot_id is not None or target.merged_into_lot_id is not None:
+        raise LotMergeConflictError(
+            "source and target must both be active, unmerged lots",
+            code="already_merged",
+            source=source,
+            target=target,
+        )
+    if source.version != expected_source_version:
+        raise LotMergeConflictError(
+            (
+                "source lot version conflict: expected "
+                f"{expected_source_version}, current {source.version}"
+            ),
+            code="source_version_conflict",
+            source=source,
+            target=target,
+            candidate=_merge_candidate(db, source, target),
+        )
+    if target.version != expected_target_version:
+        raise LotMergeConflictError(
+            (
+                "target lot version conflict: expected "
+                f"{expected_target_version}, current {target.version}"
+            ),
+            code="target_version_conflict",
+            source=source,
+            target=target,
+            candidate=_merge_candidate(db, source, target),
+        )
+
+    boxes = list(
+        db.scalars(
+            select(Box)
+            .where(Box.lot_id.in_(ordered_ids))
+            .order_by(Box.id)
+            .with_for_update()
+        ).all()
+    )
+    candidate = _merge_candidate(db, source, target)
+    if not candidate.merge_allowed:
+        raise LotMergeConflictError(
+            "lots have overlapping physical box numbers",
+            code="box_number_overlap",
+            source=source,
+            target=target,
+            candidate=candidate,
+        )
+
+    request_items = list(
+        db.scalars(
+            select(BoxRequestItem)
+            .where(BoxRequestItem.lot_id == source.id)
+            .order_by(BoxRequestItem.id)
+            .with_for_update()
+        ).all()
+    )
+    request_warehouse_ids = set(
+        db.scalars(
+            select(BoxRequest.warehouse_id)
+            .join(BoxRequestItem, BoxRequestItem.request_id == BoxRequest.id)
+            .where(BoxRequestItem.lot_id == source.id)
+            .distinct()
+        ).all()
+    )
+    warehouse_ids = sorted(
+        {
+            box.current_warehouse_id
+            for box in boxes
+            if box.archived_at is None
+        }
+        | set(lot_warehouse_ids(db, source.id))
+        | set(lot_warehouse_ids(db, target.id))
+        | request_warehouse_ids
+    )
+    source_name = source.name
+    target_name = target.name
+    source_version = source.version
+    target_version = target.version
+    moved_boxes = [box for box in boxes if box.lot_id == source.id]
+
+    for box in moved_boxes:
+        box.lot_id = target.id
+    for item in request_items:
+        # ``item.lot`` is an immutable historical text snapshot.
+        item.lot_id = target.id
+
+    now = datetime.now(UTC)
+    source.normalized_name = None
+    source.merged_into_lot_id = target.id
+    source.merged_at = now
+    source.merged_by_user_id = user.id
+    source.updated_by_user_id = user.id
+    target.updated_by_user_id = user.id
+    # A merge changes the target identity even when the actor was already its
+    # last updater; explicitly advance the optimistic-lock version.
+    target.version = target.version + 1
+
+    metadata = {
+        "operation": "merge",
+        "source_lot_id": source.id,
+        "source_lot_name": source_name,
+        "target_lot_id": target.id,
+        "target_lot_name": target_name,
+        "actor_user_id": user.id,
+        "moved_box_count": len(moved_boxes),
+        "moved_request_item_count": len(request_items),
+        "expected_source_version": expected_source_version,
+        "expected_target_version": expected_target_version,
+        "source_version_before": source_version,
+        "target_version_before": target_version,
+    }
+    db.add_all(
+        [
+            LotEvent(
+                lot_id=source.id,
+                event_type=LotEventType.merged,
+                old_name=source_name,
+                new_name=target_name,
+                actor_user_id=user.id,
+                reason=cleaned_reason,
+                event_metadata={**metadata, "event_side": "source"},
+            ),
+            LotEvent(
+                lot_id=target.id,
+                event_type=LotEventType.merged,
+                old_name=source_name,
+                new_name=target_name,
+                actor_user_id=user.id,
+                reason=cleaned_reason,
+                event_metadata={**metadata, "event_side": "target"},
+            ),
+        ]
+    )
+    db.add_all(
+        [
+            BoxEvent(
+                box_id=box.id,
+                warehouse_id=box.current_warehouse_id,
+                event_type=BoxEventType.lot_reassigned,
+                from_status=box.status,
+                to_status=box.status,
+                from_warehouse_id=box.current_warehouse_id,
+                to_warehouse_id=box.current_warehouse_id,
+                occurred_at=now,
+                user_id=user.id,
+                note=cleaned_reason,
+                event_metadata={
+                    **metadata,
+                    "operation": "lot_merge",
+                    "box_id": box.id,
+                    "box_number": box.box_number,
+                    "box_was_archived": box.archived_at is not None,
+                },
+            )
+            for box in moved_boxes
+        ]
+    )
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        raise LotMergeConflictError(
+            "merge conflicted with a concurrent inventory change",
+            code="merge_integrity_conflict",
+            source=source,
+            target=target,
+        ) from exc
+    if commit:
+        db.commit()
+        db.refresh(source)
+        db.refresh(target)
+    return LotMergeResult(
+        source=source,
+        target=target,
+        moved_box_count=len(moved_boxes),
+        moved_request_item_count=len(request_items),
+        warehouse_ids=warehouse_ids,
+    )
 
 
 def _scoped_sources(
@@ -445,6 +886,7 @@ def _summary_statement(
         .outerjoin(box_aggregate, box_aggregate.c.lot_id == Lot.id)
         .outerjoin(staged_aggregate, staged_aggregate.c.lot_id == Lot.id)
         .outerjoin(warehouse_aggregate, warehouse_aggregate.c.lot_id == Lot.id)
+        .where(Lot.merged_into_lot_id.is_(None))
     )
     if (
         (user.role != UserRole.admin or warehouse_id is not None)
@@ -600,7 +1042,7 @@ def list_lot_options(
 ) -> tuple[list[LotOption], int]:
     """Return lightweight identities without computing progress aggregates."""
     _boxes, _staged, represented, _warehouses = _scoped_sources(user)
-    stmt = select(Lot)
+    stmt = select(Lot).where(Lot.merged_into_lot_id.is_(None))
     if user.role != UserRole.admin:
         stmt = stmt.where(Lot.id.in_(select(represented.c.lot_id)))
     exact_normalized: str | None = None
@@ -665,6 +1107,10 @@ __all__ = [
     "MAX_LOT_NAME_LENGTH",
     "LotAccessError",
     "LotConflictError",
+    "LotMergeCandidate",
+    "LotMergeConflictError",
+    "LotMergeResult",
+    "LotNameCollisionError",
     "LotOption",
     "LotNotFoundError",
     "LotRuleError",
@@ -677,9 +1123,13 @@ __all__ = [
     "get_visible_lot_summary",
     "list_lot_options",
     "list_lot_summaries",
+    "lock_active_lots_for_use",
+    "lock_lots_exclusively",
     "lot_warehouse_ids",
+    "merge_lots",
     "normalize_lot_name",
     "rename_lot",
     "resolve_lot",
+    "resolve_lot_names_for_use",
     "validate_lot_name",
 ]

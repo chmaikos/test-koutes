@@ -24,9 +24,12 @@ import type {
   LotDetail,
   LotEvent,
   LotFilters,
+  LotMergePayload,
+  LotMergeResult,
   LotOption,
   LotRenamePayload,
   LotSummary,
+  MergedLot,
   NotificationPage,
   Page,
   ProductivityEntry,
@@ -462,7 +465,8 @@ export function useLotOptions(search: string, page = 1, limit = 25) {
 export function useLot(id: number | undefined) {
   return useQuery({
     queryKey: id ? queryKeys.lot(id) : ["lot", "noop"],
-    queryFn: async () => (await api.get<LotDetail>(`/lots/${id}`)).data,
+    queryFn: async () =>
+      (await api.get<LotDetail | MergedLot>(`/lots/${id}`)).data,
     enabled: !!id,
   });
 }
@@ -522,6 +526,37 @@ export function useRenameLot() {
       qc.invalidateQueries({ queryKey: ["requests"] });
     },
     onError: (_error, input) => invalidateLotState(qc, [input.id]),
+  });
+}
+
+export function useMergeLots() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: {
+      sourceId: number;
+      payload: LotMergePayload;
+    }) =>
+      (
+        await api.post<LotMergeResult>(
+          `/lots/${input.sourceId}/merge`,
+          input.payload,
+        )
+      ).data,
+    onSettled: (result, _error, input) => {
+      invalidateLotState(qc, [
+        input.sourceId,
+        input.payload.target_lot_id,
+        ...(result ? [result.source.id, result.target.id] : []),
+      ]);
+      qc.invalidateQueries({ queryKey: ["boxes"] });
+      qc.invalidateQueries({ queryKey: ["box"] });
+      qc.invalidateQueries({ queryKey: ["requests"] });
+      qc.invalidateQueries({ queryKey: ["request"] });
+      qc.invalidateQueries({ queryKey: ["request-suggestion"] });
+      qc.invalidateQueries({ queryKey: ["return-sources"] });
+      qc.invalidateQueries({ queryKey: ["return-candidates"] });
+      qc.invalidateQueries({ queryKey: queryKeys.dashboard });
+    },
   });
 }
 

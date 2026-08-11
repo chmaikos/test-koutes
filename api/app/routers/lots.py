@@ -25,16 +25,23 @@ from app.schemas.lots import (
     LotCreate,
     LotDetailOut,
     LotEventOut,
+    LotIdentityOut,
+    LotMerge,
+    LotMergeOut,
     LotOptionOut,
     LotProgressState,
     LotRename,
     LotSortField,
     LotSummaryOut,
+    MergedLotOut,
 )
 from app.services.acl import apply_warehouse_filter
 from app.services.lots import (
     LotAccessError,
     LotConflictError,
+    LotMergeCandidate,
+    LotMergeConflictError,
+    LotNameCollisionError,
     LotNotFoundError,
     LotRuleError,
     LotVersionConflictError,
@@ -43,6 +50,7 @@ from app.services.lots import (
     list_lot_options,
     list_lot_summaries,
     lot_warehouse_ids,
+    merge_lots,
     rename_lot,
 )
 
@@ -83,6 +91,31 @@ def _lot_error(exc: LotRuleError) -> HTTPException:
     else:
         code = status.HTTP_400_BAD_REQUEST
     return HTTPException(status_code=code, detail=str(exc))
+
+
+def _lot_identity(lot: Lot | None) -> dict[str, object] | None:
+    if lot is None:
+        return None
+    return {"id": lot.id, "name": lot.name, "version": lot.version}
+
+
+def _candidate_detail(candidate: LotMergeCandidate) -> dict[str, object]:
+    return {
+        "source": {
+            "id": candidate.source_id,
+            "name": candidate.source_name,
+            "version": candidate.source_version,
+        },
+        "target": {
+            "id": candidate.target_id,
+            "name": candidate.target_name,
+            "version": candidate.target_version,
+        },
+        "merge_allowed": candidate.merge_allowed,
+        "overlapping_box_numbers": candidate.overlapping_box_numbers,
+        "overlapping_box_count": candidate.overlapping_box_count,
+        "overlap_list_truncated": candidate.overlap_list_truncated,
+    }
 
 
 async def _publish_for_lot(
@@ -204,12 +237,49 @@ async def create_lot(
     return _summary_out(summary)
 
 
-@router.get("/{lot_id}", response_model=LotDetailOut)
+@router.get("/{lot_id}", response_model=LotDetailOut | MergedLotOut)
 def get_lot_detail(
     lot_id: int,
     db: DbSession,
     user: CurrentUser,
-) -> LotDetailOut:
+) -> LotDetailOut | MergedLotOut:
+    stored = db.get(Lot, lot_id)
+    if stored is not None and stored.merged_into_lot_id is not None:
+        target = stored
+        visited = {stored.id}
+        while target.merged_into_lot_id is not None:
+            if target.merged_into_lot_id in visited:
+                target = None
+                break
+            visited.add(target.merged_into_lot_id)
+            target = db.get(Lot, target.merged_into_lot_id)
+            if target is None:
+                break
+        if target is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "broken_merge_target",
+                    "message": "merged lot target is unavailable",
+                },
+            )
+        try:
+            get_visible_lot_summary(db, user=user, lot_id=target.id)
+        except LotRuleError as exc:
+            raise _lot_error(exc) from exc
+        assert stored.merged_at is not None
+        return MergedLotOut(
+            id=stored.id,
+            name=stored.name,
+            version=stored.version,
+            merged_at=stored.merged_at,
+            merged_by_user_id=stored.merged_by_user_id,
+            merged_into=LotIdentityOut(
+                id=target.id,
+                name=target.name,
+                version=target.version,
+            ),
+        )
     try:
         summary = get_visible_lot_summary(db, user=user, lot_id=lot_id)
     except LotRuleError as exc:
@@ -285,6 +355,11 @@ async def rename(
     except (LotVersionConflictError, LotConflictError) as exc:
         db.rollback()
         current = db.get(Lot, lot_id)
+        candidate = (
+            _candidate_detail(exc.candidate)
+            if isinstance(exc, LotNameCollisionError)
+            else None
+        )
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={
@@ -294,6 +369,7 @@ async def rename(
                     else "name_collision"
                 ),
                 "message": str(exc),
+                "merge_candidate": candidate,
                 "current": (
                     {
                         "id": current.id,
@@ -318,6 +394,80 @@ async def rename(
         {"id": lot.id, "name": lot.name, "version": lot.version},
     )
     return _summary_out(summary)
+
+
+@router.post("/{source_id}/merge", response_model=LotMergeOut)
+async def merge(
+    source_id: int,
+    payload: LotMerge,
+    db: DbSession,
+    user: Annotated[User, Depends(require_admin)],
+) -> LotMergeOut:
+    try:
+        result = merge_lots(
+            db,
+            user=user,
+            source_lot_id=source_id,
+            target_lot_id=payload.target_lot_id,
+            reason=payload.reason,
+            expected_source_version=payload.expected_source_version,
+            expected_target_version=payload.expected_target_version,
+        )
+    except LotMergeConflictError as exc:
+        db.rollback()
+        source = db.get(Lot, source_id)
+        target = db.get(Lot, payload.target_lot_id)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": exc.code,
+                "message": str(exc),
+                "source": _lot_identity(source),
+                "target": _lot_identity(target),
+                "merge_candidate": (
+                    _candidate_detail(exc.candidate)
+                    if exc.candidate is not None
+                    else None
+                ),
+            },
+        ) from exc
+    except LotRuleError as exc:
+        db.rollback()
+        raise _lot_error(exc) from exc
+
+    event_data = {
+        "id": result.target.id,
+        "source_lot_id": result.source.id,
+        "source_lot_name": result.source.name,
+        "source_version": result.source.version,
+        "target_lot_id": result.target.id,
+        "target_lot_name": result.target.name,
+        "target_version": result.target.version,
+        "moved_box_count": result.moved_box_count,
+        "moved_request_item_count": result.moved_request_item_count,
+    }
+    if result.warehouse_ids:
+        for warehouse_id in result.warehouse_ids:
+            await bus.publish(
+                "lot.merged",
+                {**event_data, "warehouse_id": warehouse_id},
+            )
+    else:
+        await bus.publish("lot.merged", {**event_data, "warehouse_id": None})
+    return LotMergeOut(
+        source=LotIdentityOut(
+            id=result.source.id,
+            name=result.source.name,
+            version=result.source.version,
+        ),
+        target=LotIdentityOut(
+            id=result.target.id,
+            name=result.target.name,
+            version=result.target.version,
+        ),
+        moved_box_count=result.moved_box_count,
+        moved_request_item_count=result.moved_request_item_count,
+    )
 
 
 __all__ = ["router"]
