@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Literal
 
@@ -83,6 +83,34 @@ class LotVersionConflictError(LotConflictError):
     """The caller supplied a stale optimistic-lock version."""
 
 
+LotMergeSide = Literal["source", "target"]
+
+
+@dataclass(frozen=True)
+class LotArchivedBoxCollision:
+    box_number: str
+    source_box_id: int
+    source_box_archived: bool
+    target_box_id: int
+    target_box_archived: bool
+    survivor_box_id: int
+    survivor_lot_side: LotMergeSide
+    removed_box_id: int
+    removed_lot_side: LotMergeSide
+    request_item_relink_count: int
+    discrepancy_relink_count: int
+    box_event_delete_count: int
+
+
+@dataclass(frozen=True)
+class LotHardBoxOverlap:
+    box_number: str
+    source_box_ids: list[int]
+    target_box_ids: list[int]
+    source_active_box_ids: list[int]
+    target_active_box_ids: list[int]
+
+
 @dataclass(frozen=True)
 class LotMergeCandidate:
     source_id: int
@@ -95,6 +123,19 @@ class LotMergeCandidate:
     overlapping_box_numbers: list[str]
     overlapping_box_count: int
     overlap_list_truncated: bool
+    resolvable_archived_collisions: list[LotArchivedBoxCollision]
+    resolvable_archived_collision_count: int
+    resolvable_archived_collisions_truncated: bool
+    hard_overlaps: list[LotHardBoxOverlap]
+    hard_overlap_count: int
+    hard_overlaps_truncated: bool
+    merge_allowed_with_archived_overwrite: bool
+    requires_explicit_overwrite: bool
+    collision_signature: str
+    all_resolvable_archived_collisions: list[LotArchivedBoxCollision] = field(
+        default_factory=list,
+        repr=False,
+    )
 
 
 class LotNameCollisionError(LotConflictError):
@@ -131,6 +172,12 @@ class LotMergeResult:
     moved_box_count: int
     moved_request_item_count: int
     warehouse_ids: list[int]
+    overwritten_archived_box_count: int = 0
+    relinked_request_item_count: int = 0
+    relinked_discrepancy_count: int = 0
+    deleted_box_event_count: int = 0
+    survivor_box_ids: list[int] = field(default_factory=list)
+    removed_box_ids: list[int] = field(default_factory=list)
 
 
 LotProgressState = Literal["active", "in_progress", "complete", "no_eligible"]
@@ -408,6 +455,7 @@ def _exclusive_lot_statement(lot_ids: list[int]):
         .where(Lot.id.in_(sorted(set(lot_ids))))
         .order_by(Lot.id)
         .with_for_update()
+        .execution_options(populate_existing=True)
     )
 
 
@@ -3536,25 +3584,167 @@ def cleanup_lot_purge_objects(
 _OVERLAP_LIST_LIMIT = 100
 
 
-def _overlapping_box_numbers(
+def _collision_timestamp(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(UTC).isoformat(timespec="microseconds")
+
+
+def _box_signature_value(box: Box) -> dict[str, object]:
+    return {
+        "id": box.id,
+        "lot_id": box.lot_id,
+        "box_number": box.box_number,
+        "status": box.status.value,
+        "archived_at": _collision_timestamp(box.archived_at),
+    }
+
+
+def _box_event_signature_value(event: BoxEvent) -> dict[str, object]:
+    """Return durable, non-sensitive BoxEvent facts used by merge confirmation."""
+    return {
+        "id": event.id,
+        "box_id": event.box_id,
+        "warehouse_id": event.warehouse_id,
+        "event_type": event.event_type.value,
+        "from_status": event.from_status.value if event.from_status else None,
+        "to_status": event.to_status.value if event.to_status else None,
+        "from_warehouse_id": event.from_warehouse_id,
+        "to_warehouse_id": event.to_warehouse_id,
+        "occurred_at": _collision_timestamp(event.occurred_at),
+        "user_id": event.user_id,
+    }
+
+
+def _box_link_counts(
     db: Session,
-    source_id: int,
-    target_id: int,
-) -> tuple[list[str], int]:
-    """Return a bounded sorted overlap across active and archived boxes."""
-    overlap = (
-        select(Box.box_number)
-        .where(Box.lot_id.in_((source_id, target_id)))
-        .group_by(Box.box_number)
-        .having(func.count(func.distinct(Box.lot_id)) == 2)
-        .order_by(Box.box_number)
-        .subquery()
+    box_ids: list[int],
+    model: type[BoxRequestItem] | type[BoxRequestDiscrepancy],
+) -> dict[int, int]:
+    if not box_ids:
+        return {}
+    return {
+        int(box_id): int(count)
+        for box_id, count in db.execute(
+            select(model.box_id, func.count(model.id))
+            .where(model.box_id.in_(box_ids))
+            .group_by(model.box_id)
+            .order_by(model.box_id)
+        ).all()
+        if box_id is not None
+    }
+
+
+def _merge_box_lock_statement(lot_ids: list[int]):
+    """Lock both lots' complete inventory with an explicit PostgreSQL target."""
+    return (
+        select(Box)
+        .where(Box.lot_id.in_(sorted(set(lot_ids))))
+        .order_by(Box.id)
+        .with_for_update(of=Box)
+        .execution_options(populate_existing=True)
     )
-    total = int(db.scalar(select(func.count()).select_from(overlap)) or 0)
-    numbers = list(
-        db.scalars(select(overlap.c.box_number).limit(_OVERLAP_LIST_LIMIT)).all()
+
+
+def _merge_request_item_lock_statement(
+    source_lot_id: int,
+    removed_box_ids: list[int],
+):
+    affected = BoxRequestItem.lot_id == source_lot_id
+    if removed_box_ids:
+        affected = or_(affected, BoxRequestItem.box_id.in_(removed_box_ids))
+    return (
+        select(BoxRequestItem)
+        .where(affected)
+        .order_by(BoxRequestItem.id)
+        .with_for_update(of=BoxRequestItem)
+        .execution_options(populate_existing=True)
     )
-    return numbers, total
+
+
+def _merge_discrepancy_lock_statement(removed_box_ids: list[int]):
+    return (
+        select(BoxRequestDiscrepancy)
+        .where(BoxRequestDiscrepancy.box_id.in_(sorted(set(removed_box_ids))))
+        .order_by(BoxRequestDiscrepancy.id)
+        .with_for_update(of=BoxRequestDiscrepancy)
+        .execution_options(populate_existing=True)
+    )
+
+
+def _merge_request_lock_statement(request_ids: list[int]):
+    return (
+        select(BoxRequest.id)
+        .where(BoxRequest.id.in_(sorted(set(request_ids))))
+        .order_by(BoxRequest.id)
+        .with_for_update(of=BoxRequest)
+    )
+
+
+def _merge_box_event_lock_statement(box_ids: list[int]):
+    return (
+        select(BoxEvent)
+        .where(BoxEvent.box_id.in_(sorted(set(box_ids))))
+        .order_by(BoxEvent.id)
+        .with_for_update(of=BoxEvent)
+        .execution_options(populate_existing=True)
+    )
+
+
+def _merge_signature_links(
+    db: Session,
+    *,
+    lot_ids: tuple[int, int],
+    box_ids: list[int],
+) -> tuple[list[dict[str, int | None]], list[dict[str, int | None]]]:
+    item_filter = BoxRequestItem.lot_id.in_(lot_ids)
+    if box_ids:
+        item_filter = or_(item_filter, BoxRequestItem.box_id.in_(box_ids))
+    item_links = [
+        {
+            "id": int(item_id),
+            "request_id": int(request_id),
+            "box_id": int(box_id) if box_id is not None else None,
+            "lot_id": int(lot_id) if lot_id is not None else None,
+        }
+        for item_id, request_id, box_id, lot_id in db.execute(
+            select(
+                BoxRequestItem.id,
+                BoxRequestItem.request_id,
+                BoxRequestItem.box_id,
+                BoxRequestItem.lot_id,
+            )
+            .where(item_filter)
+            .order_by(BoxRequestItem.id)
+        ).all()
+    ]
+    discrepancy_links = (
+        [
+            {
+                "id": int(discrepancy_id),
+                "request_id": int(request_id),
+                "request_item_id": (
+                    int(request_item_id) if request_item_id is not None else None
+                ),
+                "box_id": int(box_id) if box_id is not None else None,
+            }
+            for discrepancy_id, request_id, request_item_id, box_id in db.execute(
+                select(
+                    BoxRequestDiscrepancy.id,
+                    BoxRequestDiscrepancy.request_id,
+                    BoxRequestDiscrepancy.request_item_id,
+                    BoxRequestDiscrepancy.box_id,
+                )
+                .where(BoxRequestDiscrepancy.box_id.in_(box_ids))
+                .order_by(BoxRequestDiscrepancy.id)
+            ).all()
+        ]
+        if box_ids
+        else []
+    )
+    return item_links, discrepancy_links
 
 
 def _merge_candidate(
@@ -3562,7 +3752,228 @@ def _merge_candidate(
     source: Lot,
     target: Lot,
 ) -> LotMergeCandidate:
-    overlaps, total = _overlapping_box_numbers(db, source.id, target.id)
+    """Build a deterministic collision plan across active and archived boxes."""
+    boxes = list(
+        db.scalars(
+            select(Box)
+            .where(Box.lot_id.in_((source.id, target.id)))
+            .order_by(Box.box_number, Box.lot_id, Box.id)
+        ).all()
+    )
+    boxes_by_number: dict[str, dict[LotMergeSide, list[Box]]] = {}
+    for box in boxes:
+        side: LotMergeSide = "source" if box.lot_id == source.id else "target"
+        boxes_by_number.setdefault(
+            box.box_number, {"source": [], "target": []}
+        )[side].append(box)
+
+    shared = [
+        (number, grouped["source"], grouped["target"])
+        for number, grouped in sorted(boxes_by_number.items())
+        if grouped["source"] and grouped["target"]
+    ]
+
+    decisions: list[
+        tuple[str, list[Box], list[Box], Box | None, Box | None]
+    ] = []
+    removed_box_ids: list[int] = []
+    for number, source_boxes, target_boxes in shared:
+        survivor: Box | None = None
+        removed: Box | None = None
+        if len(source_boxes) == 1 and len(target_boxes) == 1:
+            source_box = source_boxes[0]
+            target_box = target_boxes[0]
+            source_active = source_box.archived_at is None
+            target_active = target_box.archived_at is None
+            if not (source_active and target_active):
+                if source_active:
+                    survivor, removed = source_box, target_box
+                elif target_active:
+                    survivor, removed = target_box, source_box
+                else:
+                    survivor, removed = target_box, source_box
+                removed_box_ids.append(removed.id)
+        decisions.append((number, source_boxes, target_boxes, survivor, removed))
+
+    item_counts = _box_link_counts(db, removed_box_ids, BoxRequestItem)
+    discrepancy_counts = _box_link_counts(
+        db, removed_box_ids, BoxRequestDiscrepancy
+    )
+    removed_box_events = (
+        list(
+            db.scalars(
+                select(BoxEvent)
+                .where(BoxEvent.box_id.in_(removed_box_ids))
+                .order_by(BoxEvent.id)
+            ).all()
+        )
+        if removed_box_ids
+        else []
+    )
+    event_counts: dict[int, int] = {box_id: 0 for box_id in removed_box_ids}
+    for event in removed_box_events:
+        event_counts[event.box_id] += 1
+
+
+    resolvable: list[LotArchivedBoxCollision] = []
+    hard: list[LotHardBoxOverlap] = []
+    signature_collisions: list[dict[str, object]] = []
+    for number, source_boxes, target_boxes, survivor, removed in decisions:
+        if survivor is None or removed is None:
+            hard_entry = LotHardBoxOverlap(
+                box_number=number,
+                source_box_ids=[box.id for box in source_boxes],
+                target_box_ids=[box.id for box in target_boxes],
+                source_active_box_ids=[
+                    box.id for box in source_boxes if box.archived_at is None
+                ],
+                target_active_box_ids=[
+                    box.id for box in target_boxes if box.archived_at is None
+                ],
+            )
+            hard.append(hard_entry)
+            signature_collisions.append(
+                {
+                    "box_number": number,
+                    "source_boxes": [
+                        _box_signature_value(box) for box in source_boxes
+                    ],
+                    "target_boxes": [
+                        _box_signature_value(box) for box in target_boxes
+                    ],
+                    "decision": "hard_overlap",
+                }
+            )
+            continue
+
+        survivor_side: LotMergeSide = (
+            "source" if survivor.lot_id == source.id else "target"
+        )
+        removed_side: LotMergeSide = (
+            "source" if removed.lot_id == source.id else "target"
+        )
+        entry = LotArchivedBoxCollision(
+            box_number=number,
+            source_box_id=source_boxes[0].id,
+            source_box_archived=source_boxes[0].archived_at is not None,
+            target_box_id=target_boxes[0].id,
+            target_box_archived=target_boxes[0].archived_at is not None,
+            survivor_box_id=survivor.id,
+            survivor_lot_side=survivor_side,
+            removed_box_id=removed.id,
+            removed_lot_side=removed_side,
+            request_item_relink_count=item_counts.get(removed.id, 0),
+            discrepancy_relink_count=discrepancy_counts.get(removed.id, 0),
+            box_event_delete_count=event_counts.get(removed.id, 0),
+        )
+        resolvable.append(entry)
+        signature_collisions.append(
+            {
+                "box_number": number,
+                "source_boxes": [
+                    _box_signature_value(box) for box in source_boxes
+                ],
+                "target_boxes": [
+                    _box_signature_value(box) for box in target_boxes
+                ],
+                "decision": {
+                    "survivor_box_id": entry.survivor_box_id,
+                    "survivor_lot_side": entry.survivor_lot_side,
+                    "removed_box_id": entry.removed_box_id,
+                    "removed_lot_side": entry.removed_lot_side,
+                    "request_item_relink_count": entry.request_item_relink_count,
+                    "discrepancy_relink_count": entry.discrepancy_relink_count,
+                    "box_event_delete_count": entry.box_event_delete_count,
+                },
+            }
+        )
+
+    item_links, discrepancy_links = _merge_signature_links(
+        db,
+        lot_ids=(source.id, target.id),
+        box_ids=[box.id for box in boxes],
+    )
+    removed_box_id_set = set(removed_box_ids)
+    affected_request_ids = sorted(
+        {
+            int(link["request_id"])
+            for link in item_links
+            if link["lot_id"] == source.id
+            or link["box_id"] in removed_box_id_set
+        }
+        | {
+            int(link["request_id"])
+            for link in discrepancy_links
+            if link["box_id"] in removed_box_id_set
+        }
+    )
+    request_context = (
+        [
+            {
+                "id": int(request_id),
+                "version": int(version),
+                "status": status.value,
+                "direction": direction.value,
+                "origin": origin.value,
+                "source_inbound_request_id": (
+                    int(source_inbound_request_id)
+                    if source_inbound_request_id is not None
+                    else None
+                ),
+                "parent_request_id": (
+                    int(parent_request_id) if parent_request_id is not None else None
+                ),
+                "root_request_id": (
+                    int(root_request_id) if root_request_id is not None else None
+                ),
+            }
+            for (
+                request_id,
+                version,
+                status,
+                direction,
+                origin,
+                source_inbound_request_id,
+                parent_request_id,
+                root_request_id,
+            ) in db.execute(
+                select(
+                    BoxRequest.id,
+                    BoxRequest.version,
+                    BoxRequest.status,
+                    BoxRequest.direction,
+                    BoxRequest.origin,
+                    BoxRequest.source_inbound_request_id,
+                    BoxRequest.parent_request_id,
+                    BoxRequest.root_request_id,
+                )
+                .where(BoxRequest.id.in_(affected_request_ids))
+                .order_by(BoxRequest.id)
+            ).all()
+        ]
+        if affected_request_ids
+        else []
+    )
+    signature_payload = {
+        "source": {"id": source.id, "version": source.version},
+        "target": {"id": target.id, "version": target.version},
+        "inventory": [_box_signature_value(box) for box in boxes],
+        "request_item_links": item_links,
+        "discrepancy_links": discrepancy_links,
+        "request_context": request_context,
+        "removed_box_events": [
+            _box_event_signature_value(event) for event in removed_box_events
+        ],
+        "collisions": signature_collisions,
+    }
+    signature_json = json.dumps(
+        signature_payload, sort_keys=True, separators=(",", ":")
+    )
+    collision_signature = hashlib.sha256(signature_json.encode()).hexdigest()
+    overlap_numbers = [number for number, *_rest in shared]
+    overlap_count = len(overlap_numbers)
+    resolvable_count = len(resolvable)
+    hard_count = len(hard)
     return LotMergeCandidate(
         source_id=source.id,
         source_name=source.name,
@@ -3570,10 +3981,24 @@ def _merge_candidate(
         target_id=target.id,
         target_name=target.name,
         target_version=target.version,
-        merge_allowed=total == 0,
-        overlapping_box_numbers=overlaps,
-        overlapping_box_count=total,
-        overlap_list_truncated=total > len(overlaps),
+        merge_allowed=overlap_count == 0,
+        overlapping_box_numbers=overlap_numbers[:_OVERLAP_LIST_LIMIT],
+        overlapping_box_count=overlap_count,
+        overlap_list_truncated=overlap_count > _OVERLAP_LIST_LIMIT,
+        resolvable_archived_collisions=resolvable[:_OVERLAP_LIST_LIMIT],
+        resolvable_archived_collision_count=resolvable_count,
+        resolvable_archived_collisions_truncated=(
+            resolvable_count > _OVERLAP_LIST_LIMIT
+        ),
+        hard_overlaps=hard[:_OVERLAP_LIST_LIMIT],
+        hard_overlap_count=hard_count,
+        hard_overlaps_truncated=hard_count > _OVERLAP_LIST_LIMIT,
+        merge_allowed_with_archived_overwrite=(
+            resolvable_count > 0 and hard_count == 0
+        ),
+        requires_explicit_overwrite=resolvable_count > 0,
+        collision_signature=collision_signature,
+        all_resolvable_archived_collisions=resolvable,
     )
 
 
@@ -3660,6 +4085,15 @@ def rename_lot(
     return lot
 
 
+def _bounded_merge_ids(ids: list[int]) -> dict[str, object]:
+    ordered = sorted(set(ids))
+    return {
+        "ids": ordered[:_OVERLAP_LIST_LIMIT],
+        "count": len(ordered),
+        "truncated": len(ordered) > _OVERLAP_LIST_LIMIT,
+    }
+
+
 def merge_lots(
     db: Session,
     *,
@@ -3669,14 +4103,21 @@ def merge_lots(
     reason: str,
     expected_source_version: int,
     expected_target_version: int,
+    overwrite_archived_collisions: bool = False,
+    expected_collision_signature: str | None = None,
     commit: bool = True,
 ) -> LotMergeResult:
-    """Merge source into target after locking and revalidating every identity."""
+    """Merge source into target after locking and revalidating the full graph."""
     if user.role != UserRole.admin:
         raise LotAccessError("lot merge requires admin role")
     cleaned_reason = reason.strip()
     if not cleaned_reason:
         raise LotRuleError("a reason is required to merge lots")
+    if not overwrite_archived_collisions and expected_collision_signature is not None:
+        raise LotRuleError(
+            "expected_collision_signature is only allowed when "
+            "overwrite_archived_collisions is true"
+        )
     if source_lot_id == target_lot_id:
         raise LotMergeConflictError(
             "source and target lots must differ",
@@ -3701,6 +4142,45 @@ def merge_lots(
             source=source,
             target=target,
         )
+
+    boxes = list(db.scalars(_merge_box_lock_statement(ordered_ids)).all())
+    preliminary_candidate = _merge_candidate(db, source, target)
+    removed_box_ids = sorted(
+        collision.removed_box_id
+        for collision in preliminary_candidate.all_resolvable_archived_collisions
+    )
+    request_items = list(
+        db.scalars(
+            _merge_request_item_lock_statement(source.id, removed_box_ids)
+        ).all()
+    )
+    discrepancies = (
+        list(
+            db.scalars(
+                _merge_discrepancy_lock_statement(removed_box_ids)
+            ).all()
+        )
+        if removed_box_ids
+        else []
+    )
+    affected_request_ids = sorted(
+        {
+            item.request_id for item in request_items
+        }
+        | {discrepancy.request_id for discrepancy in discrepancies}
+    )
+    if affected_request_ids:
+        list(db.scalars(_merge_request_lock_statement(affected_request_ids)).all())
+    removed_box_events = (
+        list(db.scalars(_merge_box_event_lock_statement(removed_box_ids)).all())
+        if removed_box_ids
+        else []
+    )
+    box_event_ids = [event.id for event in removed_box_events]
+
+    # This is the authoritative candidate: it is rebuilt only after every row
+    # that can affect the merge decision or be mutated by it is locked.
+    candidate = _merge_candidate(db, source, target)
     if source.version != expected_source_version:
         raise LotMergeConflictError(
             (
@@ -3710,7 +4190,7 @@ def merge_lots(
             code="source_version_conflict",
             source=source,
             target=target,
-            candidate=_merge_candidate(db, source, target),
+            candidate=candidate,
         )
     if target.version != expected_target_version:
         raise LotMergeConflictError(
@@ -3721,19 +4201,23 @@ def merge_lots(
             code="target_version_conflict",
             source=source,
             target=target,
-            candidate=_merge_candidate(db, source, target),
+            candidate=candidate,
         )
-
-    boxes = list(
-        db.scalars(
-            select(Box)
-            .where(Box.lot_id.in_(ordered_ids))
-            .order_by(Box.id)
-            .with_for_update(of=Box)
-        ).all()
-    )
-    candidate = _merge_candidate(db, source, target)
-    if not candidate.merge_allowed:
+    if (
+        overwrite_archived_collisions
+        and expected_collision_signature != candidate.collision_signature
+    ):
+        raise LotMergeConflictError(
+            "collision graph changed or was not acknowledged; preview the merge again",
+            code="overlap_signature_mismatch",
+            source=source,
+            target=target,
+            candidate=candidate,
+        )
+    if not candidate.merge_allowed and (
+        not overwrite_archived_collisions
+        or not candidate.merge_allowed_with_archived_overwrite
+    ):
         raise LotMergeConflictError(
             "lots have overlapping physical box numbers",
             code="box_number_overlap",
@@ -3742,21 +4226,131 @@ def merge_lots(
             candidate=candidate,
         )
 
-    request_items = list(
-        db.scalars(
-            select(BoxRequestItem)
-            .where(BoxRequestItem.lot_id == source.id)
-            .order_by(BoxRequestItem.id)
-            .with_for_update()
-        ).all()
+    boxes_by_id = {box.id: box for box in boxes}
+    execution_collisions = candidate.all_resolvable_archived_collisions
+    current_removed_box_ids = sorted(
+        collision.removed_box_id for collision in execution_collisions
+    )
+    if current_removed_box_ids != removed_box_ids:
+        raise LotMergeConflictError(
+            "collision graph changed while rows were being locked",
+            code="overlap_signature_mismatch",
+            source=source,
+            target=target,
+            candidate=candidate,
+        )
+    for collision in execution_collisions:
+        removed = boxes_by_id.get(collision.removed_box_id)
+        survivor = boxes_by_id.get(collision.survivor_box_id)
+        if removed is None or survivor is None or removed.archived_at is None:
+            raise LotMergeConflictError(
+                "an overwrite survivor is no longer safe",
+                code="box_number_overlap",
+                source=source,
+                target=target,
+                candidate=candidate,
+            )
+
+    removed_to_survivor = {
+        collision.removed_box_id: collision.survivor_box_id
+        for collision in execution_collisions
+    }
+    event_ids_by_box: dict[int, list[int]] = {
+        removed_id: [] for removed_id in removed_box_ids
+    }
+    box_events_by_box: dict[int, list[BoxEvent]] = {
+        removed_id: [] for removed_id in removed_box_ids
+    }
+    for event in removed_box_events:
+        event_ids_by_box[event.box_id].append(event.id)
+        box_events_by_box[event.box_id].append(event)
+    items_by_removed_box: dict[int, list[BoxRequestItem]] = {
+        box_id: [] for box_id in removed_box_ids
+    }
+    for item in request_items:
+        if item.box_id in items_by_removed_box:
+            items_by_removed_box[item.box_id].append(item)
+    discrepancies_by_removed_box: dict[int, list[BoxRequestDiscrepancy]] = {
+        box_id: [] for box_id in removed_box_ids
+    }
+    for discrepancy in discrepancies:
+        if discrepancy.box_id in discrepancies_by_removed_box:
+            discrepancies_by_removed_box[discrepancy.box_id].append(discrepancy)
+
+    collision_snapshots: list[dict[str, object]] = []
+    for collision in execution_collisions:
+        survivor = boxes_by_id[collision.survivor_box_id]
+        removed = boxes_by_id[collision.removed_box_id]
+        collision_item_ids = [
+            item.id for item in items_by_removed_box[removed.id]
+        ]
+        collision_discrepancy_ids = [
+            discrepancy.id
+            for discrepancy in discrepancies_by_removed_box[removed.id]
+        ]
+        collision_event_ids = event_ids_by_box[removed.id]
+        collision_snapshots.append(
+            {
+                "box_number": collision.box_number,
+                "survivor": {
+                    "box_id": survivor.id,
+                    "box_number": survivor.box_number,
+                    "lot_side": collision.survivor_lot_side,
+                    "status": survivor.status.value,
+                    "archived_at": _collision_timestamp(survivor.archived_at),
+                },
+                "removed": {
+                    "box_id": removed.id,
+                    "box_number": removed.box_number,
+                    "lot_side": collision.removed_lot_side,
+                    "status": removed.status.value,
+                    "archived_at": _collision_timestamp(removed.archived_at),
+                },
+                "relinked_request_items": _bounded_merge_ids(collision_item_ids),
+                "relinked_discrepancies": _bounded_merge_ids(
+                    collision_discrepancy_ids
+                ),
+                "deleted_box_events": _bounded_merge_ids(collision_event_ids),
+                "deleted_box_event_snapshots": [
+                    _box_event_signature_value(event)
+                    for event in box_events_by_box[removed.id][:_OVERLAP_LIST_LIMIT]
+                ],
+                "deleted_box_event_snapshots_truncated": (
+                    len(box_events_by_box[removed.id]) > _OVERLAP_LIST_LIMIT
+                ),
+            }
+        )
+
+    source_request_items = [
+        item for item in request_items if item.lot_id == source.id
+    ]
+    removed_id_set = set(removed_box_ids)
+    moved_boxes = [
+        box
+        for box in boxes
+        if box.lot_id == source.id and box.id not in removed_id_set
+    ]
+    relinked_item_ids = sorted(
+        item.id
+        for item in request_items
+        if item.box_id in removed_to_survivor
+    )
+    relinked_discrepancy_ids = sorted(
+        discrepancy.id
+        for discrepancy in discrepancies
+        if discrepancy.box_id in removed_to_survivor
+    )
+    survivor_box_ids = sorted(
+        {collision.survivor_box_id for collision in execution_collisions}
     )
     request_warehouse_ids = set(
         db.scalars(
-            select(BoxRequest.warehouse_id)
-            .join(BoxRequestItem, BoxRequestItem.request_id == BoxRequest.id)
-            .where(BoxRequestItem.lot_id == source.id)
-            .distinct()
+            select(BoxRequest.warehouse_id).where(
+                BoxRequest.id.in_(affected_request_ids)
+            )
         ).all()
+        if affected_request_ids
+        else []
     )
     warehouse_ids = sorted(
         {
@@ -3772,24 +4366,7 @@ def merge_lots(
     target_name = target.name
     source_version = source.version
     target_version = target.version
-    moved_boxes = [box for box in boxes if box.lot_id == source.id]
-
-    for box in moved_boxes:
-        box.lot_id = target.id
-    for item in request_items:
-        # ``item.lot`` is an immutable historical text snapshot.
-        item.lot_id = target.id
-
     now = datetime.now(UTC)
-    source.normalized_name = None
-    source.merged_into_lot_id = target.id
-    source.merged_at = now
-    source.merged_by_user_id = user.id
-    source.updated_by_user_id = user.id
-    target.updated_by_user_id = user.id
-    # A merge changes the target identity even when the actor was already its
-    # last updater; explicitly advance the optimistic-lock version.
-    target.version = target.version + 1
 
     metadata = {
         "operation": "merge",
@@ -3798,78 +4375,159 @@ def merge_lots(
         "target_lot_id": target.id,
         "target_lot_name": target_name,
         "actor_user_id": user.id,
+        "reason": cleaned_reason,
         "moved_box_count": len(moved_boxes),
-        "moved_request_item_count": len(request_items),
+        "moved_request_item_count": len(source_request_items),
         "expected_source_version": expected_source_version,
         "expected_target_version": expected_target_version,
         "source_version_before": source_version,
         "target_version_before": target_version,
+        "overwrite_archived_collisions": overwrite_archived_collisions,
+        "collision_signature": (
+            candidate.collision_signature
+            if overwrite_archived_collisions
+            else None
+        ),
+        "overwrite_collisions": collision_snapshots[:_OVERLAP_LIST_LIMIT],
+        "overwrite_collision_count": len(collision_snapshots),
+        "overwrite_collisions_truncated": (
+            len(collision_snapshots) > _OVERLAP_LIST_LIMIT
+        ),
+        "survivor_boxes": _bounded_merge_ids(survivor_box_ids),
+        "removed_boxes": _bounded_merge_ids(removed_box_ids),
+        "relinked_request_items": _bounded_merge_ids(relinked_item_ids),
+        "relinked_discrepancies": _bounded_merge_ids(
+            relinked_discrepancy_ids
+        ),
+        "deleted_box_events": _bounded_merge_ids(box_event_ids),
+        "totals": {
+            "overwritten_archived_box_count": len(removed_box_ids),
+            "relinked_request_item_count": len(relinked_item_ids),
+            "relinked_discrepancy_count": len(relinked_discrepancy_ids),
+            "deleted_box_event_count": len(box_event_ids),
+            "moved_box_count": len(moved_boxes),
+            "moved_request_item_count": len(source_request_items),
+        },
     }
-    db.add_all(
-        [
-            LotEvent(
-                lot_id=source.id,
-                event_type=LotEventType.merged,
-                old_name=source_name,
-                new_name=target_name,
-                actor_user_id=user.id,
-                reason=cleaned_reason,
-                event_metadata={**metadata, "event_side": "source"},
-            ),
-            LotEvent(
-                lot_id=target.id,
-                event_type=LotEventType.merged,
-                old_name=source_name,
-                new_name=target_name,
-                actor_user_id=user.id,
-                reason=cleaned_reason,
-                event_metadata={**metadata, "event_side": "target"},
-            ),
-        ]
-    )
-    db.add_all(
-        [
-            BoxEvent(
-                box_id=box.id,
-                warehouse_id=box.current_warehouse_id,
-                event_type=BoxEventType.lot_reassigned,
-                from_status=box.status,
-                to_status=box.status,
-                from_warehouse_id=box.current_warehouse_id,
-                to_warehouse_id=box.current_warehouse_id,
-                occurred_at=now,
-                user_id=user.id,
-                note=cleaned_reason,
-                event_metadata={
-                    **metadata,
-                    "operation": "lot_merge",
-                    "box_id": box.id,
-                    "box_number": box.box_number,
-                    "box_was_archived": box.archived_at is not None,
-                },
-            )
-            for box in moved_boxes
-        ]
-    )
+
     try:
-        db.flush()
+        with db.begin_nested():
+            for item in request_items:
+                survivor_id = removed_to_survivor.get(item.box_id)
+                if survivor_id is not None:
+                    item.box_id = survivor_id
+            for discrepancy in discrepancies:
+                survivor_id = removed_to_survivor.get(discrepancy.box_id)
+                if survivor_id is not None:
+                    discrepancy.box_id = survivor_id
+            if box_event_ids:
+                db.execute(
+                    delete(BoxEvent)
+                    .where(BoxEvent.id.in_(box_event_ids))
+                    .execution_options(synchronize_session="fetch")
+                )
+            for removed_box_id in removed_box_ids:
+                db.delete(boxes_by_id[removed_box_id])
+            # Free target-side unique box numbers before source survivors move.
+            db.flush()
+
+            for box in moved_boxes:
+                box.lot_id = target.id
+            for item in source_request_items:
+                # ``item.lot`` is an immutable historical text snapshot.
+                item.lot_id = target.id
+
+            source.normalized_name = None
+            source.merged_into_lot_id = target.id
+            source.merged_at = now
+            source.merged_by_user_id = user.id
+            source.updated_by_user_id = user.id
+            target.updated_by_user_id = user.id
+            target.version = target.version + 1
+
+            db.add_all(
+                [
+                    LotEvent(
+                        lot_id=source.id,
+                        event_type=LotEventType.merged,
+                        old_name=source_name,
+                        new_name=target_name,
+                        actor_user_id=user.id,
+                        reason=cleaned_reason,
+                        event_metadata={**metadata, "event_side": "source"},
+                    ),
+                    LotEvent(
+                        lot_id=target.id,
+                        event_type=LotEventType.merged,
+                        old_name=source_name,
+                        new_name=target_name,
+                        actor_user_id=user.id,
+                        reason=cleaned_reason,
+                        event_metadata={**metadata, "event_side": "target"},
+                    ),
+                ]
+            )
+            db.add_all(
+                [
+                    BoxEvent(
+                        box_id=box.id,
+                        warehouse_id=box.current_warehouse_id,
+                        event_type=BoxEventType.lot_reassigned,
+                        from_status=box.status,
+                        to_status=box.status,
+                        from_warehouse_id=box.current_warehouse_id,
+                        to_warehouse_id=box.current_warehouse_id,
+                        occurred_at=now,
+                        user_id=user.id,
+                        note=cleaned_reason,
+                        event_metadata={
+                            **metadata,
+                            "operation": "lot_merge",
+                            "box_id": box.id,
+                            "box_number": box.box_number,
+                            "box_was_archived": box.archived_at is not None,
+                        },
+                    )
+                    for box in moved_boxes
+                ]
+            )
+            db.flush()
     except IntegrityError as exc:
+        refreshed_candidate = _merge_candidate(db, source, target)
+        if commit:
+            db.rollback()
         raise LotMergeConflictError(
             "merge conflicted with a concurrent inventory change",
             code="merge_integrity_conflict",
             source=source,
             target=target,
+            candidate=refreshed_candidate,
         ) from exc
+    except Exception:
+        if commit:
+            db.rollback()
+        raise
+
     if commit:
-        db.commit()
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
         db.refresh(source)
         db.refresh(target)
     return LotMergeResult(
         source=source,
         target=target,
         moved_box_count=len(moved_boxes),
-        moved_request_item_count=len(request_items),
+        moved_request_item_count=len(source_request_items),
         warehouse_ids=warehouse_ids,
+        overwritten_archived_box_count=len(removed_box_ids),
+        relinked_request_item_count=len(relinked_item_ids),
+        relinked_discrepancy_count=len(relinked_discrepancy_ids),
+        deleted_box_event_count=len(box_event_ids),
+        survivor_box_ids=survivor_box_ids,
+        removed_box_ids=removed_box_ids,
     )
 
 

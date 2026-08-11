@@ -868,6 +868,31 @@ export interface MergedLot {
   merged_into: LotIdentity;
 }
 
+export type LotMergeSide = "source" | "target";
+
+export interface LotArchivedBoxCollision {
+  box_number: string;
+  source_box_id: number;
+  source_box_archived: boolean;
+  target_box_id: number;
+  target_box_archived: boolean;
+  survivor_box_id: number;
+  survivor_lot_side: LotMergeSide;
+  removed_box_id: number;
+  removed_lot_side: LotMergeSide;
+  request_item_relink_count: number;
+  discrepancy_relink_count: number;
+  box_event_delete_count: number;
+}
+
+export interface LotHardBoxOverlap {
+  box_number: string;
+  source_box_ids: number[];
+  target_box_ids: number[];
+  source_active_box_ids: number[];
+  target_active_box_ids: number[];
+}
+
 export interface LotMergeCandidate {
   source: LotIdentity;
   target: LotIdentity;
@@ -875,20 +900,43 @@ export interface LotMergeCandidate {
   overlapping_box_numbers: string[];
   overlapping_box_count: number;
   overlap_list_truncated: boolean;
+  resolvable_archived_collisions: LotArchivedBoxCollision[];
+  resolvable_archived_collision_count: number;
+  resolvable_archived_collisions_truncated: boolean;
+  hard_overlaps: LotHardBoxOverlap[];
+  hard_overlap_count: number;
+  hard_overlaps_truncated: boolean;
+  merge_allowed_with_archived_overwrite: boolean;
+  requires_explicit_overwrite: boolean;
+  collision_signature: string;
 }
 
-export interface LotMergePayload {
+interface LotMergePayloadBase {
   target_lot_id: number;
   reason: string;
   expected_source_version: number;
   expected_target_version: number;
 }
 
+export type LotMergePayload =
+  | (LotMergePayloadBase & {
+      overwrite_archived_collisions?: false;
+      expected_collision_signature?: never;
+    })
+  | (LotMergePayloadBase & {
+      overwrite_archived_collisions: true;
+      expected_collision_signature: string;
+    });
+
 export interface LotMergeResult {
   source: LotIdentity;
   target: LotIdentity;
   moved_box_count: number;
   moved_request_item_count: number;
+  overwritten_archived_box_count: number;
+  relinked_request_item_count: number;
+  relinked_discrepancy_count: number;
+  deleted_box_event_count: number;
 }
 
 export interface LotOption {

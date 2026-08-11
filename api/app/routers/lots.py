@@ -33,6 +33,8 @@ from app.schemas.lots import (
     LotForcePurgeResultOut,
     LotIdentityOut,
     LotMerge,
+    LotMergeCandidateOut,
+    LotMergeConflictResponse,
     LotMergeOut,
     LotOptionOut,
     LotProgressState,
@@ -43,6 +45,7 @@ from app.schemas.lots import (
     LotPurgePreviewOut,
     LotPurgeResultOut,
     LotRename,
+    LotRenameConflictResponse,
     LotSortField,
     LotSummaryOut,
     MergedLotOut,
@@ -127,22 +130,37 @@ def _lot_identity(lot: Lot | None) -> dict[str, object] | None:
 
 
 def _candidate_detail(candidate: LotMergeCandidate) -> dict[str, object]:
-    return {
-        "source": {
-            "id": candidate.source_id,
-            "name": candidate.source_name,
-            "version": candidate.source_version,
-        },
-        "target": {
-            "id": candidate.target_id,
-            "name": candidate.target_name,
-            "version": candidate.target_version,
-        },
-        "merge_allowed": candidate.merge_allowed,
-        "overlapping_box_numbers": candidate.overlapping_box_numbers,
-        "overlapping_box_count": candidate.overlapping_box_count,
-        "overlap_list_truncated": candidate.overlap_list_truncated,
-    }
+    return LotMergeCandidateOut(
+        source=LotIdentityOut(
+            id=candidate.source_id,
+            name=candidate.source_name,
+            version=candidate.source_version,
+        ),
+        target=LotIdentityOut(
+            id=candidate.target_id,
+            name=candidate.target_name,
+            version=candidate.target_version,
+        ),
+        merge_allowed=candidate.merge_allowed,
+        overlapping_box_numbers=candidate.overlapping_box_numbers,
+        overlapping_box_count=candidate.overlapping_box_count,
+        overlap_list_truncated=candidate.overlap_list_truncated,
+        resolvable_archived_collisions=candidate.resolvable_archived_collisions,
+        resolvable_archived_collision_count=(
+            candidate.resolvable_archived_collision_count
+        ),
+        resolvable_archived_collisions_truncated=(
+            candidate.resolvable_archived_collisions_truncated
+        ),
+        hard_overlaps=candidate.hard_overlaps,
+        hard_overlap_count=candidate.hard_overlap_count,
+        hard_overlaps_truncated=candidate.hard_overlaps_truncated,
+        merge_allowed_with_archived_overwrite=(
+            candidate.merge_allowed_with_archived_overwrite
+        ),
+        requires_explicit_overwrite=candidate.requires_explicit_overwrite,
+        collision_signature=candidate.collision_signature,
+    ).model_dump(mode="json")
 
 
 async def _publish_for_lot(
@@ -662,7 +680,11 @@ def list_lot_boxes(
     )
 
 
-@router.patch("/{lot_id}/rename", response_model=LotSummaryOut)
+@router.patch(
+    "/{lot_id}/rename",
+    response_model=LotSummaryOut,
+    responses={409: {"model": LotRenameConflictResponse}},
+)
 async def rename(
     lot_id: int,
     payload: LotRename,
@@ -722,7 +744,11 @@ async def rename(
     return _summary_out(summary)
 
 
-@router.post("/{source_id}/merge", response_model=LotMergeOut)
+@router.post(
+    "/{source_id}/merge",
+    response_model=LotMergeOut,
+    responses={409: {"model": LotMergeConflictResponse}},
+)
 async def merge(
     source_id: int,
     payload: LotMerge,
@@ -738,6 +764,8 @@ async def merge(
             reason=payload.reason,
             expected_source_version=payload.expected_source_version,
             expected_target_version=payload.expected_target_version,
+            overwrite_archived_collisions=payload.overwrite_archived_collisions,
+            expected_collision_signature=payload.expected_collision_signature,
         )
     except LotMergeConflictError as exc:
         db.rollback()
@@ -760,6 +788,9 @@ async def merge(
     except LotRuleError as exc:
         db.rollback()
         raise _lot_error(exc) from exc
+    except Exception:
+        db.rollback()
+        raise
 
     event_data = {
         "id": result.target.id,
@@ -771,6 +802,12 @@ async def merge(
         "target_version": result.target.version,
         "moved_box_count": result.moved_box_count,
         "moved_request_item_count": result.moved_request_item_count,
+        "overwritten_archived_box_count": result.overwritten_archived_box_count,
+        "relinked_request_item_count": result.relinked_request_item_count,
+        "relinked_discrepancy_count": result.relinked_discrepancy_count,
+        "deleted_box_event_count": result.deleted_box_event_count,
+        "survivor_box_ids": result.survivor_box_ids,
+        "removed_box_ids": result.removed_box_ids,
     }
     if result.warehouse_ids:
         for warehouse_id in result.warehouse_ids:
@@ -793,6 +830,10 @@ async def merge(
         ),
         moved_box_count=result.moved_box_count,
         moved_request_item_count=result.moved_request_item_count,
+        overwritten_archived_box_count=result.overwritten_archived_box_count,
+        relinked_request_item_count=result.relinked_request_item_count,
+        relinked_discrepancy_count=result.relinked_discrepancy_count,
+        deleted_box_event_count=result.deleted_box_event_count,
     )
 
 

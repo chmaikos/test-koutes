@@ -1,10 +1,15 @@
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import { useMergeLots, useRenameLot } from "@/api/hooks";
 import type { LotMergeCandidate, LotSummary } from "@/api/types";
 import {
   lotConflictCurrent,
   lotMergeCandidate,
+  lotMergeCandidateClassification,
+  lotMergeConfirmationIsValid,
   lotMergeConflictCode,
+  lotMergeConflictFormState,
+  lotMergeConflictNeedsRefresh,
   lotMergePayload,
   lotRenamePayload,
   renameValidation,
@@ -27,11 +32,15 @@ export function RenameLotDialog({
   const [error, setError] = useState<string | null>(null);
   const [latestMessage, setLatestMessage] = useState<string | null>(null);
   const [candidate, setCandidate] = useState<LotMergeCandidate | null>(null);
+  const [overwriteAcknowledged, setOverwriteAcknowledged] = useState(false);
+  const mergeClassification = candidate
+    ? lotMergeCandidateClassification(candidate)
+    : null;
 
   return (
     <div className="modal-backdrop z-40">
       <form
-        className="modal-sheet max-w-md"
+        className="modal-sheet max-w-2xl"
         role="dialog"
         aria-modal="true"
         aria-labelledby="rename-lot-title"
@@ -56,6 +65,7 @@ export function RenameLotDialog({
             if (mergeCandidate) {
               setVersion(mergeCandidate.source.version);
               setCandidate(mergeCandidate);
+              setOverwriteAcknowledged(false);
               return;
             }
             const latest = lotConflictCurrent(caught);
@@ -96,6 +106,7 @@ export function RenameLotDialog({
             onChange={(event) => {
               setName(event.target.value);
               setCandidate(null);
+              setOverwriteAcknowledged(false);
             }}
           />
         </label>
@@ -119,44 +130,165 @@ export function RenameLotDialog({
           </p>
         )}
         {candidate && (
-          <div
-            role="status"
+          <section
+            aria-labelledby="merge-candidate-title"
             className="mt-3 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950"
           >
-            <p className="font-semibold">
+            <h3 id="merge-candidate-title" className="font-semibold">
               Lot “{candidate.target.name}” already exists.
-            </p>
-            {candidate.merge_allowed ? (
+            </h3>
+            {mergeClassification === "normal" && (
               <p className="mt-1">
                 You may merge “{candidate.source.name}” into it. Every current
                 and archived box and current lot link will move to the target;
                 historical request and XLSX text remains unchanged. This action
                 is explicit and audited.
               </p>
-            ) : (
+            )}
+            {mergeClassification === "resolvable" && (
               <>
-                <p className="mt-1 font-medium text-rose-700">
-                  Merge is blocked because both lots contain the following box
-                  numbers:
+                <p className="mt-1 font-semibold text-rose-800">
+                  This merge can continue only by permanently overwriting{" "}
+                  {candidate.resolvable_archived_collision_count} archived{" "}
+                  {candidate.resolvable_archived_collision_count === 1
+                    ? "box"
+                    : "boxes"}
+                  .
                 </p>
-                <ul className="mt-1 list-inside list-disc font-mono text-rose-700">
-                  {candidate.overlapping_box_numbers.map((number) => (
-                    <li key={number}>{number}</li>
-                  ))}
+                <p className="mt-1">
+                  The active box wins. When both boxes are archived, the target
+                  lot&apos;s box is kept. Each removed archived box and its box
+                  events are permanently deleted. Request-item and discrepancy
+                  history is relinked to the survivor; immutable historical lot
+                  and box text remains unchanged.
+                </p>
+                <ul className="mt-3 space-y-2">
+                  {candidate.resolvable_archived_collisions.map((collision) => {
+                    const survivorArchived =
+                      collision.survivor_lot_side === "source"
+                        ? collision.source_box_archived
+                        : collision.target_box_archived;
+                    const survivorLot =
+                      collision.survivor_lot_side === "source"
+                        ? candidate.source
+                        : candidate.target;
+                    const removedLot =
+                      collision.removed_lot_side === "source"
+                        ? candidate.source
+                        : candidate.target;
+                    return (
+                      <li
+                        key={`${collision.box_number}-${collision.removed_box_id}`}
+                        className="rounded border border-amber-300 bg-white/70 p-2"
+                      >
+                        <span className="font-semibold">
+                          Box number {collision.box_number}
+                        </span>
+                        <span className="mt-1 block">
+                          Remove archived box{" "}
+                          <Link
+                            className="font-medium text-brand-700 underline"
+                            to={`/boxes/${collision.removed_box_id}`}
+                          >
+                            #{collision.removed_box_id}
+                          </Link>{" "}
+                          from {removedLot.name} ({collision.removed_lot_side});
+                          keep{" "}
+                          <Link
+                            className="font-medium text-brand-700 underline"
+                            to={`/boxes/${collision.survivor_box_id}`}
+                          >
+                            box #{collision.survivor_box_id}
+                          </Link>{" "}
+                          from {survivorLot.name} (
+                          {collision.survivor_lot_side},{" "}
+                          {survivorArchived ? "archived" : "active"}).
+                        </span>
+                        <span className="mt-1 block text-slate-700">
+                          Relink {collision.request_item_relink_count} request{" "}
+                          {collision.request_item_relink_count === 1
+                            ? "item"
+                            : "items"}{" "}
+                          and {collision.discrepancy_relink_count}{" "}
+                          {collision.discrepancy_relink_count === 1
+                            ? "discrepancy"
+                            : "discrepancies"}
+                          ; permanently remove {collision.box_event_delete_count}{" "}
+                          box{" "}
+                          {collision.box_event_delete_count === 1
+                            ? "event"
+                            : "events"}
+                          .
+                        </span>
+                      </li>
+                    );
+                  })}
                 </ul>
-                {candidate.overlap_list_truncated && (
-                  <p className="mt-1 text-rose-700">
-                    Showing {candidate.overlapping_box_numbers.length} of{" "}
-                    {candidate.overlapping_box_count} overlaps.
+                {candidate.resolvable_archived_collisions_truncated && (
+                  <p className="mt-2 font-medium text-rose-800">
+                    Showing{" "}
+                    {candidate.resolvable_archived_collisions.length} of{" "}
+                    {candidate.resolvable_archived_collision_count} archived
+                    overwrites. All will be applied.
                   </p>
                 )}
-                <p className="mt-1">
-                  Reassign or otherwise resolve every duplicate physical box
-                  number, including archived boxes, then try again.
+                <label
+                  className="mt-3 flex items-start gap-2 rounded border border-rose-300 bg-rose-50 p-3 text-rose-950"
+                  htmlFor="acknowledge-archived-overwrite"
+                >
+                  <input
+                    id="acknowledge-archived-overwrite"
+                    type="checkbox"
+                    className="mt-0.5"
+                    checked={overwriteAcknowledged}
+                    disabled={merge.isPending}
+                    onChange={(event) =>
+                      setOverwriteAcknowledged(event.target.checked)
+                    }
+                  />
+                  <span>
+                    I understand that all{" "}
+                    {candidate.resolvable_archived_collision_count} archived
+                    collision boxes and their box events will be permanently
+                    removed, including any entries omitted from the bounded
+                    list above, while linked request and discrepancy history
+                    will be preserved on the survivor.
+                  </span>
+                </label>
+              </>
+            )}
+            {mergeClassification === "hard" && (
+              <>
+                <p className="mt-1 font-semibold text-rose-800">
+                  Merge is blocked by active-active box number overlaps:
+                </p>
+                <ul className="mt-2 space-y-1 text-rose-800">
+                  {candidate.hard_overlaps.map((overlap) => (
+                    <li key={overlap.box_number}>
+                      <span className="font-mono font-semibold">
+                        {overlap.box_number}
+                      </span>{" "}
+                      — source active box IDs{" "}
+                      {overlap.source_active_box_ids.join(", ") || "none"};
+                      target active box IDs{" "}
+                      {overlap.target_active_box_ids.join(", ") || "none"}
+                    </li>
+                  ))}
+                </ul>
+                {candidate.hard_overlaps_truncated && (
+                  <p className="mt-1 text-rose-800">
+                    Showing {candidate.hard_overlaps.length} of{" "}
+                    {candidate.hard_overlap_count} hard overlaps.
+                  </p>
+                )}
+                <p className="mt-2">
+                  Reassign, renumber, or archive one physical box for every
+                  active-active number, then retry the rename and review a new
+                  merge preview.
                 </p>
               </>
             )}
-          </div>
+          </section>
         )}
         {error && (
           <p role="alert" className="mt-3 text-sm text-rose-600">
@@ -172,41 +304,57 @@ export function RenameLotDialog({
           >
             Cancel
           </button>
-          {candidate ? (
+          {candidate && mergeClassification !== "hard" ? (
             <button
               type="button"
-              className={candidate.merge_allowed ? "btn-danger" : "btn-secondary"}
+              className="btn-danger"
               disabled={
-                !candidate.merge_allowed || merge.isPending || !reason.trim()
+                merge.isPending ||
+                !lotMergeConfirmationIsValid(
+                  candidate,
+                  reason,
+                  overwriteAcknowledged,
+                )
               }
               onClick={async () => {
-                if (!candidate.merge_allowed) return;
+                if (
+                  !lotMergeConfirmationIsValid(
+                    candidate,
+                    reason,
+                    overwriteAcknowledged,
+                  )
+                ) {
+                  return;
+                }
                 setError(null);
                 setLatestMessage(null);
                 try {
                   const result = await merge.mutateAsync({
                     sourceId: lot.id,
-                    payload: lotMergePayload(candidate, reason),
+                    payload: lotMergePayload(
+                      candidate,
+                      reason,
+                      mergeClassification === "resolvable",
+                    ),
                   });
                   onClose();
                   onMerged(result.target.id);
                 } catch (caught) {
                   const refreshed = lotMergeCandidate(caught);
                   const code = lotMergeConflictCode(caught);
-                  if (
-                    refreshed &&
-                    (code === "source_version_conflict" ||
-                      code === "target_version_conflict" ||
-                      code === "box_number_overlap")
-                  ) {
+                  if (refreshed && lotMergeConflictNeedsRefresh(code)) {
+                    const reset = lotMergeConflictFormState(reason);
                     setCandidate(refreshed);
                     setVersion(refreshed.source.version);
+                    setReason(reset.reason);
+                    setOverwriteAcknowledged(reset.overwriteAcknowledged);
                     setLatestMessage(
-                      "The source, target, or box inventory changed. The latest merge check is loaded; review it and explicitly confirm again.",
+                      "The source, target, overlap, or linked inventory graph changed. The latest merge check is loaded; review it and explicitly confirm again.",
                     );
                     return;
                   }
                   setCandidate(null);
+                  setOverwriteAcknowledged(false);
                   setError(
                     code === "already_merged"
                       ? "One of these lots has already been merged. Reload the lot details."
@@ -217,11 +365,15 @@ export function RenameLotDialog({
             >
               {merge.isPending
                 ? "Merging…"
-                : candidate.merge_allowed
-                  ? `Merge into “${candidate.target.name}”`
-                  : "Merge blocked by box overlaps"}
+                : mergeClassification === "resolvable"
+                  ? `Merge and overwrite ${candidate.resolvable_archived_collision_count} archived ${
+                      candidate.resolvable_archived_collision_count === 1
+                        ? "box"
+                        : "boxes"
+                    }`
+                  : `Merge into “${candidate.target.name}”`}
             </button>
-          ) : (
+          ) : !candidate ? (
             <button
               type="submit"
               className="btn-primary"
@@ -229,7 +381,7 @@ export function RenameLotDialog({
             >
               {rename.isPending ? "Saving…" : "Confirm correction"}
             </button>
-          )}
+          ) : null}
         </div>
       </form>
     </div>

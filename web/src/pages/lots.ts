@@ -200,6 +200,54 @@ export function lotMergeConflictCode(error: unknown): string | null {
     : null;
 }
 
+export type LotMergeCandidateClassification = "normal" | "resolvable" | "hard";
+
+export function lotMergeCandidateClassification(
+  candidate: LotMergeCandidate,
+): LotMergeCandidateClassification {
+  if (candidate.merge_allowed) return "normal";
+  if (
+    candidate.merge_allowed_with_archived_overwrite &&
+    candidate.requires_explicit_overwrite &&
+    candidate.hard_overlap_count === 0 &&
+    candidate.resolvable_archived_collision_count > 0
+  ) {
+    return "resolvable";
+  }
+  return "hard";
+}
+
+export function lotMergeConfirmationIsValid(
+  candidate: LotMergeCandidate,
+  reason: string,
+  overwriteAcknowledged: boolean,
+): boolean {
+  const classification = lotMergeCandidateClassification(candidate);
+  return (
+    reason.trim().length > 0 &&
+    reason.trim().length <= 2000 &&
+    (classification === "normal" ||
+      (classification === "resolvable" && overwriteAcknowledged))
+  );
+}
+
+export function lotMergeConflictNeedsRefresh(code: string | null): boolean {
+  return (
+    code === "source_version_conflict" ||
+    code === "target_version_conflict" ||
+    code === "box_number_overlap" ||
+    code === "overlap_signature_mismatch" ||
+    code === "merge_integrity_conflict"
+  );
+}
+
+export function lotMergeConflictFormState(reason: string): {
+  reason: string;
+  overwriteAcknowledged: false;
+} {
+  return { reason, overwriteAcknowledged: false };
+}
+
 export function lotRenamePayload(
   name: string,
   reason: string,
@@ -215,12 +263,24 @@ export function lotRenamePayload(
 export function lotMergePayload(
   candidate: LotMergeCandidate,
   reason: string,
+  overwriteArchivedCollisions = false,
 ): LotMergePayload {
-  return {
+  const base = {
     target_lot_id: candidate.target.id,
     reason: reason.trim(),
     expected_source_version: candidate.source.version,
     expected_target_version: candidate.target.version,
+  };
+  if (
+    !overwriteArchivedCollisions ||
+    lotMergeCandidateClassification(candidate) !== "resolvable"
+  ) {
+    return base;
+  }
+  return {
+    ...base,
+    overwrite_archived_collisions: true,
+    expected_collision_signature: candidate.collision_signature,
   };
 }
 

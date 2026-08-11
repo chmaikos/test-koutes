@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type {
   LotForcePurgePreview,
+  LotMergeCandidate,
   LotOption,
   LotPurgeBlocker,
   LotPurgePreview,
@@ -21,7 +22,11 @@ import {
   lotForcePurgeConflict,
   lotForcePurgePayload,
   lotMergeCandidate,
+  lotMergeCandidateClassification,
+  lotMergeConfirmationIsValid,
   lotMergeConflictCode,
+  lotMergeConflictFormState,
+  lotMergeConflictNeedsRefresh,
   lotMergePayload,
   lotPurgeBlockerText,
   lotPurgeConflict,
@@ -42,6 +47,29 @@ import {
   shouldOfferForcePurgeEscalation,
   shouldOfferLotCreation,
 } from "@/pages/lots";
+
+function mergeCandidateFixture(
+  overrides: Partial<LotMergeCandidate> = {},
+): LotMergeCandidate {
+  return {
+    source: { id: 1, name: "Source", version: 3 },
+    target: { id: 2, name: "Target", version: 5 },
+    merge_allowed: true,
+    overlapping_box_numbers: [],
+    overlapping_box_count: 0,
+    overlap_list_truncated: false,
+    resolvable_archived_collisions: [],
+    resolvable_archived_collision_count: 0,
+    resolvable_archived_collisions_truncated: false,
+    hard_overlaps: [],
+    hard_overlap_count: 0,
+    hard_overlaps_truncated: false,
+    merge_allowed_with_archived_overwrite: true,
+    requires_explicit_overwrite: false,
+    collision_signature: "a".repeat(64),
+    ...overrides,
+  };
+}
 
 const counts: LotStatusCounts = {
   quarantined: 1,
@@ -157,14 +185,7 @@ describe("audited lot changes", () => {
   });
 
   it("parses an allowed collision and builds an explicit merge payload", () => {
-    const candidate = {
-      source: { id: 1, name: "Source", version: 3 },
-      target: { id: 2, name: "Target", version: 5 },
-      merge_allowed: true,
-      overlapping_box_numbers: [],
-      overlapping_box_count: 0,
-      overlap_list_truncated: false,
-    };
+    const candidate = mergeCandidateFixture();
     const error = {
       response: {
         status: 409,
@@ -178,23 +199,82 @@ describe("audited lot changes", () => {
     };
     expect(lotMergeCandidate(error)).toEqual(candidate);
     expect(lotConflictCurrent(error)).toBeNull();
-    expect(lotMergePayload(candidate, " duplicate identity ")).toEqual({
+    const normalPayload = {
       target_lot_id: 2,
       reason: "duplicate identity",
       expected_source_version: 3,
       expected_target_version: 5,
+    };
+    expect(lotMergePayload(candidate, " duplicate identity ")).toEqual(
+      normalPayload,
+    );
+    expect(lotMergePayload(candidate, " duplicate identity ", true)).toEqual(
+      normalPayload,
+    );
+    expect(lotMergeCandidateClassification(candidate)).toBe("normal");
+    expect(lotMergeConfirmationIsValid(candidate, "reason", false)).toBe(true);
+  });
+
+  it("classifies archived overwrite, gates acknowledgement, and locks its signature", () => {
+    const collisionSignature = "b".repeat(64);
+    const resolvable = mergeCandidateFixture({
+      merge_allowed: false,
+      overlapping_box_numbers: ["001"],
+      overlapping_box_count: 1,
+      resolvable_archived_collisions: [
+        {
+          box_number: "001",
+          source_box_id: 10,
+          source_box_archived: false,
+          target_box_id: 20,
+          target_box_archived: true,
+          survivor_box_id: 10,
+          survivor_lot_side: "source",
+          removed_box_id: 20,
+          removed_lot_side: "target",
+          request_item_relink_count: 2,
+          discrepancy_relink_count: 1,
+          box_event_delete_count: 3,
+        },
+      ],
+      resolvable_archived_collision_count: 1,
+      merge_allowed_with_archived_overwrite: true,
+      requires_explicit_overwrite: true,
+      collision_signature: collisionSignature,
+    });
+    expect(lotMergeCandidateClassification(resolvable)).toBe("resolvable");
+    expect(lotMergeConfirmationIsValid(resolvable, "reason", false)).toBe(false);
+    expect(lotMergeConfirmationIsValid(resolvable, " ", true)).toBe(false);
+    expect(lotMergeConfirmationIsValid(resolvable, "reason", true)).toBe(true);
+    expect(lotMergePayload(resolvable, " confirmed ", true)).toEqual({
+      target_lot_id: 2,
+      reason: "confirmed",
+      expected_source_version: 3,
+      expected_target_version: 5,
+      overwrite_archived_collisions: true,
+      expected_collision_signature: collisionSignature,
     });
   });
 
-  it("parses overlap-disabled and stale merge conflicts", () => {
-    const blocked = {
+  it("hard-blocks active overlaps and parses refreshed merge candidates", () => {
+    const blocked = mergeCandidateFixture({
       source: { id: 1, name: "Source", version: 4 },
       target: { id: 2, name: "Target", version: 6 },
       merge_allowed: false,
       overlapping_box_numbers: ["001", "009"],
       overlapping_box_count: 2,
-      overlap_list_truncated: false,
-    };
+      hard_overlaps: [
+        {
+          box_number: "001",
+          source_box_ids: [10],
+          target_box_ids: [20],
+          source_active_box_ids: [10],
+          target_active_box_ids: [20],
+        },
+      ],
+      hard_overlap_count: 1,
+      merge_allowed_with_archived_overwrite: false,
+    });
     const error = {
       response: {
         status: 409,
@@ -212,6 +292,45 @@ describe("audited lot changes", () => {
       "001",
       "009",
     ]);
+    expect(lotMergeCandidate(error)?.hard_overlaps[0].box_number).toBe("001");
+    expect(lotMergeCandidateClassification(blocked)).toBe("hard");
+    expect(lotMergeConfirmationIsValid(blocked, "reason", true)).toBe(false);
+  });
+
+  it("resets overwrite confirmation on every refreshable conflict", () => {
+    for (const code of [
+      "source_version_conflict",
+      "target_version_conflict",
+      "box_number_overlap",
+      "overlap_signature_mismatch",
+      "merge_integrity_conflict",
+    ]) {
+      expect(lotMergeConflictNeedsRefresh(code)).toBe(true);
+    }
+    expect(lotMergeConflictNeedsRefresh("already_merged")).toBe(false);
+    expect(lotMergeConflictFormState("keep this reason")).toEqual({
+      reason: "keep this reason",
+      overwriteAcknowledged: false,
+    });
+  });
+
+  it("parses the extended candidate from rename and merge conflict responses", () => {
+    const candidate = mergeCandidateFixture({
+      merge_allowed: false,
+      resolvable_archived_collision_count: 1,
+      requires_explicit_overwrite: true,
+    });
+    for (const code of ["name_collision", "overlap_signature_mismatch"]) {
+      expect(
+        lotMergeCandidate({
+          response: {
+            status: 409,
+            data: { detail: { code, merge_candidate: candidate } },
+          },
+        }),
+      ).toEqual(candidate);
+    }
+    expect(lotMergeCandidate({ response: { status: 400 } })).toBeNull();
   });
 
   it("gates reassignment and builds the audited payload", () => {

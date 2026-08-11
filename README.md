@@ -15,8 +15,11 @@ and threshold alerts (in-app + email via Microsoft Graph).
 - Searchable / filterable boxes table with inline status transitions.
 - First-class Lots list/detail views with globally case-insensitive identity,
   status distribution, ACL-scoped completion metrics, audited global rename,
-  safe explicit merge-on-rename (blocked by active or archived box-number
-  overlap), and audited per-box reassignment. Merged source identities remain
+  safe explicit merge-on-rename, and audited per-box reassignment. Active-active
+  box-number overlaps always block a merge. An explicitly confirmed archived
+  collision overwrite keeps the active box, or the target-Lot box when both are
+  archived, relinks request/discrepancy history, and permanently removes only
+  the losing archived box and its Box events. Merged source identities remain
   hidden audit tombstones; historical request/XLSX text is never rewritten.
   Admins also have a guarded permanent purge for erroneous Lots that contain
   only archived boxes and completed, exclusive manual/XLSX self-receipts with
@@ -488,6 +491,27 @@ lot while receiving inventory. Only admins may globally rename a lot or
 reassign one box to another lot; both operations require a reason, optimistic
 version, collision checks, and audit events. Renaming never merges/deletes
 identities, and box reassignment never rewrites request snapshots.
+
+A rename collision never merges implicitly. A separate merge confirmation has
+three states:
+
+- no shared box number: the normal audited merge can be confirmed;
+- one archived box in every shared pair: an additional archived-overwrite
+  acknowledgement is required; the active box always survives, and when both
+  are archived the target-Lot box survives;
+- any active-active overlap: the merge remains hard blocked even if an
+  overwrite flag is submitted.
+
+For an explicitly confirmed archived overwrite, each losing archived box and
+its Box events are permanently removed. Every `BoxRequestItem.box_id` and
+`BoxRequestDiscrepancy.box_id` reference is relinked to the survivor across
+self-receipts, mixed receipts, open or completed returns, and follow-ups.
+Current `BoxRequestItem.lot_id` references from the source move to the target,
+while immutable `BoxRequestItem.lot`/box-number snapshots, requests,
+discrepancies and photos, documents/attachments, notifications, object keys,
+purge ledgers, and unrelated Lots/boxes remain intact. The preview signature,
+Lot audit, API result, and warehouse-scoped SSE event record the affected IDs
+and counts; the SSE payload does not include the operator's reason.
 
 Only an **Admin** can permanently purge an erroneous Lot. The Danger Zone first
 loads a server-side safe-purge preview. A Lot is safely eligible only when it is

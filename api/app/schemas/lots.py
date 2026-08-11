@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.models.lots import LotEventType, LotPurgeCleanupStatus
 
@@ -87,6 +87,25 @@ class LotMerge(BaseModel):
     reason: str = Field(min_length=1, max_length=2000)
     expected_source_version: int = Field(ge=1)
     expected_target_version: int = Field(ge=1)
+    overwrite_archived_collisions: bool = False
+    expected_collision_signature: str | None = Field(
+        default=None,
+        min_length=64,
+        max_length=64,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+
+    @model_validator(mode="after")
+    def validate_collision_overwrite(self) -> LotMerge:
+        if (
+            not self.overwrite_archived_collisions
+            and self.expected_collision_signature is not None
+        ):
+            raise ValueError(
+                "expected_collision_signature is only allowed when "
+                "overwrite_archived_collisions is true"
+            )
+        return self
 
 
 class LotIdentityOut(BaseModel):
@@ -95,11 +114,93 @@ class LotIdentityOut(BaseModel):
     version: int
 
 
+class LotArchivedBoxCollisionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    box_number: str
+    source_box_id: int
+    source_box_archived: bool
+    target_box_id: int
+    target_box_archived: bool
+    survivor_box_id: int
+    survivor_lot_side: Literal["source", "target"]
+    removed_box_id: int
+    removed_lot_side: Literal["source", "target"]
+    request_item_relink_count: int
+    discrepancy_relink_count: int
+    box_event_delete_count: int
+
+
+class LotHardBoxOverlapOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    box_number: str
+    source_box_ids: list[int]
+    target_box_ids: list[int]
+    source_active_box_ids: list[int]
+    target_active_box_ids: list[int]
+
+
+class LotMergeCandidateOut(BaseModel):
+    source: LotIdentityOut
+    target: LotIdentityOut
+    merge_allowed: bool
+    overlapping_box_numbers: list[str]
+    overlapping_box_count: int
+    overlap_list_truncated: bool
+    resolvable_archived_collisions: list[LotArchivedBoxCollisionOut]
+    resolvable_archived_collision_count: int
+    resolvable_archived_collisions_truncated: bool
+    hard_overlaps: list[LotHardBoxOverlapOut]
+    hard_overlap_count: int
+    hard_overlaps_truncated: bool
+    merge_allowed_with_archived_overwrite: bool
+    requires_explicit_overwrite: bool
+    collision_signature: str = Field(
+        min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"
+    )
+
+
 class LotMergeOut(BaseModel):
     source: LotIdentityOut
     target: LotIdentityOut
     moved_box_count: int
     moved_request_item_count: int
+    overwritten_archived_box_count: int = 0
+    relinked_request_item_count: int = 0
+    relinked_discrepancy_count: int = 0
+    deleted_box_event_count: int = 0
+
+
+class LotMergeConflictOut(BaseModel):
+    code: str
+    message: str
+    source: LotIdentityOut | None = None
+    target: LotIdentityOut | None = None
+    merge_candidate: LotMergeCandidateOut | None = None
+
+
+class LotMergeConflictResponse(BaseModel):
+    detail: LotMergeConflictOut
+
+
+class LotRenameCurrentOut(BaseModel):
+    id: int
+    name: str
+    normalized_name: str | None
+    version: int
+    updated_at: datetime
+
+
+class LotRenameConflictOut(BaseModel):
+    code: str
+    message: str
+    merge_candidate: LotMergeCandidateOut | None = None
+    current: LotRenameCurrentOut | None = None
+
+
+class LotRenameConflictResponse(BaseModel):
+    detail: LotRenameConflictOut
 
 
 class LotPurgeEntityOut(BaseModel):
@@ -377,7 +478,12 @@ __all__ = [
     "LotEventOut",
     "LotFilters",
     "LotIdentityOut",
+    "LotArchivedBoxCollisionOut",
+    "LotHardBoxOverlapOut",
     "LotMerge",
+    "LotMergeCandidateOut",
+    "LotMergeConflictOut",
+    "LotMergeConflictResponse",
     "LotMergeOut",
     "MergedLotOut",
     "LotOptionOut",
@@ -403,6 +509,9 @@ __all__ = [
     "LotPurgeResultOut",
     "LotProgressState",
     "LotRename",
+    "LotRenameConflictOut",
+    "LotRenameConflictResponse",
+    "LotRenameCurrentOut",
     "LotSort",
     "LotSortField",
     "LotStatusCounts",
