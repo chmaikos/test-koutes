@@ -609,7 +609,7 @@ def get_return_candidates(
         Box.lot.asc(), Box.box_number.asc(), Box.id.asc()
     )
     if lock:
-        stmt = stmt.with_for_update()
+        stmt = stmt.with_for_update(of=Box)
     return list(db.scalars(stmt).all())
 
 
@@ -965,7 +965,7 @@ def finalize_staged_receipt(
         existing = db.scalar(
             select(Box)
             .where(Box.lot_id == lot_id, Box.box_number == box_number)
-            .with_for_update()
+            .with_for_update(of=Box)
         )
         if existing is not None:
             if existing.archived_at is None:
@@ -1142,7 +1142,7 @@ def create_request(
         candidates = db.scalars(
             _return_candidate_stmt(source)
             .order_by(Box.lot.asc(), Box.box_number.asc(), Box.id.asc())
-            .with_for_update()
+            .with_for_update(of=Box)
         ).all()
         candidates_by_id = {box.id: box for box in candidates}
         source_eligible_quantity = len(candidates)

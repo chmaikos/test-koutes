@@ -296,7 +296,7 @@ def restore_archived_box(
             Box.box_number == cleaned_number,
             Box.lot_id == lot_record.id,
         )
-        .with_for_update()
+        .with_for_update(of=Box)
     )
     if box is None:
         return None
@@ -585,7 +585,9 @@ def reassign_box_lot(
     ):
         raise BoxConflictError("source and target lots must both be active")
 
-    locked = db.scalar(select(Box).where(Box.id == box.id).with_for_update())
+    locked = db.scalar(
+        select(Box).where(Box.id == box.id).with_for_update(of=Box)
+    )
     if locked is None:
         raise BoxRuleError("box not found")
     if locked.lot_id != source_lot.id:

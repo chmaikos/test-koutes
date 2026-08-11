@@ -291,7 +291,9 @@ async def release_quarantined_boxes(
     skipped: list[BulkSkip] = []
     request_ids: set[int] = set()
     for box_id in dict.fromkeys(payload.box_ids):
-        box = db.scalar(select(Box).where(Box.id == box_id).with_for_update())
+        box = db.scalar(
+            select(Box).where(Box.id == box_id).with_for_update(of=Box)
+        )
         if box is None or box.archived_at is not None:
             skipped.append(BulkSkip(box_id=box_id, box_number="", reason="box not found"))
             continue
@@ -363,7 +365,9 @@ async def reject_quarantined_boxes(
     request_ids: set[int] = set()
     warehouse_ids: set[int] = set()
     for box_id in dict.fromkeys(payload.box_ids):
-        box = db.scalar(select(Box).where(Box.id == box_id).with_for_update())
+        box = db.scalar(
+            select(Box).where(Box.id == box_id).with_for_update(of=Box)
+        )
         if box is None or box.archived_at is not None:
             skipped.append(BulkSkip(box_id=box_id, box_number="", reason="box not found"))
             continue

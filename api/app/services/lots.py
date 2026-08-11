@@ -573,7 +573,7 @@ def merge_lots(
             select(Box)
             .where(Box.lot_id.in_(ordered_ids))
             .order_by(Box.id)
-            .with_for_update()
+            .with_for_update(of=Box)
         ).all()
     )
     candidate = _merge_candidate(db, source, target)

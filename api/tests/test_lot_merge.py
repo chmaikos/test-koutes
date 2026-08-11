@@ -65,6 +65,24 @@ def test_lot_identity_lock_sql_is_postgresql_specific_and_ordered():
     assert "FOR UPDATE" not in sqlite_shared
 
 
+def test_box_lock_targets_boxes_when_eager_lot_join_is_present():
+    statement = (
+        select(Box)
+        .where(Box.lot_id.in_((3, 9)))
+        .order_by(Box.id)
+        .with_for_update(of=Box)
+    )
+    postgres_sql = str(
+        statement.compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+
+    assert "LEFT OUTER JOIN lots" in postgres_sql
+    assert postgres_sql.endswith("FOR UPDATE OF boxes")
+
+
 def test_rename_collision_candidate_normalizes_and_counts_archived_overlap(
     client, session
 ):
