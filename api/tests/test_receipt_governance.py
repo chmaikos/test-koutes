@@ -7,6 +7,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models.boxes import Box, BoxStatus
+from app.models.lots import Lot
 from app.models.requests import (
     BoxRequest,
     BoxRequestDocument,
@@ -92,6 +93,8 @@ def test_policy_update_is_audited_and_manual_entry_is_staged(
     assert request.receipt_document_required is True
     assert request.receipt_quarantine is True
     assert request.items[0].box_id is None
+    assert request.items[0].lot_id is not None
+    assert request.items[0].lot == "GOVERNED"
     assert session.scalar(select(func.count(Box.id))) == 0
 
     missing = client.post(
@@ -106,6 +109,7 @@ def test_policy_update_is_audited_and_manual_entry_is_staged(
         json={"expected_version": request.version},
     )
     assert approved.status_code == 200
+    assert approved.json()["items"][0]["lot_id"] == request.items[0].lot_id
     box = session.scalar(select(Box))
     assert box is not None
     assert box.status == BoxStatus.quarantined
@@ -162,7 +166,7 @@ def test_archived_restore_is_revalidated_and_quarantine_release_is_audited(
     warehouse.quarantine_imports = True
     existing = Box(
         box_number="020",
-        lot="RESTORE",
+        lot_record=Lot(name="RESTORE"),
         current_warehouse_id=1,
         status=BoxStatus.returned,
         archived_at=datetime.now(UTC),
@@ -184,6 +188,8 @@ def test_archived_restore_is_revalidated_and_quarantine_release_is_audited(
         expected_version=request.version,
     )
     assert finalized.items[0].box_id == existing.id
+    assert finalized.items[0].lot_id == existing.lot_id
+    assert finalized.items[0].lot == "RESTORE"
     session.refresh(existing)
     assert existing.status == BoxStatus.quarantined
     assert existing.archived_at is None

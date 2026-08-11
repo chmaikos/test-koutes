@@ -16,11 +16,19 @@ from app.models.requests import BoxRequestOrigin
 from app.models.users import User
 from app.models.warehouses import Warehouse
 from app.schemas.requests import InboundBoxItem
+from app.services.acl import can_access
 from app.services.boxes import (
+    BoxAccessError,
     BoxRuleError,
     create_box,
     normalize_box_number,
     restore_archived_box,
+)
+from app.services.lots import (
+    LotRuleError,
+    find_lot,
+    normalize_lot_name,
+    validate_lot_name,
 )
 from app.services.requests import (
     create_completed_receipt,
@@ -105,10 +113,41 @@ def import_mapped_boxes(
     warehouse = db.get(Warehouse, warehouse_id)
     if warehouse is None or not warehouse.is_active:
         raise BoxRuleError(f"warehouse {warehouse_id} does not exist or is archived")
+    if not can_access(user, warehouse_id):
+        raise BoxAccessError(f"no access to warehouse {warehouse_id}")
+    canonical_items: list[tuple[int, str, str, str | None]] = []
+    seen_pairs: set[tuple[str, str]] = set()
+    for position, (box_number, lot, contents) in enumerate(items, start=1):
+        try:
+            cleaned_number = normalize_box_number(box_number)
+            cleaned_lot = validate_lot_name(lot)
+        except (BoxRuleError, LotRuleError) as exc:
+            outcome.skipped.append(
+                ImportSkipEntry(
+                    row=position,
+                    box_number=box_number,
+                    reason=str(exc),
+                )
+            )
+            continue
+        pair = (normalize_lot_name(cleaned_lot), cleaned_number)
+        if pair in seen_pairs:
+            outcome.skipped.append(
+                ImportSkipEntry(
+                    row=position,
+                    box_number=cleaned_number,
+                    reason="duplicate (lot, box_number) within the uploaded file",
+                )
+            )
+            continue
+        seen_pairs.add(pair)
+        canonical_items.append((position, cleaned_number, cleaned_lot, contents))
+    if not canonical_items:
+        return outcome
     if receipt_requires_review(
         warehouse,
         BoxRequestOrigin.xlsx_import,
-        quantity=len(items),
+        quantity=len(canonical_items),
     ):
         receipt = create_staged_receipt(
             db,
@@ -120,14 +159,14 @@ def import_mapped_boxes(
                     lot=lot,
                     contents=contents,
                 )
-                for box_number, lot, contents in items
+                for _position, box_number, lot, contents in canonical_items
             ],
             origin=BoxRequestOrigin.xlsx_import,
             restore_archived=restore_archived,
         )
         outcome.staged_receipt_ids.append(receipt.id)
         return outcome
-    for position, (box_number, lot, contents) in enumerate(items, start=1):
+    for position, box_number, lot, contents in canonical_items:
         try:
             restored = (
                 restore_archived_box(
@@ -245,6 +284,7 @@ def import_boxes_xlsx(
         for w in db.scalars(
             select(Warehouse).where(Warehouse.is_active.is_(True))
         ).all()
+        if can_access(user, w.id)
     }
     warehouses_by_name = {
         w.name.strip().lower(): w for w in warehouses_by_id.values()
@@ -311,7 +351,18 @@ def import_boxes_xlsx(
                 )
             )
             continue
-        pair = (lot, box_number)
+        try:
+            lot = validate_lot_name(lot)
+        except LotRuleError as exc:
+            outcome.skipped.append(
+                ImportSkipEntry(
+                    row=offset,
+                    box_number=box_number,
+                    reason=str(exc),
+                )
+            )
+            continue
+        pair = (normalize_lot_name(lot), box_number)
         if pair in seen_pairs:
             outcome.skipped.append(
                 ImportSkipEntry(
@@ -394,11 +445,16 @@ def import_boxes_xlsx(
         ):
             staged_items: list[InboundBoxItem] = []
             for offset, item in pending_rows:
-                existing = db.scalar(
-                    select(Box).where(
-                        Box.box_number == item.box_number,
-                        Box.lot == item.lot,
+                lot_record = find_lot(db, item.lot)
+                existing = (
+                    db.scalar(
+                        select(Box).where(
+                            Box.box_number == item.box_number,
+                            Box.lot_id == lot_record.id,
+                        )
                     )
+                    if lot_record is not None
+                    else None
                 )
                 if existing is not None and (
                     existing.archived_at is None or not restore_archived

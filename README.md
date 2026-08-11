@@ -13,6 +13,9 @@ and threshold alerts (in-app + email via Microsoft Graph).
 - Per-warehouse live dashboard (received today, returned today, in-progress,
   ready-to-return, capacity bar, open alerts).
 - Searchable / filterable boxes table with inline status transitions.
+- First-class Lots list/detail views with globally case-insensitive identity,
+  status distribution, ACL-scoped completion metrics, audited global rename,
+  and audited per-box reassignment.
 - Full audit trail per box (timeline of events).
 - Audited inbound box orders and return requests with the explicit lifecycle
   `submitted → approved → preparing → ready_for_transport → in_transit →
@@ -63,8 +66,8 @@ and threshold alerts (in-app + email via Microsoft Graph).
 - Admin employee XLSX imports support worksheet/column mapping, row exclusion,
   and case-insensitive updates of existing warehouse employees.
 - CSV and XLSX inventory exports honouring the current filters, plus
-  productivity reports with employee averages and 90 days of daily-entry
-  detail.
+  lot summaries and productivity reports with employee averages and 90 days
+  of daily-entry detail.
 - Low-inventory and max-capacity alerts in-app and via Graph email.
 - Admins can archive empty warehouses after open requests are closed. Archiving
   preserves inventory and audit history, deactivates the roster, resolves open
@@ -461,6 +464,26 @@ note, start transport, and record arrival. The original requester confirms an
 inbound delivery; a mover confirms returned boxes at the warehouse. Inventory
 changes only at that final confirmation step.
 
+## Lots domain and permissions
+
+Lots are durable identities rather than text stored independently on each box.
+Names are trimmed, internal whitespace is collapsed, and identity is globally
+case-insensitive. A box stores `lot_id`; request items additionally retain an
+immutable lot-name snapshot so later corrections do not rewrite history.
+
+The Lots list and detail pages show non-archived boxes, status distribution,
+visible warehouses, staged receipts, and completion:
+
+`(Incomplete + Ready to Return + Returned) / (all non-quarantined boxes)`
+
+When the denominator is zero the API returns `completion_percent: null` ("No
+eligible boxes"), not `0%`. Non-admin metrics and exports are aggregated only
+from warehouses in the caller's ACL. Operators and admins may create/select a
+lot while receiving inventory. Only admins may globally rename a lot or
+reassign one box to another lot; both operations require a reason, optimistic
+version, collision checks, and audit events. Renaming never merges/deletes
+identities, and box reassignment never rewrites request snapshots.
+
 ## ERP delivery and return notes
 
 The ERP remains the system that creates official delivery/return documents.
@@ -519,6 +542,20 @@ The OpenAPI page at `/api/docs` is authoritative. Key endpoint groups are:
 - `/api/notifications`, `/api/xlsx-mapping-templates`, and request report
   endpoints under `/api/exports`.
 
+Lot endpoints are:
+
+- `GET/POST /api/lots`, `GET /api/lots/options`, and
+  `GET /api/lots/{lot_id}`,
+- `GET /api/lots/{lot_id}/boxes`,
+- `PATCH /api/lots/{lot_id}/rename` (admin, reason + `expected_version`),
+- `POST /api/boxes/{box_id}/reassign-lot` (admin, reason +
+  `expected_lot_version`),
+- ACL-scoped `GET /api/exports/lots.csv` and `/api/exports/lots.xlsx`.
+
+Box, request-item, and return-candidate responses include `lot_id`; `lot`
+remains the display/snapshot field. Lot mutations and inventory/request changes
+publish warehouse-scoped SSE invalidations.
+
 Every mutating request action requires `expected_version`; completion also uses
 an idempotency key. Warehouse ACL and role checks are enforced server-side.
 Lifecycle and notification mutations publish SSE events so active clients
@@ -528,3 +565,14 @@ invalidate the relevant request, inventory, and dashboard queries.
 
 You can run things directly without Docker if you prefer; see
 [`api/README.md`](api/README.md) and [`web/README.md`](web/README.md).
+
+## Deploying migration 0027
+
+`0027_first_class_lots` is a coordinated cutover from `boxes.lot` to the
+required `boxes.lot_id` foreign key. Stop old API instances, run the read-only
+`api/scripts/lot_migration_preflight.py` against production, reconcile every
+blank lot or normalized `(lot, box_number)` collision (including archived
+boxes), apply Alembic, and then deploy the matching API/web build. Generate
+offline SQL with the production PostgreSQL dialect. Full commands, rollback
+constraints, and operator checks are documented in
+[`docs/FIRST_CLASS_LOTS_DEPLOYMENT.md`](docs/FIRST_CLASS_LOTS_DEPLOYMENT.md).

@@ -45,6 +45,7 @@ from app.schemas.boxes import (
     StagedReceiptResult,
 )
 from app.schemas.common import Page
+from app.schemas.lots import BoxLotReassignment
 from app.schemas.requests import InboundBoxItem
 from app.services.acl import apply_warehouse_filter, can_access
 from app.services.alerts import evaluate_safe
@@ -57,8 +58,10 @@ from app.services.boxes import (
     bulk_update_boxes,
     create_box,
     delete_box,
+    reassign_box_lot,
     update_box,
 )
+from app.services.lots import LotRuleError, resolve_lot
 from app.services.request_notifications import enqueue_request_event
 from app.services.requests import (
     RequestAccessError,
@@ -79,6 +82,21 @@ def _rule_error_to_http(exc: BoxRuleError | RequestRuleError) -> HTTPException:
     else:
         code = status.HTTP_400_BAD_REQUEST
     return HTTPException(status_code=code, detail=str(exc))
+
+
+async def _publish_request_update(db: DbSession, request_id: int) -> None:
+    request = db.get(BoxRequest, request_id)
+    if request is None:
+        return
+    await bus.publish(
+        "request.updated",
+        {
+            "id": request.id,
+            "warehouse_id": request.warehouse_id,
+            "direction": request.direction.value,
+            "status": request.status.value,
+        },
+    )
 
 
 def _check_force(payload_force: bool, user: User, reason: str | None = None) -> None:
@@ -138,6 +156,16 @@ async def create_new_box(
             BoxRequestOrigin.manual_entry,
             quantity=1,
         ):
+            try:
+                lot_record = resolve_lot(
+                    db,
+                    user=user,
+                    lot=payload.lot,
+                    lot_id=payload.lot_id,
+                    warehouse_id=payload.warehouse_id,
+                )
+            except LotRuleError as exc:
+                raise BoxRuleError(str(exc)) from exc
             staged = create_staged_receipt(
                 db,
                 user=user,
@@ -145,14 +173,19 @@ async def create_new_box(
                 items=[
                     InboundBoxItem(
                         box_number=payload.box_number,
-                        lot=payload.lot,
+                        lot=lot_record.name,
                         contents=payload.contents,
                     )
                 ],
                 origin=BoxRequestOrigin.manual_entry,
             )
             await bus.publish(
-                "request.created", {"id": staged.id, "staged": True}
+                "request.created",
+                {
+                    "id": staged.id,
+                    "warehouse_id": staged.warehouse_id,
+                    "staged": True,
+                },
             )
             await publish_notification_event(
                 warehouse_id=staged.warehouse_id,
@@ -164,6 +197,7 @@ async def create_new_box(
             user=user,
             box_number=payload.box_number,
             lot=payload.lot,
+            lot_id=payload.lot_id,
             contents=payload.contents,
             warehouse_id=payload.warehouse_id,
             note=payload.note,
@@ -222,7 +256,7 @@ async def bulk_update(
     for wid in affected_warehouses:
         await bus.publish("box.updated", {"warehouse_id": wid, "bulk": True})
     for request_id in outcome.cancelled_request_ids:
-        await bus.publish("request.updated", {"id": request_id})
+        await _publish_request_update(db, request_id)
     if outcome.updated:
         background.add_task(evaluate_safe, db)
 
@@ -393,6 +427,48 @@ def get_box(box_id: int, db: DbSession, user: CurrentUser) -> BoxOut:
     return BoxOut.model_validate(box)
 
 
+@router.post("/{box_id}/reassign-lot", response_model=BoxOut)
+async def reassign_lot(
+    box_id: int,
+    payload: BoxLotReassignment,
+    db: DbSession,
+    user: Annotated[CurrentUser, Depends(require_admin)],
+) -> BoxOut:
+    box = db.get(Box, box_id)
+    if box is None:
+        raise HTTPException(status_code=404, detail="not found")
+    source_lot_id = box.lot_id
+    try:
+        box = reassign_box_lot(
+            db,
+            user=user,
+            box=box,
+            lot_id=payload.lot_id,
+            reason=payload.reason,
+            expected_version=payload.expected_lot_version,
+        )
+    except BoxRuleError as exc:
+        db.rollback()
+        raise _rule_error_to_http(exc) from exc
+    event_data = {
+        "id": box.lot_id,
+        "box_id": box.id,
+        "from_lot_id": source_lot_id,
+        "to_lot_id": box.lot_id,
+        "warehouse_id": box.current_warehouse_id,
+    }
+    await bus.publish("lot.reassigned", event_data)
+    await bus.publish(
+        "box.updated",
+        {
+            "id": box.id,
+            "warehouse_id": box.current_warehouse_id,
+            "status": box.status.value,
+        },
+    )
+    return BoxOut.model_validate(box)
+
+
 @router.patch("/{box_id}", response_model=BoxOut)
 async def patch_box(
     box_id: int,
@@ -413,20 +489,20 @@ async def patch_box(
             box=box,
             new_status=payload.status,
             new_warehouse_id=payload.warehouse_id,
-            new_lot=payload.lot,
             new_contents=payload.contents,
             note=payload.note,
             force=payload.force,
             cancelled_request_ids=cancelled_request_ids,
         )
     except BoxRuleError as exc:
+        db.rollback()
         raise _rule_error_to_http(exc) from exc
     await bus.publish(
         "box.updated",
         {"id": box.id, "warehouse_id": box.current_warehouse_id, "status": box.status.value},
     )
     for request_id in cancelled_request_ids:
-        await bus.publish("request.updated", {"id": request_id})
+        await _publish_request_update(db, request_id)
     background.add_task(evaluate_safe, db)
     return BoxOut.model_validate(box)
 
@@ -461,7 +537,7 @@ async def _perform_single_delete(
         },
     )
     for request_id in outcome.cancelled_request_ids:
-        await bus.publish("request.updated", {"id": request_id})
+        await _publish_request_update(db, request_id)
     background.add_task(evaluate_safe, db)
     return outcome
 
@@ -533,7 +609,7 @@ async def bulk_delete(
     for wid in outcome.affected_warehouse_ids:
         await bus.publish("box.deleted", {"warehouse_id": wid, "bulk": True})
     for request_id in outcome.cancelled_request_ids:
-        await bus.publish("request.updated", {"id": request_id})
+        await _publish_request_update(db, request_id)
     if outcome.deleted_ids or outcome.archived_ids:
         background.add_task(evaluate_safe, db)
     return BulkDeleteResult(

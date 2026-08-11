@@ -20,6 +20,7 @@ from app.models.boxes import (
     BoxEventType,
     BoxStatus,
 )
+from app.models.lots import normalize_lot_name
 from app.models.notifications import RequestNotificationKind
 from app.models.requests import (
     ACTIVE_REQUEST_STATUSES,
@@ -50,6 +51,7 @@ from app.services.boxes import (
     restore_archived_box,
     update_box,
 )
+from app.services.lots import LotRuleError, get_or_create_lot, validate_lot_name
 from app.services.request_notifications import enqueue_request_event
 from app.services.warehouses import WarehouseRuleError, ensure_active_warehouse
 
@@ -711,6 +713,7 @@ def create_completed_receipt(
                 request_id=request.id,
                 position=position,
                 box_id=box.id,
+                lot_id=box.lot_id,
                 lot=box.lot,
                 box_number=box.box_number,
                 contents=box.contents,
@@ -816,11 +819,21 @@ def create_staged_receipt(
     db.flush()
     request.root_request_id = request.id
     for position, item in enumerate(rows, start=1):
+        try:
+            lot_record = get_or_create_lot(
+                db,
+                user=user,
+                name=item.lot,
+                warehouse_id=warehouse_id,
+            )
+        except LotRuleError as exc:
+            raise RequestRuleError(str(exc)) from exc
         db.add(
             BoxRequestItem(
                 request_id=request.id,
                 position=position,
-                lot=item.lot,
+                lot_id=lot_record.id,
+                lot=lot_record.name,
                 box_number=item.box_number,
                 contents=item.contents,
             )
@@ -908,29 +921,29 @@ def finalize_staged_receipt(
             raise RequestRuleError("a current delivery_note is required")
 
     staged_items = sorted(request.items, key=lambda item: item.position)
-    identities = [(item.lot or "", item.box_number or "") for item in staged_items]
+    identities = [(item.lot_id, item.box_number or "") for item in staged_items]
     if len(identities) != len(set(identities)):
         raise RequestConflictError("staged receipt contains duplicate box identities")
-    existing_by_identity: dict[tuple[str, str], Box] = {}
-    for lot, box_number in identities:
+    existing_by_identity: dict[tuple[int | None, str], Box] = {}
+    for lot_id, box_number in identities:
         existing = db.scalar(
             select(Box)
-            .where(Box.lot == lot, Box.box_number == box_number)
+            .where(Box.lot_id == lot_id, Box.box_number == box_number)
             .with_for_update()
         )
         if existing is not None:
             if existing.archived_at is None:
                 raise RequestConflictError(
-                    f"box {box_number!r} already exists in lot {lot!r}"
+                    f"box {box_number!r} already exists in the staged lot"
                 )
             if not request.receipt_restore_archived:
                 raise RequestConflictError(
-                    f"box {box_number!r} in lot {lot!r} is archived; "
+                    f"box {box_number!r} in the staged lot is archived; "
                     "stage with restore_archived to restore it"
                 )
             if not can_access(user, existing.current_warehouse_id):
                 raise RequestAccessError("no access to archived box warehouse")
-            existing_by_identity[(lot, box_number)] = existing
+            existing_by_identity[(lot_id, box_number)] = existing
 
     occupied = int(
         db.scalar(
@@ -954,13 +967,13 @@ def finalize_staged_receipt(
     now = datetime.now(UTC)
     try:
         for item in staged_items:
-            key = (item.lot or "", item.box_number or "")
+            key = (item.lot_id, item.box_number or "")
             box = (
                 restore_archived_box(
                     db,
                     user=user,
                     box_number=item.box_number or "",
-                    lot=item.lot or "",
+                    lot_id=item.lot_id,
                     contents=item.contents,
                     warehouse_id=request.warehouse_id,
                     note=f"Restored through staged receipt #{request.id}.",
@@ -972,7 +985,7 @@ def finalize_staged_receipt(
                     db,
                     user=user,
                     box_number=item.box_number or "",
-                    lot=item.lot or "",
+                    lot_id=item.lot_id,
                     contents=item.contents,
                     warehouse_id=request.warehouse_id,
                     note=f"Created through staged receipt #{request.id}.",
@@ -1163,6 +1176,7 @@ def create_request(
                     request_id=request.id,
                     position=position,
                     box_id=box.id,
+                    lot_id=box.lot_id,
                     lot=box.lot,
                     box_number=box.box_number,
                     contents=box.contents,
@@ -2122,23 +2136,25 @@ def merge_inbound_items(items: list[InboundBoxItem]) -> list[InboundBoxItem]:
     ``(lot, box_number)``. Distinct contents are retained in source order and
     joined into the box's single contents field.
     """
-    grouped: dict[tuple[str, str], list[str]] = {}
+    grouped: dict[tuple[str, str], tuple[str, list[str]]] = {}
     for item in items:
-        lot = item.lot.strip()
-        if not lot:
-            raise RequestRuleError("lot is required")
+        try:
+            lot = validate_lot_name(item.lot)
+            normalized_lot = normalize_lot_name(lot)
+        except LotRuleError as exc:
+            raise RequestRuleError(str(exc)) from exc
         try:
             box_number = normalize_box_number(item.box_number)
         except BoxRuleError as exc:
             raise RequestRuleError(str(exc)) from exc
-        key = (lot, box_number)
-        contents = grouped.setdefault(key, [])
+        key = (normalized_lot, box_number)
+        contents = grouped.setdefault(key, (lot, []))[1]
         value = (item.contents or "").strip()
         if value and value not in contents:
             contents.append(value)
 
     merged: list[InboundBoxItem] = []
-    for (lot, box_number), contents in grouped.items():
+    for (_normalized_lot, box_number), (lot, contents) in grouped.items():
         combined = " | ".join(contents)
         if len(combined) > 200:
             raise RequestRuleError(
@@ -2243,6 +2259,7 @@ def complete_request(
                         request_id=request.id,
                         position=position,
                         box_id=box.id,
+                        lot_id=box.lot_id,
                         lot=box.lot,
                         box_number=box.box_number,
                         contents=box.contents,
@@ -2526,6 +2543,7 @@ def submit_follow_up_draft(
                 request_id=request.id,
                 position=position,
                 box_id=box.id,
+                lot_id=box.lot_id,
                 lot=box.lot,
                 box_number=box.box_number,
                 contents=box.contents,

@@ -71,6 +71,8 @@ function handleEvent(
   switch (event.type) {
     case "box.updated":
       qc.invalidateQueries({ queryKey: ["boxes"] });
+      qc.invalidateQueries({ queryKey: ["lots"] });
+      qc.invalidateQueries({ queryKey: ["lot-options"] });
       qc.invalidateQueries({ queryKey: ["return-sources"] });
       qc.invalidateQueries({ queryKey: ["return-candidates"] });
       qc.invalidateQueries({ queryKey: queryKeys.dashboard });
@@ -81,6 +83,31 @@ function handleEvent(
         });
       }
       break;
+    case "lot.created":
+    case "lot.renamed":
+    case "lot.reassigned": {
+      qc.invalidateQueries({ queryKey: ["lots"] });
+      qc.invalidateQueries({ queryKey: ["lot-options"] });
+      qc.invalidateQueries({ queryKey: ["boxes"] });
+      qc.invalidateQueries({ queryKey: ["requests"] });
+      const lotIds = [
+        event.data.id,
+        event.data.from_lot_id,
+        event.data.to_lot_id,
+      ].filter((value): value is number => typeof value === "number");
+      for (const lotId of new Set(lotIds)) {
+        qc.invalidateQueries({ queryKey: queryKeys.lot(lotId) });
+        qc.invalidateQueries({ queryKey: queryKeys.lotEvents(lotId) });
+        qc.invalidateQueries({ queryKey: ["lot-boxes", lotId] });
+      }
+      if (typeof event.data.box_id === "number") {
+        qc.invalidateQueries({ queryKey: queryKeys.box(event.data.box_id) });
+        qc.invalidateQueries({
+          queryKey: queryKeys.boxEvents(event.data.box_id),
+        });
+      }
+      break;
+    }
     case "alert.triggered":
     case "alert.resolved":
       qc.invalidateQueries({ queryKey: ["alerts"] });
@@ -89,9 +116,13 @@ function handleEvent(
     case "request.created":
     case "request.updated": {
       qc.invalidateQueries({ queryKey: ["requests"] });
+      qc.invalidateQueries({ queryKey: ["boxes"] });
+      qc.invalidateQueries({ queryKey: ["lots"] });
+      qc.invalidateQueries({ queryKey: ["lot-options"] });
       qc.invalidateQueries({ queryKey: ["request-suggestion"] });
       qc.invalidateQueries({ queryKey: ["return-sources"] });
       qc.invalidateQueries({ queryKey: ["return-candidates"] });
+      qc.invalidateQueries({ queryKey: queryKeys.dashboard });
       const requestId =
         typeof event.data.id === "number"
           ? event.data.id

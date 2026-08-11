@@ -9,9 +9,11 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from sqlalchemy import Select, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.boxes import Box, BoxEvent, BoxEventType, BoxStatus
+from app.models.lots import Lot, LotEvent, LotEventType
 from app.models.notifications import RequestNotificationKind
 from app.models.requests import (
     ACTIVE_REQUEST_STATUSES,
@@ -25,6 +27,7 @@ from app.models.requests import (
 from app.models.users import User, UserRole
 from app.models.warehouses import Warehouse
 from app.services.acl import can_access
+from app.services.lots import LotRuleError, resolve_lot
 from app.services.request_notifications import enqueue_request_event
 from app.services.warehouses import WarehouseRuleError, ensure_active_warehouse
 
@@ -179,7 +182,8 @@ def create_box(
     *,
     user: User,
     box_number: str,
-    lot: str,
+    lot: str | None = None,
+    lot_id: int | None = None,
     warehouse_id: int,
     contents: str | None = None,
     note: str | None = None,
@@ -192,9 +196,16 @@ def create_box(
             f"no access to warehouse {warehouse_id}"
         )
     cleaned_number = normalize_box_number(box_number)
-    cleaned_lot = lot.strip()
-    if not cleaned_lot:
-        raise BoxRuleError("lot is required")
+    try:
+        lot_record = resolve_lot(
+            db,
+            user=user,
+            lot=lot,
+            lot_id=lot_id,
+            warehouse_id=warehouse_id,
+        )
+    except LotRuleError as exc:
+        raise BoxRuleError(str(exc)) from exc
     cleaned_contents: str | None = None
     if contents is not None:
         stripped = contents.strip()
@@ -202,39 +213,47 @@ def create_box(
     existing = db.scalar(
         select(Box).where(
             Box.box_number == cleaned_number,
-            Box.lot == cleaned_lot,
+            Box.lot_id == lot_record.id,
         )
     )
     if existing is not None:
         raise BoxConflictError(
-            f"box {cleaned_number!r} already exists in lot {cleaned_lot!r}"
+            f"box {cleaned_number!r} already exists in lot {lot_record.name!r}"
         )
     now = datetime.now(UTC)
     box = Box(
         box_number=cleaned_number,
-        lot=cleaned_lot,
+        lot_id=lot_record.id,
         contents=cleaned_contents,
         current_warehouse_id=warehouse_id,
         status=initial_status,
         received_at=now,
         updated_by_user_id=user.id,
     )
-    db.add(box)
-    db.flush()
-    db.add(
-        BoxEvent(
-            box_id=box.id,
-            warehouse_id=warehouse_id,
-            event_type=BoxEventType.created,
-            from_status=None,
-            to_status=initial_status,
-            from_warehouse_id=None,
-            to_warehouse_id=warehouse_id,
-            occurred_at=now,
-            user_id=user.id,
-            note=note,
-        )
-    )
+    try:
+        with db.begin_nested():
+            db.add(box)
+            db.flush()
+            db.add(
+                BoxEvent(
+                    box_id=box.id,
+                    warehouse_id=warehouse_id,
+                    event_type=BoxEventType.created,
+                    from_status=None,
+                    to_status=initial_status,
+                    from_warehouse_id=None,
+                    to_warehouse_id=warehouse_id,
+                    occurred_at=now,
+                    user_id=user.id,
+                    note=note,
+                    event_metadata={"lot_id": lot_record.id},
+                )
+            )
+            db.flush()
+    except IntegrityError as exc:
+        raise BoxConflictError(
+            f"box {cleaned_number!r} already exists in lot {lot_record.name!r}"
+        ) from exc
     if commit:
         db.commit()
         db.refresh(box)
@@ -248,7 +267,8 @@ def restore_archived_box(
     *,
     user: User,
     box_number: str,
-    lot: str,
+    lot: str | None = None,
+    lot_id: int | None = None,
     warehouse_id: int,
     contents: str | None = None,
     note: str | None = None,
@@ -260,14 +280,21 @@ def restore_archived_box(
     if not can_access(user, warehouse_id):
         raise BoxAccessError(f"no access to warehouse {warehouse_id}")
     cleaned_number = normalize_box_number(box_number)
-    cleaned_lot = lot.strip()
-    if not cleaned_lot:
-        raise BoxRuleError("lot is required")
+    try:
+        lot_record = resolve_lot(
+            db,
+            user=user,
+            lot=lot,
+            lot_id=lot_id,
+            warehouse_id=warehouse_id,
+        )
+    except LotRuleError as exc:
+        raise BoxRuleError(str(exc)) from exc
     box = db.scalar(
         select(Box)
         .where(
             Box.box_number == cleaned_number,
-            Box.lot == cleaned_lot,
+            Box.lot_id == lot_record.id,
         )
         .with_for_update()
     )
@@ -275,7 +302,7 @@ def restore_archived_box(
         return None
     if box.archived_at is None:
         raise BoxConflictError(
-            f"box {cleaned_number!r} already exists in lot {cleaned_lot!r}"
+            f"box {cleaned_number!r} already exists in lot {lot_record.name!r}"
         )
     if not can_access(user, box.current_warehouse_id):
         raise BoxAccessError(
@@ -345,7 +372,6 @@ def update_box(
     box: Box,
     new_status: BoxStatus | None = None,
     new_warehouse_id: int | None = None,
-    new_lot: str | None = None,
     new_contents: str | None = None,
     note: str | None = None,
     force: bool = False,
@@ -415,14 +441,6 @@ def update_box(
             )
             if cancelled_request_ids is not None:
                 cancelled_request_ids.update(cancelled)
-
-    if new_lot is not None:
-        cleaned_lot = new_lot.strip()
-        if not cleaned_lot:
-            raise BoxRuleError("lot is required")
-        if cleaned_lot != box.lot:
-            box.lot = cleaned_lot
-            metadata_changed = True
 
     if new_contents is not None:
         # Empty string clears the optional descriptor.
@@ -512,6 +530,124 @@ def update_box(
     else:
         db.flush()
     return box
+
+
+def reassign_box_lot(
+    db: Session,
+    *,
+    user: User,
+    box: Box,
+    reason: str,
+    expected_version: int,
+    lot: str | None = None,
+    lot_id: int | None = None,
+    commit: bool = True,
+) -> Box:
+    """Assign one physical box to another lot with an immutable audit trail."""
+    if user.role != UserRole.admin:
+        raise BoxAccessError("lot reassignment requires admin role")
+    cleaned_reason = reason.strip()
+    if not cleaned_reason:
+        raise BoxRuleError("a reason is required to reassign a box lot")
+
+    locked = db.scalar(select(Box).where(Box.id == box.id).with_for_update())
+    if locked is None:
+        raise BoxRuleError("box not found")
+    if locked.archived_at is not None:
+        raise BoxConflictError("archived boxes cannot be reassigned")
+    source_lot = db.scalar(
+        select(Lot).where(Lot.id == locked.lot_id).with_for_update()
+    )
+    if source_lot is None:
+        raise BoxRuleError("box has no current lot")
+    if source_lot.version != expected_version:
+        raise BoxConflictError(
+            f"lot version conflict: expected {expected_version}, current {source_lot.version}"
+        )
+    try:
+        target_lot = resolve_lot(
+            db,
+            user=user,
+            lot=lot,
+            lot_id=lot_id,
+            warehouse_id=locked.current_warehouse_id,
+        )
+    except LotRuleError as exc:
+        raise BoxRuleError(str(exc)) from exc
+    if target_lot.id == source_lot.id:
+        return locked
+
+    collision = db.scalar(
+        select(Box.id).where(
+            Box.lot_id == target_lot.id,
+            Box.box_number == locked.box_number,
+            Box.id != locked.id,
+        )
+    )
+    if collision is not None:
+        raise BoxConflictError(
+            f"box {locked.box_number!r} already exists in lot {target_lot.name!r}"
+        )
+
+    request_ids = _referencing_request_ids(db, locked.id)
+    metadata = {
+        "operation": "box_lot_reassignment",
+        "box_id": locked.id,
+        "box_number": locked.box_number,
+        "from_lot_id": source_lot.id,
+        "from_lot_name": source_lot.name,
+        "to_lot_id": target_lot.id,
+        "to_lot_name": target_lot.name,
+        "request_snapshot_ids_preserved": request_ids,
+        "expected_version": expected_version,
+    }
+    now = datetime.now(UTC)
+    try:
+        with db.begin_nested():
+            locked.lot_id = target_lot.id
+            locked.lot_record = target_lot
+            locked.updated_by_user_id = user.id
+            locked.updated_at = now
+            # Touching the source lot advances its optimistic version and makes
+            # concurrent reassignment/rename attempts fail deterministically.
+            source_lot.updated_by_user_id = user.id
+            source_lot.version += 1
+            db.add(
+                LotEvent(
+                    lot_id=source_lot.id,
+                    event_type=LotEventType.reassigned,
+                    old_name=source_lot.name,
+                    new_name=target_lot.name,
+                    actor_user_id=user.id,
+                    reason=cleaned_reason,
+                    occurred_at=now,
+                    event_metadata=metadata,
+                )
+            )
+            db.add(
+                BoxEvent(
+                    box_id=locked.id,
+                    warehouse_id=locked.current_warehouse_id,
+                    event_type=BoxEventType.lot_reassigned,
+                    from_status=locked.status,
+                    to_status=locked.status,
+                    from_warehouse_id=locked.current_warehouse_id,
+                    to_warehouse_id=locked.current_warehouse_id,
+                    occurred_at=now,
+                    user_id=user.id,
+                    note=cleaned_reason,
+                    event_metadata=metadata,
+                )
+            )
+            db.flush()
+    except IntegrityError as exc:
+        raise BoxConflictError(
+            f"box {locked.box_number!r} already exists in lot {target_lot.name!r}"
+        ) from exc
+    if commit:
+        db.commit()
+        db.refresh(locked)
+    return locked
 
 
 # ---------------------------------------------------------------------------

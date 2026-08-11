@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import enum
 from datetime import date, datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     JSON,
@@ -19,9 +20,12 @@ from sqlalchemy import (
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 
 from app.db import Base
+
+if TYPE_CHECKING:
+    from app.models.lots import Lot
 
 
 class BoxRequestDirection(str, enum.Enum):
@@ -313,11 +317,26 @@ class BoxRequestItem(Base):
     box_id: Mapped[int | None] = mapped_column(
         ForeignKey("boxes.id", ondelete="RESTRICT"), nullable=True
     )
+    lot_id: Mapped[int | None] = mapped_column(
+        ForeignKey("lots.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    # Immutable display snapshot captured when the request item is created.
     lot: Mapped[str | None] = mapped_column(String(64))
     box_number: Mapped[str | None] = mapped_column(String(64))
     contents: Mapped[str | None] = mapped_column(String(200))
 
     request: Mapped[BoxRequest] = relationship(back_populates="items")
+    lot_record: Mapped[Lot | None] = relationship()
+
+    @validates("lot")
+    def _keep_lot_snapshot_immutable(
+        self,
+        _key: str,
+        value: str | None,
+    ) -> str | None:
+        if "lot" in self.__dict__ and self.__dict__["lot"] != value:
+            raise ValueError("request item lot snapshot is immutable")
+        return value
 
 
 class BoxRequestEvent(Base):

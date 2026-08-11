@@ -792,6 +792,7 @@ def list_return_candidates(
             box_id=box.id,
             box_number=box.box_number,
             lot=box.lot,
+            lot_id=box.lot_id,
             contents=box.contents,
             status=box.status,
         )

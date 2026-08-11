@@ -40,6 +40,7 @@ import type {
   RequestDocumentType,
 } from "@/api/types";
 import { ExcelRowMapper } from "@/components/ExcelRowMapper";
+import { LotPicker, type LotSelection } from "@/components/LotPicker";
 import {
   REQUEST_DIRECTION_LABEL,
   RequestStatusBadge,
@@ -710,7 +711,15 @@ function ItemsSection({
                     item.box_number ?? "—"
                   )}
                 </td>
-                <td className="px-4 py-2.5">{item.lot ?? "—"}</td>
+                <td className="px-4 py-2.5">
+                  {item.lot_id ? (
+                    <Link className="text-brand-700 hover:underline" to={`/lots/${item.lot_id}`}>
+                      {item.lot ?? `Lot #${item.lot_id}`}
+                    </Link>
+                  ) : (
+                    item.lot ?? "—"
+                  )}
+                </td>
                 <td className="px-4 py-2.5 text-slate-600">
                   {item.contents ?? "—"}
                 </td>
@@ -756,7 +765,12 @@ function DraftSubmission({ request }: { request: BoxRequest }) {
               }
             />
             <span className="font-mono">{box.box_number}</span>
-            <span className="text-xs text-slate-500">{box.lot}</span>
+            <Link
+              to={`/lots/${box.lot_id}`}
+              className="text-xs text-brand-700 hover:underline"
+            >
+              {box.lot}
+            </Link>
           </label>
         ))}
       </div>
@@ -1515,6 +1529,7 @@ function CompletionDialog({
   ) => Promise<void>;
 }) {
   const inbound = request.direction === "inbound";
+  const me = useMe();
   const [rows, setRows] = useState<InboundRequestItemInput[]>(() =>
     inbound
       ? Array.from({ length: request.quantity }, () => ({
@@ -1525,6 +1540,7 @@ function CompletionDialog({
       : [],
   );
   const [showExcelMapper, setShowExcelMapper] = useState(false);
+  const [rowLots, setRowLots] = useState<Record<number, LotSelection | null>>({});
   const [discrepancyReason, setDiscrepancyReason] = useState("");
   const [lineDiscrepancies, setLineDiscrepancies] = useState<
     RequestDiscrepancyInput[]
@@ -1542,6 +1558,14 @@ function CompletionDialog({
   ).length;
   const variance = deliveryVariance(request.quantity, actualCount);
   const hasMismatch = variance !== 0;
+  const allLotsConfirmed =
+    !inbound ||
+    rows.every(
+      (row, index) =>
+        !!rowLots[index] &&
+        rowLots[index]?.name.trim().toLocaleLowerCase() ===
+          row.lot.trim().replace(/\s+/g, " ").toLocaleLowerCase(),
+    );
 
   function updateRow(
     index: number,
@@ -1616,6 +1640,7 @@ function CompletionDialog({
                   quantity={request.quantity}
                   onApply={(mappedRows) => {
                     setRows(mappedRows);
+                    setRowLots({});
                     setShowExcelMapper(false);
                   }}
                 />
@@ -1636,9 +1661,10 @@ function CompletionDialog({
                       className="btn-ghost text-rose-600"
                       disabled={rows.length <= 1}
                       onClick={() =>
-                        setRows((current) =>
-                          current.filter((_, rowIndex) => rowIndex !== index),
-                        )
+                        setRows((current) => {
+                          setRowLots({});
+                          return current.filter((_, rowIndex) => rowIndex !== index);
+                        })
                       }
                     >
                       <Trash2 className="h-4 w-4" /> Remove
@@ -1656,17 +1682,22 @@ function CompletionDialog({
                         }
                       />
                     </label>
-                    <label className="block">
-                      <span className="text-xs text-slate-500">Lot</span>
-                      <input
-                        required
-                        className="input"
-                        value={row.lot}
-                        onChange={(event) =>
-                          updateRow(index, "lot", event.target.value)
-                        }
-                      />
-                    </label>
+                    <LotPicker
+                      value={rowLots[index] ?? null}
+                      nameValue={row.lot}
+                      onNameChange={(name) => updateRow(index, "lot", name)}
+                      onChange={(selection) =>
+                        setRowLots((current) => ({
+                          ...current,
+                          [index]: selection,
+                        }))
+                      }
+                      warehouseId={request.warehouse_id}
+                      canCreate={
+                        me.data?.role === "admin" || me.data?.role === "operator"
+                      }
+                      label="Lot"
+                    />
                     <label className="block">
                       <span className="text-xs text-slate-500">
                         Contents (optional)
@@ -1699,6 +1730,13 @@ function CompletionDialog({
               ordered={request.quantity}
               actual={actualCount}
             />
+            {!allLotsConfirmed && (
+              <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                Select an existing lot for every row, or use the explicit
+                “Create new lot” confirmation in the lot picker. Spreadsheet
+                names are preserved until you confirm them.
+              </p>
+            )}
             {hasMismatch && (
               <label className="block rounded-lg border border-amber-200 bg-amber-50 p-3">
                 <span className="text-sm font-medium text-amber-900">
@@ -1736,6 +1774,7 @@ function CompletionDialog({
               pending={pending}
               disabled={
                 actualCount < 1 ||
+                !allLotsConfirmed ||
                 !hasRequiredDiscrepancyReason(
                   request.quantity,
                   actualCount,
@@ -1788,7 +1827,16 @@ function CompletionDialog({
                     }}
                   />
                   <span className="font-mono">{item.box_number ?? `#${item.box_id}`}</span>
-                  <span className="text-sm text-slate-500">{item.lot}</span>
+                  {item.lot_id ? (
+                    <Link
+                      to={`/lots/${item.lot_id}`}
+                      className="text-sm text-brand-700 hover:underline"
+                    >
+                      {item.lot}
+                    </Link>
+                  ) : (
+                    <span className="text-sm text-slate-500">{item.lot}</span>
+                  )}
                 </label>
               ))}
             </div>

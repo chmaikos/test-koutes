@@ -21,6 +21,8 @@ import { CredentialsGate } from "@/components/CredentialsGate";
 import { DashboardPage } from "@/pages/DashboardPage";
 import { BoxesPage } from "@/pages/BoxesPage";
 import { BoxDetailPage } from "@/pages/BoxDetailPage";
+import { LotsPage } from "@/pages/LotsPage";
+import { LotDetailPage } from "@/pages/LotDetailPage";
 import { AlertsPage } from "@/pages/AlertsPage";
 import { AlertDetailPage } from "@/pages/AlertDetailPage";
 import { ExportsPage } from "@/pages/ExportsPage";
@@ -136,6 +138,8 @@ async function bootstrap() {
                     <Route index element={<DashboardPage />} />
                     <Route path="boxes" element={<BoxesPage />} />
                     <Route path="boxes/:id" element={<BoxDetailPage />} />
+                    <Route path="lots" element={<LotsPage />} />
+                    <Route path="lots/:id" element={<LotDetailPage />} />
                     <Route path="requests" element={<RequestPage />} />
                     <Route
                       path="requests/reconciliation"

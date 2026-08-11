@@ -39,7 +39,8 @@ export type BoxEventType =
   | "status_changed"
   | "returned"
   | "archived"
-  | "restored";
+  | "restored"
+  | "lot_reassigned";
 
 export interface User {
   id: number;
@@ -91,6 +92,7 @@ export interface Box {
   id: number;
   box_number: string;
   lot: string;
+  lot_id: number;
   contents: string | null;
   current_warehouse_id: number;
   status: BoxStatus;
@@ -332,6 +334,7 @@ export interface BoxFilters {
   warehouse_id?: number;
   status?: BoxStatus;
   lot?: string;
+  lot_id?: number;
   search?: string;
   received_from?: string;
   received_to?: string;
@@ -434,6 +437,7 @@ export type RequestSortField =
 export interface BoxRequestItem {
   id: number;
   box_id: number | null;
+  lot_id: number | null;
   lot: string | null;
   box_number: string | null;
   contents: string | null;
@@ -771,6 +775,7 @@ export interface ReturnCandidate {
   box_id: number;
   box_number: string;
   lot: string;
+  lot_id: number;
   contents: string | null;
   status: "ready_to_return";
 }
@@ -786,6 +791,97 @@ export interface RequestFilters {
   search?: string;
   sort_by?: RequestSortField;
   sort_dir?: "asc" | "desc";
+}
+
+export type LotProgressState =
+  | "active"
+  | "in_progress"
+  | "complete"
+  | "no_eligible";
+export type LotSortField =
+  | "name"
+  | "completion"
+  | "box_count"
+  | "last_activity";
+
+export interface LotStatusCounts extends Record<BoxStatus, number> {
+  quarantined: number;
+  received: number;
+  processing: number;
+  incomplete: number;
+  ready_to_return: number;
+  returned: number;
+}
+
+export interface LotSummary {
+  id: number;
+  name: string;
+  normalized_name: string;
+  version: number;
+  created_at: string;
+  updated_at: string;
+  physical_box_count: number;
+  box_count: number;
+  status_counts: LotStatusCounts;
+  eligible_box_count: number;
+  completed_box_count: number;
+  completion_percent: number | null;
+  progress_state: LotProgressState;
+  warehouse_count: number;
+  warehouse_names: string[];
+  staged_receipt_count: number;
+  last_box_activity: string | null;
+  acl_scoped: boolean;
+  scope_label: "global" | "accessible_warehouses_only";
+}
+
+export interface LotEvent {
+  id: number;
+  lot_id: number;
+  event_type: "created" | "renamed" | "reassigned";
+  old_name: string | null;
+  new_name: string | null;
+  actor_user_id: number | null;
+  reason: string | null;
+  occurred_at: string;
+  metadata: Record<string, unknown>;
+}
+
+export interface LotDetail extends LotSummary {
+  audit_history: LotEvent[];
+  audit_history_included: boolean;
+}
+
+export interface LotOption {
+  id: number;
+  name: string;
+  normalized_name: string;
+  exact_normalized_match: boolean;
+}
+
+export interface LotFilters {
+  search?: string;
+  warehouse_id?: number;
+  progress_state?: LotProgressState;
+  sort_by?: LotSortField;
+  sort_dir?: "asc" | "desc";
+}
+
+export interface LotCreatePayload {
+  name: string;
+  warehouse_id: number;
+}
+
+export interface LotRenamePayload {
+  new_name: string;
+  reason: string;
+  expected_version: number;
+}
+
+export interface BoxLotReassignmentPayload {
+  lot_id: number;
+  reason: string;
+  expected_lot_version: number;
 }
 
 export interface Notification {

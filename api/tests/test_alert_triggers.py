@@ -17,8 +17,10 @@ from sqlalchemy import select
 from app.config import get_settings
 from app.models.alerts import Alert, AlertType
 from app.models.boxes import Box, BoxStatus
+from app.models.lots import Lot
 from app.models.warehouses import Warehouse
 from app.services.alerts import evaluate_alerts
+from app.services.lots import find_lot
 
 
 @pytest.fixture(autouse=True)
@@ -37,6 +39,15 @@ def _set_warehouse(session, wid: int, *, mn: int, mx: int) -> Warehouse:
     return w
 
 
+def _lot(session, name: str) -> Lot:
+    lot = find_lot(session, name)
+    if lot is None:
+        lot = Lot(name=name)
+        session.add(lot)
+        session.flush()
+    return lot
+
+
 def _box(
     session,
     *,
@@ -47,7 +58,7 @@ def _box(
 ) -> Box:
     b = Box(
         box_number=box_number,
-        lot="L",
+        lot_record=_lot(session, "L"),
         current_warehouse_id=warehouse_id,
         status=status,
         received_at=received_at,

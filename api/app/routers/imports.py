@@ -28,7 +28,7 @@ from app.schemas.requests import (
     XlsxPreviewSheet,
 )
 from app.services.alerts import evaluate_safe
-from app.services.boxes import BoxRuleError
+from app.services.boxes import BoxAccessError, BoxRuleError
 from app.services.imports import import_boxes_xlsx, import_mapped_boxes
 from app.services.requests import RequestAccessError, RequestRuleError
 from app.services.xlsx_preview import MAX_XLSX_BYTES, preview_xlsx
@@ -88,17 +88,35 @@ async def import_mapped_box_rows(
             ],
             restore_archived=payload.restore_archived,
         )
-    except BoxRuleError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (BoxRuleError, RequestRuleError) as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=(
+                status.HTTP_403_FORBIDDEN
+                if isinstance(exc, (BoxAccessError, RequestAccessError))
+                else status.HTTP_400_BAD_REQUEST
+            ),
+            detail=str(exc),
+        ) from exc
     if outcome.created or outcome.restored:
         await bus.publish(
             "box.updated",
             {"warehouse_id": payload.warehouse_id, "bulk": True},
         )
     for request_id in outcome.receipt_request_ids:
-        await bus.publish("request.created", {"id": request_id})
+        await bus.publish(
+            "request.created",
+            {"id": request_id, "warehouse_id": payload.warehouse_id},
+        )
     for request_id in outcome.staged_receipt_ids:
-        await bus.publish("request.created", {"id": request_id, "staged": True})
+        await bus.publish(
+            "request.created",
+            {
+                "id": request_id,
+                "warehouse_id": payload.warehouse_id,
+                "staged": True,
+            },
+        )
         await publish_notification_event(
             warehouse_id=payload.warehouse_id,
             request_id=request_id,
@@ -156,10 +174,11 @@ async def import_boxes(
             restore_archived=restore_archived,
         )
     except (BoxRuleError, RequestRuleError) as exc:
+        db.rollback()
         raise HTTPException(
             status_code=(
                 status.HTTP_403_FORBIDDEN
-                if isinstance(exc, RequestAccessError)
+                if isinstance(exc, (BoxAccessError, RequestAccessError))
                 else status.HTTP_400_BAD_REQUEST
             ),
             detail=str(exc),
@@ -172,11 +191,23 @@ async def import_boxes(
     for wid in affected_warehouses:
         await bus.publish("box.updated", {"warehouse_id": wid, "bulk": True})
     for request_id in outcome.receipt_request_ids:
-        await bus.publish("request.created", {"id": request_id})
+        receipt = db.get(BoxRequest, request_id)
+        if receipt is not None:
+            await bus.publish(
+                "request.created",
+                {"id": request_id, "warehouse_id": receipt.warehouse_id},
+            )
     for request_id in outcome.staged_receipt_ids:
-        await bus.publish("request.created", {"id": request_id, "staged": True})
         staged = db.get(BoxRequest, request_id)
         if staged is not None:
+            await bus.publish(
+                "request.created",
+                {
+                    "id": request_id,
+                    "warehouse_id": staged.warehouse_id,
+                    "staged": True,
+                },
+            )
             await publish_notification_event(
                 warehouse_id=staged.warehouse_id,
                 request_id=request_id,

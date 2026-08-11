@@ -14,6 +14,7 @@ from openpyxl.utils import get_column_letter
 from app.models.boxes import Box, BoxStatus
 from app.models.employees import ProductivityEntry
 from app.schemas.requests import RequestAnalyticsOut, RequestReconciliationIssue
+from app.services.lots import LotSummary
 from app.services.productivity import EmployeeAverages
 
 EXPORT_COLUMNS = [
@@ -102,6 +103,30 @@ REQUEST_ANALYTICS_COLUMNS = [
     "Sample Size",
     "Completed Requests",
     "Completed Quantity",
+]
+
+LOT_SUMMARY_COLUMNS = [
+    "Lot ID",
+    "Lot",
+    "Physical Box Count",
+    "Total Non-Archived Boxes",
+    "Quarantined",
+    "Received",
+    "Processing",
+    "Incomplete",
+    "Ready To Return",
+    "Returned",
+    "Eligible Box Count",
+    "Completed Box Count",
+    "Completion Percent",
+    "Progress State",
+    "Visible Warehouse Count",
+    "Visible Warehouses",
+    "Staged Receipt Count",
+    "Last Box Activity",
+    "Created At",
+    "Updated At",
+    "Metrics Scope",
 ]
 
 
@@ -208,6 +233,58 @@ def boxes_to_xlsx(boxes: Iterable[Box], warehouses: Mapping[int, str]) -> bytes:
 
     buf = io.BytesIO()
     wb.save(buf)
+    return buf.getvalue()
+
+
+def _lot_summary_row(summary: LotSummary) -> list:
+    counts = summary.status_counts
+    return [
+        summary.id,
+        summary.name,
+        summary.physical_box_count,
+        summary.box_count,
+        counts["quarantined"],
+        counts["received"],
+        counts["processing"],
+        counts["incomplete"],
+        counts["ready_to_return"],
+        counts["returned"],
+        summary.eligible_box_count,
+        summary.completed_box_count,
+        summary.completion_percent,
+        summary.progress_state,
+        summary.warehouse_count,
+        "; ".join(summary.warehouse_names),
+        summary.staged_receipt_count,
+        _to_naive_utc(summary.last_box_activity),
+        _to_naive_utc(summary.created_at),
+        _to_naive_utc(summary.updated_at),
+        summary.scope_label,
+    ]
+
+
+def lot_summaries_to_csv(summaries: Iterable[LotSummary]) -> bytes:
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(LOT_SUMMARY_COLUMNS)
+    for summary in summaries:
+        writer.writerow(
+            [_format_csv_value(value) for value in _lot_summary_row(summary)]
+        )
+    return ("\ufeff" + buf.getvalue()).encode("utf-8")
+
+
+def lot_summaries_to_xlsx(summaries: Iterable[LotSummary]) -> bytes:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Lot summary"
+    _write_sheet(
+        sheet,
+        LOT_SUMMARY_COLUMNS,
+        (_lot_summary_row(summary) for summary in summaries),
+    )
+    buf = io.BytesIO()
+    workbook.save(buf)
     return buf.getvalue()
 
 

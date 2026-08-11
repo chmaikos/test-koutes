@@ -185,6 +185,7 @@ class BoxRequestItemOut(BaseModel):
 
     id: int
     box_id: int | None
+    lot_id: int | None
     lot: str | None
     box_number: str | None
     contents: str | None
@@ -522,6 +523,7 @@ class ReturnCandidateOut(BaseModel):
     box_id: int
     box_number: str
     lot: str
+    lot_id: int
     contents: str | None
     status: BoxStatus
 

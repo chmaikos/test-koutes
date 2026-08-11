@@ -4,9 +4,11 @@ Revision ID: 0018_productivity_reporting
 Revises: 0017_box_restoration_event
 Create Date: 2026-07-31 16:50:00.000000
 """
+
 from __future__ import annotations
 
 import sqlalchemy as sa
+
 from alembic import op
 
 revision = "0018_productivity_reporting"

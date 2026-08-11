@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.models.boxes import BoxEventType, BoxStatus
 from app.services.boxes import BoxRuleError, normalize_box_number
@@ -14,6 +14,7 @@ class BoxOut(BaseModel):
     id: int
     box_number: str
     lot: str
+    lot_id: int
     contents: str | None
     current_warehouse_id: int
     status: BoxStatus
@@ -30,7 +31,8 @@ class BoxOut(BaseModel):
 
 class BoxCreate(BaseModel):
     box_number: str = Field(min_length=1, max_length=64)
-    lot: str = Field(min_length=1, max_length=64)
+    lot: str | None = Field(default=None, min_length=1, max_length=64)
+    lot_id: int | None = Field(default=None, ge=1)
     contents: str | None = Field(default=None, max_length=200)
     warehouse_id: int = Field(ge=1)
     note: str | None = Field(default=None, max_length=2000)
@@ -47,11 +49,18 @@ class BoxCreate(BaseModel):
         except BoxRuleError as exc:
             raise ValueError(str(exc)) from exc
 
+    @model_validator(mode="after")
+    def _one_lot_identity(self) -> BoxCreate:
+        if (self.lot is None) == (self.lot_id is None):
+            raise ValueError("provide exactly one of lot or lot_id")
+        return self
+
 
 class BoxUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     status: BoxStatus | None = None
     warehouse_id: int | None = Field(default=None, ge=1)
-    lot: str | None = Field(default=None, min_length=1, max_length=64)
     contents: str | None = Field(default=None, max_length=200)
     note: str | None = Field(default=None, max_length=2000)
     force: bool = False

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import select
@@ -11,12 +11,15 @@ from app.models.boxes import Box
 from app.models.employees import Employee, ProductivityEntry
 from app.models.warehouses import Warehouse
 from app.routers._filters import BoxFilters, apply_box_filters, parse_box_filters
+from app.schemas.lots import LotProgressState, LotSortField
 from app.services.acl import apply_warehouse_filter
 from app.services.exports import (
     ProductivityDetailExportRow,
     ProductivitySummaryExportRow,
     boxes_to_csv,
     boxes_to_xlsx,
+    lot_summaries_to_csv,
+    lot_summaries_to_xlsx,
     productivity_to_csv,
     productivity_to_xlsx,
     request_analytics_to_csv,
@@ -24,6 +27,7 @@ from app.services.exports import (
     request_reconciliation_to_csv,
     request_reconciliation_to_xlsx,
 )
+from app.services.lots import list_lot_summaries
 from app.services.productivity import employee_averages
 from app.services.request_reporting import (
     RequestReportFilters,
@@ -165,6 +169,86 @@ def export_xlsx(
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={
             "Content-Disposition": f'attachment; filename="{_filename("boxes", "xlsx")}"'
+        },
+    )
+
+
+def _lot_export_rows(
+    db,
+    user,
+    *,
+    search: str | None,
+    warehouse_id: int | None,
+    progress_state: LotProgressState | None,
+    sort_by: LotSortField,
+    sort_dir: Literal["asc", "desc"],
+):
+    rows, _total = list_lot_summaries(
+        db,
+        user=user,
+        search=search,
+        warehouse_id=warehouse_id,
+        progress_state=progress_state,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+        page=1,
+        page_size=1_000_000,
+    )
+    return rows
+
+
+@router.get("/lots.csv")
+def export_lots_csv(
+    db: DbSession,
+    user: CurrentUser,
+    search: str | None = None,
+    warehouse_id: int | None = Query(default=None, ge=1),
+    progress_state: LotProgressState | None = None,
+    sort_by: LotSortField = "last_activity",
+    sort_dir: Literal["asc", "desc"] = "desc",
+) -> Response:
+    rows = _lot_export_rows(
+        db,
+        user,
+        search=search,
+        warehouse_id=warehouse_id,
+        progress_state=progress_state,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+    )
+    return Response(
+        content=lot_summaries_to_csv(rows),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f'attachment; filename="{_filename("lots", "csv")}"'
+        },
+    )
+
+
+@router.get("/lots.xlsx")
+def export_lots_xlsx(
+    db: DbSession,
+    user: CurrentUser,
+    search: str | None = None,
+    warehouse_id: int | None = Query(default=None, ge=1),
+    progress_state: LotProgressState | None = None,
+    sort_by: LotSortField = "last_activity",
+    sort_dir: Literal["asc", "desc"] = "desc",
+) -> Response:
+    rows = _lot_export_rows(
+        db,
+        user,
+        search=search,
+        warehouse_id=warehouse_id,
+        progress_state=progress_state,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+    )
+    return Response(
+        content=lot_summaries_to_xlsx(rows),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f'attachment; filename="{_filename("lots", "xlsx")}"'
         },
     )
 

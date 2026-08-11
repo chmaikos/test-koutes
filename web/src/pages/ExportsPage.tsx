@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Download } from "lucide-react";
 import { api } from "@/api/client";
 import { useRequestAssignees, useWarehouses } from "@/api/hooks";
-import type { BoxStatus, RequestIssueSeverity } from "@/api/types";
+import type { BoxStatus, LotProgressState, RequestIssueSeverity } from "@/api/types";
 import { ALL_BOX_STATUSES } from "@/api/types";
 import { STATUS_LABEL } from "@/components/StatusBadge";
 
@@ -13,6 +13,10 @@ export function ExportsPage() {
   const [receivedFrom, setReceivedFrom] = useState("");
   const [receivedTo, setReceivedTo] = useState("");
   const [downloading, setDownloading] = useState<"csv" | "xlsx" | null>(null);
+  const [lotSearch, setLotSearch] = useState("");
+  const [lotWarehouseId, setLotWarehouseId] = useState<number | "">("");
+  const [lotProgress, setLotProgress] = useState<LotProgressState | "">("");
+  const [lotDownloading, setLotDownloading] = useState<"csv" | "xlsx" | null>(null);
   const [productivityWarehouseId, setProductivityWarehouseId] = useState<
     number | ""
   >("");
@@ -107,6 +111,33 @@ export function ExportsPage() {
       alert(`Export failed${status ? `: status ${status}` : ""}`);
     } finally {
       setProductivityDownloading(null);
+    }
+  }
+
+  async function downloadLots(format: "csv" | "xlsx") {
+    setLotDownloading(format);
+    try {
+      const params: Record<string, string> = {};
+      if (lotSearch.trim()) params.search = lotSearch.trim();
+      if (lotWarehouseId) params.warehouse_id = String(lotWarehouseId);
+      if (lotProgress) params.progress_state = lotProgress;
+      const response = await api.get<Blob>(`/exports/lots.${format}`, {
+        params,
+        responseType: "blob",
+      });
+      const url = URL.createObjectURL(response.data);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `lots-${new Date().toISOString().replace(/[:.]/g, "-")}.${format}`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch (err) {
+      const status = (err as { response?: { status?: number } }).response?.status;
+      alert(`Lot export failed${status ? `: status ${status}` : ""}`);
+    } finally {
+      setLotDownloading(null);
     }
   }
 
@@ -249,6 +280,80 @@ export function ExportsPage() {
           <Download className="h-4 w-4" />
           {downloading === "xlsx" ? "Preparing..." : "Download XLSX"}
         </button>
+        </div>
+      </section>
+
+      <section className="card card-pad space-y-4">
+        <div>
+          <h2 className="font-semibold">Lot summary</h2>
+          <p className="text-xs text-slate-500">
+            Export ACL-scoped lot counts, completion, status distribution,
+            warehouses, staged receipts, and last activity.
+          </p>
+        </div>
+        <div className="grid gap-4 md:grid-cols-3">
+          <label className="block">
+            <span className="text-xs text-slate-500">Search</span>
+            <input
+              className="input"
+              placeholder="Lot name"
+              value={lotSearch}
+              onChange={(event) => setLotSearch(event.target.value)}
+            />
+          </label>
+          <label className="block">
+            <span className="text-xs text-slate-500">Warehouse</span>
+            <select
+              className="input"
+              value={lotWarehouseId}
+              onChange={(event) =>
+                setLotWarehouseId(
+                  event.target.value ? Number(event.target.value) : "",
+                )
+              }
+            >
+              <option value="">All accessible</option>
+              {warehouses.data?.map((warehouse) => (
+                <option key={warehouse.id} value={warehouse.id}>
+                  {warehouse.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="block">
+            <span className="text-xs text-slate-500">Progress</span>
+            <select
+              className="input"
+              value={lotProgress}
+              onChange={(event) =>
+                setLotProgress(event.target.value as LotProgressState | "")
+              }
+            >
+              <option value="">All</option>
+              <option value="active">Active</option>
+              <option value="in_progress">In progress</option>
+              <option value="complete">Complete</option>
+              <option value="no_eligible">No eligible boxes</option>
+            </select>
+          </label>
+        </div>
+        <div className="flex flex-wrap gap-3">
+          <button
+            className="btn-primary"
+            disabled={lotDownloading !== null}
+            onClick={() => void downloadLots("csv")}
+          >
+            <Download className="h-4 w-4" />
+            {lotDownloading === "csv" ? "Preparing…" : "Download lots CSV"}
+          </button>
+          <button
+            className="btn-secondary"
+            disabled={lotDownloading !== null}
+            onClick={() => void downloadLots("xlsx")}
+          >
+            <Download className="h-4 w-4" />
+            {lotDownloading === "xlsx" ? "Preparing…" : "Download lots XLSX"}
+          </button>
         </div>
       </section>
 

@@ -5,6 +5,8 @@ import {
   useBox,
   useBoxEvents,
   useDeleteBox,
+  useLot,
+  useReassignBoxLot,
   useUpdateBox,
   useWarehouses,
 } from "@/api/hooks";
@@ -12,11 +14,13 @@ import { ALL_BOX_STATUSES } from "@/api/types";
 import type { BoxStatus } from "@/api/types";
 import { STATUS_LABEL, StatusBadge } from "@/components/StatusBadge";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { LotPicker, type LotSelection } from "@/components/LotPicker";
 import { useHasRole } from "@/components/RoleGate";
 import {
   hasRequiredOverrideReason,
   shouldOfferForceArchive,
 } from "@/pages/boxIntegrity";
+import { reassignmentPayload } from "@/pages/lots";
 
 // Mirrors the API's linear chain. Each entry is "the next legal step"
 // for that state; admins toggling "Override rules" below get the full
@@ -36,9 +40,11 @@ export function BoxDetailPage() {
   const boxId = id ? Number(id) : undefined;
   const { data: box } = useBox(boxId);
   const events = useBoxEvents(boxId);
+  const sourceLot = useLot(box?.lot_id);
   const warehouses = useWarehouses(true);
   const update = useUpdateBox();
   const deleteBox = useDeleteBox();
+  const reassignLot = useReassignBoxLot();
   const canWrite = useHasRole(["admin", "operator"]);
   const isAdmin = useHasRole(["admin"]);
   const [override, setOverride] = useState(false);
@@ -47,6 +53,9 @@ export function BoxDetailPage() {
   const [deleteConflict, setDeleteConflict] = useState<string | null>(null);
   const [archiveReason, setArchiveReason] = useState("");
   const [actionError, setActionError] = useState<string | null>(null);
+  const [targetLot, setTargetLot] = useState<LotSelection | null>(null);
+  const [reassignmentReason, setReassignmentReason] = useState("");
+  const [reassignmentError, setReassignmentError] = useState<string | null>(null);
 
   if (!box) {
     return <p className="text-sm text-slate-500">Loading...</p>;
@@ -93,7 +102,12 @@ export function BoxDetailPage() {
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <h1 className="font-mono text-2xl font-semibold">{box.box_number}</h1>
-            <p className="text-sm text-slate-500">Lot: {box.lot}</p>
+            <p className="text-sm text-slate-500">
+              Lot:{" "}
+              <Link className="text-brand-700 hover:underline" to={`/lots/${box.lot_id}`}>
+                {box.lot}
+              </Link>
+            </p>
           </div>
           <div className="flex flex-col items-end gap-1">
             <StatusBadge status={box.status} />
@@ -196,6 +210,81 @@ export function BoxDetailPage() {
           </p>
         )}
       </header>
+
+      {isAdmin && !box.archived_at && (
+        <section className="card card-pad">
+          <h2 className="font-semibold">Reassign lot</h2>
+          <p className="mt-1 text-sm text-slate-600">
+            Admin-only audited correction. This moves the existing box to a
+            different lot and requires a reason.
+          </p>
+          <div className="mt-4 grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] md:items-end">
+            <LotPicker
+              label="Target lot"
+              value={targetLot}
+              onChange={setTargetLot}
+            />
+            <label className="block">
+              <span className="text-xs text-slate-500">Correction reason</span>
+              <input
+                className="input"
+                maxLength={2000}
+                value={reassignmentReason}
+                onChange={(event) => setReassignmentReason(event.target.value)}
+                placeholder="Required for audit history"
+              />
+            </label>
+            <button
+              type="button"
+              className="btn-primary"
+              disabled={
+                reassignLot.isPending ||
+                !targetLot ||
+                targetLot.id === box.lot_id ||
+                !reassignmentReason.trim() ||
+                !sourceLot.data
+              }
+              onClick={async () => {
+                if (!targetLot || !sourceLot.data) return;
+                setReassignmentError(null);
+                try {
+                  await reassignLot.mutateAsync({
+                    boxId: box.id,
+                    sourceLotId: box.lot_id,
+                    payload: reassignmentPayload(
+                      targetLot.id,
+                      reassignmentReason,
+                      sourceLot.data.version,
+                    ),
+                  });
+                  setTargetLot(null);
+                  setReassignmentReason("");
+                } catch (caught) {
+                  const status = (caught as { response?: { status?: number } })
+                    .response?.status;
+                  if (status === 409) {
+                    await sourceLot.refetch();
+                    setReassignmentError(
+                      "The source lot changed while you were editing. Latest state loaded; review and retry.",
+                    );
+                  } else {
+                    setReassignmentError(
+                      apiError(caught, "The box could not be reassigned."),
+                    );
+                  }
+                }
+              }}
+            >
+              {reassignLot.isPending ? "Reassigning…" : "Reassign box"}
+            </button>
+          </div>
+          {reassignmentError && (
+            <p role="alert" className="mt-3 text-sm text-rose-600">
+              {reassignmentError}
+            </p>
+          )}
+        </section>
+      )}
 
       <section className="card card-pad">
         <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-500">
@@ -357,6 +446,8 @@ function describeEvent(
       return `Archived at ${wname(ev.warehouse_id)}.`;
     case "restored":
       return `Restored to active inventory at ${wname(ev.to_warehouse_id)}.`;
+    case "lot_reassigned":
+      return "Lot reassigned by an administrator.";
     default:
       return ev.event_type;
   }

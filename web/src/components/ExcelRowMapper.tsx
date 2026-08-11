@@ -24,6 +24,7 @@ import {
   resolveXlsxTemplate,
   xlsxTemplateInput,
 } from "@/pages/xlsxMapping";
+import { LotPicker, type LotSelection } from "@/components/LotPicker";
 
 export function ExcelRowMapper({
   useCase,
@@ -54,6 +55,8 @@ export function ExcelRowMapper({
   const [lotSource, setLotSource] = useState<"fixed" | "column">("fixed");
   const [lotColumn, setLotColumn] = useState<number | undefined>();
   const [fixedLot, setFixedLot] = useState("");
+  const [fixedLotSelection, setFixedLotSelection] =
+    useState<LotSelection | null>(null);
   const [contentsColumn, setContentsColumn] = useState<number | undefined>();
   const [selectedRows, setSelectedRows] = useState<Set<number>>(new Set());
   const [rowStart, setRowStart] = useState(1);
@@ -110,6 +113,7 @@ export function ExcelRowMapper({
     setLotSource("fixed");
     setLotColumn(undefined);
     setFixedLot("");
+    setFixedLotSelection(null);
     setContentsColumn(undefined);
     setRowStart(1);
     setIncludeRowsByDefault(true);
@@ -179,6 +183,7 @@ export function ExcelRowMapper({
     setLotSource(resolved.lotSource);
     setLotColumn(resolved.lotColumn);
     setFixedLot(resolved.fixedLot);
+    setFixedLotSelection(null);
     setContentsColumn(resolved.contentsColumn);
     setRowStart(resolved.rowStart);
     setIncludeRowsByDefault(resolved.includeRowsByDefault);
@@ -302,6 +307,12 @@ export function ExcelRowMapper({
     }
     if (lotSource === "fixed" && !fixedLot.trim()) {
       setError("Enter the lot value to apply to the selected rows.");
+      return;
+    }
+    if (lotSource === "fixed" && !fixedLotSelection) {
+      setError(
+        "Select the existing fixed lot or explicitly create and confirm a new one.",
+      );
       return;
     }
     if (lotSource === "column" && lotColumn === undefined) {
@@ -587,16 +598,15 @@ export function ExcelRowMapper({
               </select>
             </label>
             {lotSource === "fixed" ? (
-              <label className="block">
-                <span className="text-xs text-slate-500">Fixed lot</span>
-                <input
-                  className="input"
-                  placeholder="For example PR100"
-                  maxLength={64}
-                  value={fixedLot}
-                  onChange={(event) => setFixedLot(event.target.value)}
-                />
-              </label>
+              <LotPicker
+                label="Fixed lot"
+                value={fixedLotSelection}
+                nameValue={fixedLot}
+                onNameChange={setFixedLot}
+                onChange={setFixedLotSelection}
+                warehouseId={warehouseId}
+                canCreate
+              />
             ) : (
               <ColumnSelect
                 label="Lot column"

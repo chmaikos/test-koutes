@@ -4,12 +4,14 @@ from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.deps import get_current_user
 from app.main import app
 from app.models.boxes import Box, BoxEvent, BoxEventType, BoxStatus
+from app.models.lots import Lot
 from app.models.requests import (
     BoxRequest,
     BoxRequestDirection,
@@ -19,6 +21,17 @@ from app.models.requests import (
 from app.models.users import UserRole
 from app.models.warehouses import Warehouse
 from app.services.requests import calculate_suggestion
+
+
+def _lot(session: Session, name: str) -> Lot:
+    lot = session.scalar(
+        select(Lot).where(Lot.normalized_name == name.strip().lower())
+    )
+    if lot is None:
+        lot = Lot(name=name)
+        session.add(lot)
+        session.flush()
+    return lot
 
 
 def _as_user(target: FastAPI, user) -> None:
@@ -34,7 +47,7 @@ def _consumption(
 ) -> None:
     box = Box(
         box_number=f"H-{number:04d}",
-        lot="HISTORY",
+        lot_record=_lot(session, "HISTORY"),
         current_warehouse_id=warehouse_id,
         status=BoxStatus.returned,
     )
@@ -56,7 +69,7 @@ def _available(session: Session, *, warehouse_id: int, number: int) -> None:
     session.add(
         Box(
             box_number=f"A-{number:04d}",
-            lot="AVAILABLE",
+            lot_record=_lot(session, "AVAILABLE"),
             current_warehouse_id=warehouse_id,
             status=BoxStatus.received,
         )
@@ -228,7 +241,7 @@ def test_capacity_cap_and_return_suggestion(session, make_user):
         session.add(
             Box(
                 box_number=f"R-{number}",
-                lot="RETURN",
+                lot_record=_lot(session, "RETURN"),
                 current_warehouse_id=1,
                 status=BoxStatus.ready_to_return,
             )
@@ -328,7 +341,7 @@ def test_future_and_non_consumption_events_are_excluded(
     )
     imported = Box(
         box_number="IMPORT",
-        lot="HISTORY",
+        lot_record=_lot(session, "HISTORY"),
         current_warehouse_id=1,
         status=BoxStatus.received,
     )
@@ -395,7 +408,7 @@ def test_upgrade_defaults_preserve_uncapped_legacy_formula(session, make_user):
         session.add(
             Box(
                 box_number=f"U-{number}",
-                lot="OCCUPIED",
+                lot_record=_lot(session, "OCCUPIED"),
                 current_warehouse_id=1,
                 status=BoxStatus.ready_to_return,
             )

@@ -35,6 +35,7 @@ import {
   type BulkResultSkipRow,
 } from "@/components/BulkResultDialog";
 import { ImportBoxesDialog } from "@/components/ImportBoxesDialog";
+import { LotPicker, type LotSelection } from "@/components/LotPicker";
 import { useHasRole } from "@/components/RoleGate";
 import {
   deleteActionLabel,
@@ -98,6 +99,8 @@ export function BoxesPage() {
     if (st) out.status = st as BoxStatus;
     const lot = params.get("lot");
     if (lot) out.lot = lot;
+    const lotId = Number(params.get("lot_id"));
+    if (Number.isInteger(lotId) && lotId > 0) out.lot_id = lotId;
     const search = params.get("q");
     if (search) out.search = search;
     const sortBy = params.get("sort_by");
@@ -292,14 +295,30 @@ export function BoxesPage() {
             ))}
           </select>
         </label>
-        <label className="block">
-          <span className="text-xs text-slate-500">Lot</span>
-          <input
-            className="input"
-            value={filters.lot ?? ""}
-            onChange={(e) => setParam("lot", e.target.value || undefined)}
-          />
-        </label>
+        <LotPicker
+          label="Lot"
+          value={
+            filters.lot_id
+              ? {
+                  id: filters.lot_id,
+                  name: params.get("lot_name") ?? `Lot #${filters.lot_id}`,
+                }
+              : null
+          }
+          onChange={(selection) => {
+            const next = new URLSearchParams(params);
+            next.delete("lot");
+            next.delete("page");
+            if (selection) {
+              next.set("lot_id", String(selection.id));
+              next.set("lot_name", selection.name);
+            } else {
+              next.delete("lot_id");
+              next.delete("lot_name");
+            }
+            setParams(next);
+          }}
+        />
       </div>
 
       {canWrite && selectedIds.size > 0 && (
@@ -905,7 +924,11 @@ function BoxRow({
           {box.box_number}
         </Link>
       </td>
-      <td className="px-4 py-2.5">{box.lot}</td>
+      <td className="px-4 py-2.5">
+        <Link className="text-brand-700 hover:underline" to={`/lots/${box.lot_id}`}>
+          {box.lot}
+        </Link>
+      </td>
       <td className="px-4 py-2.5">
         {box.contents ? (
           <span
@@ -998,7 +1021,11 @@ function BoxCard({
           </div>
           <dl className="mt-2 grid grid-cols-[5.5rem_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
             <dt className="text-slate-500">Lot</dt>
-            <dd className="truncate text-slate-800">{box.lot}</dd>
+            <dd className="truncate">
+              <Link className="text-brand-700 hover:underline" to={`/lots/${box.lot_id}`}>
+                {box.lot}
+              </Link>
+            </dd>
             <dt className="text-slate-500">Warehouse</dt>
             <dd className="truncate text-slate-800">{warehouseName}</dd>
             {box.contents && (
@@ -1045,7 +1072,7 @@ function CreateBoxModal({ onClose }: { onClose: () => void }) {
   const warehouses = useWarehouses();
   const create = useCreateBox();
   const [boxNumber, setBoxNumber] = useState("");
-  const [lot, setLot] = useState("");
+  const [lot, setLot] = useState<LotSelection | null>(null);
   const [contents, setContents] = useState("");
   const [warehouseId, setWarehouseId] = useState<number | "">("");
   const [error, setError] = useState<string | null>(null);
@@ -1075,7 +1102,7 @@ function CreateBoxModal({ onClose }: { onClose: () => void }) {
                 : trimmedNumber;
               await create.mutateAsync({
                 box_number: normalizedNumber,
-                lot: lot.trim(),
+                lot_id: lot!.id,
                 contents: trimmedContents || undefined,
                 warehouse_id: Number(warehouseId),
               });
@@ -1104,16 +1131,6 @@ function CreateBoxModal({ onClose }: { onClose: () => void }) {
             />
           </label>
           <label className="block">
-            <span className="text-xs text-slate-500">Lot</span>
-            <input
-              required
-              maxLength={64}
-              className="input"
-              value={lot}
-              onChange={(e) => setLot(e.target.value)}
-            />
-          </label>
-          <label className="block">
             <span className="text-xs text-slate-500">Contents (optional)</span>
             <textarea
               maxLength={200}
@@ -1123,6 +1140,14 @@ function CreateBoxModal({ onClose }: { onClose: () => void }) {
               onChange={(e) => setContents(e.target.value)}
             />
           </label>
+          <LotPicker
+            value={lot}
+            onChange={setLot}
+            warehouseId={warehouseId || undefined}
+            canCreate
+            disabled={!warehouseId || create.isPending}
+            label={warehouseId ? "Lot" : "Lot (choose warehouse first)"}
+          />
           <label className="block">
             <span className="text-xs text-slate-500">Warehouse</span>
             <select
@@ -1147,7 +1172,7 @@ function CreateBoxModal({ onClose }: { onClose: () => void }) {
               type="button"
               className="btn-secondary"
               onClick={onClose}
-              disabled={create.isPending}
+              disabled={create.isPending || !lot || !warehouseId}
             >
               Cancel
             </button>

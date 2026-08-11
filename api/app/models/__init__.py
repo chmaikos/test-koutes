@@ -10,6 +10,7 @@ from app.models.employees import (
     ProductivityEntry,
     ProductivityReportRun,
 )
+from app.models.lots import Lot, LotEvent, LotEventType
 from app.models.notifications import (
     InAppNotification,
     RequestEmailOutbox,
@@ -52,6 +53,9 @@ __all__ = [
     "BoxStatus",
     "Employee",
     "InAppNotification",
+    "Lot",
+    "LotEvent",
+    "LotEventType",
     "ProductivityEntry",
     "ProductivityReportRun",
     "BoxRequest",

@@ -20,6 +20,13 @@ import type {
   EmployeeImportResult,
   ImportResult,
   InboundRequestItemInput,
+  LotCreatePayload,
+  LotDetail,
+  LotEvent,
+  LotFilters,
+  LotOption,
+  LotRenamePayload,
+  LotSummary,
   NotificationPage,
   Page,
   ProductivityEntry,
@@ -42,6 +49,7 @@ import type {
   ReturnCandidate,
   ReturnSource,
   StagedReceiptResult,
+  BoxLotReassignmentPayload,
   User,
   Warehouse,
   XlsxMappingSuggestion,
@@ -67,6 +75,14 @@ export const queryKeys = {
   boxEvents: (id: number) => ["box-events", id] as const,
   boxes: (filters: BoxFilters, page: number, pageSize: number) =>
     ["boxes", filters, page, pageSize] as const,
+  lots: (filters: LotFilters, page: number, pageSize: number) =>
+    ["lots", filters, page, pageSize] as const,
+  lotOptions: (search: string, page: number, limit: number) =>
+    ["lot-options", search, page, limit] as const,
+  lot: (id: number) => ["lot", id] as const,
+  lotEvents: (id: number) => ["lot-events", id] as const,
+  lotBoxes: (id: number, filters: BoxFilters, page: number, pageSize: number) =>
+    ["lot-boxes", id, filters, page, pageSize] as const,
   requests: (filters: RequestFilters, page: number, pageSize: number) =>
     ["requests", filters, page, pageSize] as const,
   request: (id: number) => ["request", id] as const,
@@ -405,17 +421,151 @@ export function useBoxEvents(id: number | undefined) {
   });
 }
 
+function invalidateLotState(
+  qc: ReturnType<typeof useQueryClient>,
+  lotIds: number[] = [],
+) {
+  qc.invalidateQueries({ queryKey: ["lots"] });
+  qc.invalidateQueries({ queryKey: ["lot-options"] });
+  for (const id of lotIds) {
+    qc.invalidateQueries({ queryKey: queryKeys.lot(id) });
+    qc.invalidateQueries({ queryKey: queryKeys.lotEvents(id) });
+    qc.invalidateQueries({ queryKey: ["lot-boxes", id] });
+  }
+}
+
+export function useLots(filters: LotFilters, page: number, pageSize: number) {
+  return useQuery({
+    queryKey: queryKeys.lots(filters, page, pageSize),
+    queryFn: async () =>
+      (
+        await api.get<Page<LotSummary>>(
+          `/lots${buildQueryString({ ...filters, page, page_size: pageSize })}`,
+        )
+      ).data,
+    placeholderData: (previous) => previous,
+  });
+}
+
+export function useLotOptions(search: string, page = 1, limit = 25) {
+  return useQuery({
+    queryKey: queryKeys.lotOptions(search, page, limit),
+    queryFn: async () =>
+      (
+        await api.get<Page<LotOption>>(
+          `/lots/options${buildQueryString({ search, page, limit })}`,
+        )
+      ).data,
+  });
+}
+
+export function useLot(id: number | undefined) {
+  return useQuery({
+    queryKey: id ? queryKeys.lot(id) : ["lot", "noop"],
+    queryFn: async () => (await api.get<LotDetail>(`/lots/${id}`)).data,
+    enabled: !!id,
+  });
+}
+
+export function useLotEvents(id: number | undefined) {
+  return useQuery({
+    queryKey: id ? queryKeys.lotEvents(id) : ["lot-events", "noop"],
+    queryFn: async () =>
+      (await api.get<LotDetail>(`/lots/${id}`)).data.audit_history as LotEvent[],
+    enabled: !!id,
+  });
+}
+
+export function useLotBoxes(
+  id: number | undefined,
+  filters: BoxFilters,
+  page: number,
+  pageSize: number,
+) {
+  return useQuery({
+    queryKey: id
+      ? queryKeys.lotBoxes(id, filters, page, pageSize)
+      : ["lot-boxes", "noop"],
+    queryFn: async () =>
+      (
+        await api.get<Page<Box>>(
+          `/lots/${id}/boxes${buildQueryString({
+            ...filters,
+            page,
+            page_size: pageSize,
+          })}`,
+        )
+      ).data,
+    enabled: !!id,
+    placeholderData: (previous) => previous,
+  });
+}
+
+export function useCreateLot() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: LotCreatePayload) =>
+      (await api.post<LotSummary>("/lots", input)).data,
+    onSuccess: (lot) => invalidateLotState(qc, [lot.id]),
+  });
+}
+
+export function useRenameLot() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: { id: number; payload: LotRenamePayload }) =>
+      (await api.patch<LotSummary>(`/lots/${input.id}/rename`, input.payload))
+        .data,
+    onSuccess: (lot) => {
+      invalidateLotState(qc, [lot.id]);
+      qc.invalidateQueries({ queryKey: ["boxes"] });
+      qc.invalidateQueries({ queryKey: ["requests"] });
+    },
+    onError: (_error, input) => invalidateLotState(qc, [input.id]),
+  });
+}
+
+export function useReassignBoxLot() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: {
+      boxId: number;
+      sourceLotId: number;
+      payload: BoxLotReassignmentPayload;
+    }) =>
+      (
+        await api.post<Box>(
+          `/boxes/${input.boxId}/reassign-lot`,
+          input.payload,
+        )
+      ).data,
+    onSettled: (box, _error, input) => {
+      invalidateLotState(qc, [
+        input.sourceLotId,
+        input.payload.lot_id,
+        ...(box ? [box.lot_id] : []),
+      ]);
+      qc.invalidateQueries({ queryKey: ["boxes"] });
+      qc.invalidateQueries({ queryKey: queryKeys.box(input.boxId) });
+      qc.invalidateQueries({ queryKey: queryKeys.boxEvents(input.boxId) });
+      qc.invalidateQueries({ queryKey: ["requests"] });
+    },
+  });
+}
+
 export function useCreateBox() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (input: {
       box_number: string;
-      lot: string;
+      lot?: string;
+      lot_id?: number;
       contents?: string;
       warehouse_id: number;
       note?: string;
     }) => (await api.post<Box | StagedReceiptResult>("/boxes", input)).data,
     onSuccess: () => {
+      invalidateLotState(qc);
       qc.invalidateQueries({ queryKey: ["boxes"] });
       qc.invalidateQueries({ queryKey: queryKeys.dashboard });
       qc.invalidateQueries({ queryKey: ["alerts"] });
@@ -433,13 +583,13 @@ export function useUpdateBox() {
       patch: Partial<{
         status: Box["status"];
         warehouse_id: number;
-        lot: string;
         contents: string;
         note: string;
         force: boolean;
       }>;
     }) => (await api.patch<Box>(`/boxes/${input.id}`, input.patch)).data,
     onSuccess: (data) => {
+      invalidateLotState(qc, [data.lot_id]);
       qc.invalidateQueries({ queryKey: ["boxes"] });
       qc.invalidateQueries({ queryKey: queryKeys.box(data.id) });
       qc.invalidateQueries({ queryKey: queryKeys.boxEvents(data.id) });
@@ -538,6 +688,7 @@ export function useImportBoxes() {
       ).data;
     },
     onSuccess: () => {
+      invalidateLotState(qc);
       qc.invalidateQueries({ queryKey: ["boxes"] });
       qc.invalidateQueries({ queryKey: queryKeys.dashboard });
       qc.invalidateQueries({ queryKey: ["alerts"] });
@@ -658,6 +809,7 @@ export function useImportMappedBoxes() {
     }) =>
       (await api.post<ImportResult>("/boxes/import-mapped", input)).data,
     onSuccess: () => {
+      invalidateLotState(qc);
       qc.invalidateQueries({ queryKey: ["boxes"] });
       qc.invalidateQueries({ queryKey: queryKeys.dashboard });
       qc.invalidateQueries({ queryKey: ["alerts"] });
@@ -977,6 +1129,7 @@ export function useRequestAction() {
     },
     onSuccess: (data) => {
       invalidateRequestQueries(qc, data.id);
+      invalidateLotState(qc);
       qc.invalidateQueries({ queryKey: ["boxes"] });
       qc.invalidateQueries({ queryKey: queryKeys.dashboard });
     },

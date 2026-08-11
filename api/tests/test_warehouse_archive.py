@@ -7,6 +7,7 @@ from app.main import app
 from app.models.alerts import Alert, AlertType
 from app.models.boxes import Box, BoxStatus
 from app.models.employees import Employee
+from app.models.lots import Lot
 from app.models.users import UserRole
 from app.models.warehouses import Warehouse
 
@@ -74,7 +75,7 @@ def test_archive_cleanup_listing_restore_and_mutation_guards(
     )
     historical_box = Box(
         box_number="099",
-        lot="HISTORY",
+        lot_record=Lot(name="HISTORY"),
         current_warehouse_id=1,
         status=BoxStatus.returned,
     )

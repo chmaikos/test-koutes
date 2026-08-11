@@ -15,6 +15,7 @@ from app.models.warehouses import Warehouse
 class BoxFilters(BaseModel):
     warehouse_id: int | None = None
     status: BoxStatus | None = None
+    lot_id: int | None = None
     lot: str | None = None
     search: str | None = None
     received_from: datetime | None = None
@@ -40,6 +41,7 @@ class BoxSort(BaseModel):
 def parse_box_filters(
     warehouse_id: Annotated[int | None, Query()] = None,
     status: Annotated[BoxStatus | None, Query()] = None,
+    lot_id: Annotated[int | None, Query(ge=1)] = None,
     lot: Annotated[str | None, Query()] = None,
     search: Annotated[
         str | None,
@@ -53,6 +55,7 @@ def parse_box_filters(
     return BoxFilters(
         warehouse_id=warehouse_id,
         status=status,
+        lot_id=lot_id,
         lot=lot,
         search=search,
         received_from=received_from,
@@ -84,12 +87,20 @@ def parse_box_sort(
     return BoxSort(sort_by=sort_by, sort_dir=sort_dir)
 
 
-def apply_box_filters(stmt: Select, filters: BoxFilters) -> Select:
-    stmt = stmt.where(Box.archived_at.is_(None))
+def apply_box_filters(
+    stmt: Select,
+    filters: BoxFilters,
+    *,
+    include_archived: bool = False,
+) -> Select:
+    if not include_archived:
+        stmt = stmt.where(Box.archived_at.is_(None))
     if filters.warehouse_id is not None:
         stmt = stmt.where(Box.current_warehouse_id == filters.warehouse_id)
     if filters.status is not None:
         stmt = stmt.where(Box.status == filters.status)
+    if filters.lot_id is not None:
+        stmt = stmt.where(Box.lot_id == filters.lot_id)
     if filters.lot:
         stmt = stmt.where(Box.lot.ilike(f"%{filters.lot}%"))
     if filters.search:

@@ -13,10 +13,13 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    select,
 )
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.ext.hybrid import hybrid_property
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
+from app.models.lots import Lot
 
 
 class BoxStatus(str, enum.Enum):
@@ -57,6 +60,7 @@ ACTIVE_STATUSES: tuple[BoxStatus, ...] = OCCUPYING_STATUSES
 class BoxEventType(str, enum.Enum):
     created = "created"
     moved = "moved"
+    lot_reassigned = "lot_reassigned"
     status_changed = "status_changed"
     returned = "returned"
     archived = "archived"
@@ -65,19 +69,22 @@ class BoxEventType(str, enum.Enum):
 
 class Box(Base):
     __tablename__ = "boxes"
-    # ``box_number`` is unique only within a ``lot``: the same number can show
+    # ``box_number`` is unique only within a lot: the same number can show
     # up across different lots (a real-world warehouse routinely reuses
     # numbers like 001..050 for every fresh lot). The composite constraint
     # ``uq_boxes_lot_box_number`` enforces that at the database level so
     # racing inserts can't slip a duplicate past the application check.
     __table_args__ = (
         Index("ix_boxes_status_warehouse", "status", "current_warehouse_id"),
-        UniqueConstraint("lot", "box_number", name="uq_boxes_lot_box_number"),
+        UniqueConstraint("lot_id", "box_number", name="uq_boxes_lot_box_number"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     box_number: Mapped[str] = mapped_column(String(64), index=True)
-    lot: Mapped[str] = mapped_column(String(64), nullable=False)
+    lot_id: Mapped[int] = mapped_column(
+        ForeignKey("lots.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    lot_record: Mapped[Lot] = relationship(back_populates="boxes", lazy="joined")
     contents: Mapped[str | None] = mapped_column(String(200))
     current_warehouse_id: Mapped[int] = mapped_column(
         ForeignKey("warehouses.id", ondelete="RESTRICT"), nullable=False, index=True
@@ -105,6 +112,21 @@ class Box(Base):
     updated_by_user_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL")
     )
+
+    @property
+    def lot_name(self) -> str:
+        """Current display name; this is derived from the authoritative lot row."""
+        return self.lot_record.name
+
+    @hybrid_property
+    def lot(self) -> str:
+        """Compatibility accessor for API schemas and existing read queries."""
+        return self.lot_name
+
+    @lot.inplace.expression
+    @classmethod
+    def _lot_expression(cls):
+        return select(Lot.name).where(Lot.id == cls.lot_id).scalar_subquery()
 
 
 class BoxEvent(Base):
