@@ -365,6 +365,21 @@ def _audit_note(note: str | None, *, force: bool) -> str | None:
     return f"[admin override] {base}" if base else "[admin override]"
 
 
+@dataclass(frozen=True)
+class _RequestReturnMove:
+    request_id: int
+    source_warehouse_id: int
+    target_warehouse_id: int
+
+    def metadata(self) -> dict[str, object]:
+        return {
+            "request_id": self.request_id,
+            "source_warehouse_id": self.source_warehouse_id,
+            "target_warehouse_id": self.target_warehouse_id,
+            "request_workflow": True,
+        }
+
+
 def update_box(
     db: Session,
     *,
@@ -378,11 +393,28 @@ def update_box(
     commit: bool = True,
     cancelled_request_ids: set[int] | None = None,
     skip_request_guards: bool = False,
+    _request_return_move: _RequestReturnMove | None = None,
 ) -> Box:
     now = datetime.now(UTC)
     events: list[BoxEvent] = []
     audit_note = _audit_note(note, force=force)
     metadata_changed = False
+    if force and user.role != UserRole.admin:
+        raise BoxAccessError("force override requires admin role")
+    if force and not (note or "").strip():
+        raise BoxRuleError("a reason is required for an admin override")
+    if _request_return_move is not None and (
+        box.current_warehouse_id != _request_return_move.source_warehouse_id
+        or new_warehouse_id != _request_return_move.target_warehouse_id
+        or new_status != BoxStatus.returned
+        or not skip_request_guards
+    ):
+        raise BoxRuleError("invalid internal return request move")
+    request_move_metadata = (
+        _request_return_move.metadata()
+        if _request_return_move is not None
+        else {}
+    )
 
     # ACL: the caller must have access to the box's *current* warehouse to
     # touch it at all, and to the *target* warehouse if they're moving it.
@@ -410,12 +442,13 @@ def update_box(
     cancelled: set[int] = set()
     if moving and new_warehouse_id is not None:
         _ensure_warehouse(db, new_warehouse_id)
-        if not can_access(user, new_warehouse_id):
+        if (
+            _request_return_move is None
+            and not can_access(user, new_warehouse_id)
+        ):
             raise BoxAccessError(
                 f"no access to warehouse {new_warehouse_id}"
             )
-    if force and (moving or changing_status) and not (note or "").strip():
-        raise BoxRuleError("a reason is required for an admin override")
     if not skip_request_guards and (moving or changing_status):
         request_ids = _referencing_request_ids(db, box.id)
     if not skip_request_guards and moving:
@@ -452,7 +485,10 @@ def update_box(
 
     if new_warehouse_id is not None and new_warehouse_id != box.current_warehouse_id:
         _ensure_warehouse(db, new_warehouse_id)
-        if not can_access(user, new_warehouse_id):
+        if (
+            _request_return_move is None
+            and not can_access(user, new_warehouse_id)
+        ):
             raise BoxAccessError(
                 f"no access to warehouse {new_warehouse_id}"
             )
@@ -476,6 +512,7 @@ def update_box(
                     "operation": "forced_move" if force else "move",
                     "linked_request_ids": request_ids,
                     "cancelled_request_ids": sorted(cancelled),
+                    **request_move_metadata,
                 },
             )
         )
@@ -491,6 +528,8 @@ def update_box(
         box.status = new_status
         if new_status == BoxStatus.returned:
             box.returned_at = now
+        elif old_status == BoxStatus.returned:
+            box.returned_at = None
         events.append(
             BoxEvent(
                 box_id=box.id,
@@ -502,7 +541,11 @@ def update_box(
                 ),
                 from_status=old_status,
                 to_status=new_status,
-                from_warehouse_id=box.current_warehouse_id,
+                from_warehouse_id=(
+                    _request_return_move.source_warehouse_id
+                    if _request_return_move is not None
+                    else box.current_warehouse_id
+                ),
                 to_warehouse_id=box.current_warehouse_id,
                 occurred_at=now,
                 user_id=user.id,
@@ -513,6 +556,7 @@ def update_box(
                     "operation": "forced_status_change" if force else "status_change",
                     "linked_request_ids": request_ids,
                     "cancelled_request_ids": sorted(cancelled),
+                    **request_move_metadata,
                 },
             )
         )
@@ -530,6 +574,34 @@ def update_box(
     else:
         db.flush()
     return box
+
+
+def move_return_box_for_request(
+    db: Session,
+    *,
+    user: User,
+    box: Box,
+    request_id: int,
+    source_warehouse_id: int,
+    target_warehouse_id: int,
+    commit: bool = False,
+) -> Box:
+    """Move a reserved return box without granting public target-ACL bypass."""
+    return update_box(
+        db,
+        user=user,
+        box=box,
+        new_status=BoxStatus.returned,
+        new_warehouse_id=target_warehouse_id,
+        note=f"Returned through request #{request_id}",
+        commit=commit,
+        skip_request_guards=True,
+        _request_return_move=_RequestReturnMove(
+            request_id=request_id,
+            source_warehouse_id=source_warehouse_id,
+            target_warehouse_id=target_warehouse_id,
+        ),
+    )
 
 
 def reassign_box_lot(
@@ -691,6 +763,7 @@ class BulkOutcome:
     updated: list[Box] = field(default_factory=list)
     skipped: list[BulkSkipEntry] = field(default_factory=list)
     cancelled_request_ids: set[int] = field(default_factory=set)
+    affected_warehouse_ids: set[int] = field(default_factory=set)
 
 
 def bulk_update_boxes(
@@ -727,6 +800,7 @@ def bulk_update_boxes(
                 BulkSkipEntry(box_id=box_id, box_number="", reason="box not found")
             )
             continue
+        source_warehouse_id = box.current_warehouse_id
         try:
             updated = update_box(
                 db,
@@ -746,6 +820,9 @@ def bulk_update_boxes(
             )
             continue
         outcome.updated.append(updated)
+        outcome.affected_warehouse_ids.update(
+            (source_warehouse_id, updated.current_warehouse_id)
+        )
 
     return outcome
 

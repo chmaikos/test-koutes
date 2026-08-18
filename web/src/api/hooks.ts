@@ -7,12 +7,14 @@ import type {
   AlertTestEmailResult,
   Box,
   BoxDeleteResult,
+  BoxUpdateResult,
   BoxRequest,
   BoxEvent,
   BoxFilters,
   BulkBoxUpdate,
   BulkDeleteResult,
   BulkResult,
+  CreateBoxRequestInput,
   DashboardSummary,
   Employee,
   EmployeeAverages,
@@ -758,7 +760,8 @@ export function useUpdateBox() {
         note: string;
         force: boolean;
       }>;
-    }) => (await api.patch<Box>(`/boxes/${input.id}`, input.patch)).data,
+    }) =>
+      (await api.patch<BoxUpdateResult>(`/boxes/${input.id}`, input.patch)).data,
     onSuccess: (data) => {
       invalidateLotState(qc, [data.lot_id]);
       qc.invalidateQueries({ queryKey: ["boxes"] });
@@ -1186,33 +1189,8 @@ function invalidateRequestQueries(
 export function useCreateRequest() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (
-      input:
-        | {
-            direction: "inbound";
-            warehouse_id: number;
-            quantity: number;
-            priority?: BoxRequest["priority"];
-            requested_date?: string;
-            sla_deadline?: string;
-            destination_contact?: string;
-            internal_location?: string;
-            special_handling_instructions?: string;
-          }
-        | {
-            direction: "return";
-            warehouse_id: number;
-            quantity: number;
-            source_inbound_request_id: number;
-            box_ids: number[];
-            priority?: BoxRequest["priority"];
-            requested_date?: string;
-            sla_deadline?: string;
-            destination_contact?: string;
-            internal_location?: string;
-            special_handling_instructions?: string;
-          },
-    ) => (await api.post<BoxRequest>("/requests", input)).data,
+    mutationFn: async (input: CreateBoxRequestInput) =>
+      (await api.post<BoxRequest>("/requests", input)).data,
     onSuccess: (data) => invalidateRequestQueries(qc, data.id),
   });
 }

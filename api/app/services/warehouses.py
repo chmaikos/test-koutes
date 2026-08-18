@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.models.alerts import Alert
@@ -23,10 +23,14 @@ class WarehouseArchiveConflict(WarehouseRuleError):
         *,
         active_boxes: int = 0,
         active_requests: int = 0,
+        active_source_requests: int = 0,
+        active_target_requests: int = 0,
         last_active_warehouse: bool = False,
     ) -> None:
         self.active_boxes = active_boxes
         self.active_requests = active_requests
+        self.active_source_requests = active_source_requests
+        self.active_target_requests = active_target_requests
         self.last_active_warehouse = last_active_warehouse
         super().__init__("warehouse cannot be archived until blocking activity is cleared")
 
@@ -35,6 +39,8 @@ class WarehouseArchiveConflict(WarehouseRuleError):
             "message": str(self),
             "active_boxes": self.active_boxes,
             "active_requests": self.active_requests,
+            "active_source_requests": self.active_source_requests,
+            "active_target_requests": self.active_target_requests,
             "last_active_warehouse": self.last_active_warehouse,
         }
 
@@ -82,10 +88,31 @@ def archive_warehouse(
         )
         or 0
     )
-    active_requests = int(
+    active_source_requests = int(
         db.scalar(
             select(func.count(BoxRequest.id)).where(
                 BoxRequest.warehouse_id == warehouse_id,
+                BoxRequest.status.in_(BLOCKING_REQUEST_STATUSES),
+            )
+        )
+        or 0
+    )
+    active_target_requests = int(
+        db.scalar(
+            select(func.count(BoxRequest.id)).where(
+                BoxRequest.target_warehouse_id == warehouse_id,
+                BoxRequest.status.in_(BLOCKING_REQUEST_STATUSES),
+            )
+        )
+        or 0
+    )
+    active_requests = int(
+        db.scalar(
+            select(func.count(func.distinct(BoxRequest.id))).where(
+                or_(
+                    BoxRequest.warehouse_id == warehouse_id,
+                    BoxRequest.target_warehouse_id == warehouse_id,
+                ),
                 BoxRequest.status.in_(BLOCKING_REQUEST_STATUSES),
             )
         )
@@ -96,6 +123,8 @@ def archive_warehouse(
         raise WarehouseArchiveConflict(
             active_boxes=active_boxes,
             active_requests=active_requests,
+            active_source_requests=active_source_requests,
+            active_target_requests=active_target_requests,
             last_active_warehouse=last_active,
         )
 

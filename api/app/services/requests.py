@@ -47,9 +47,9 @@ from app.services.acl import can_access
 from app.services.boxes import (
     BoxRuleError,
     create_box,
+    move_return_box_for_request,
     normalize_box_number,
     restore_archived_box,
-    update_box,
 )
 from app.services.lots import (
     LotRuleError,
@@ -1082,6 +1082,7 @@ def create_request(
     *,
     user: User,
     warehouse_id: int,
+    target_warehouse_id: int | None,
     direction: BoxRequestDirection,
     quantity: int,
     source_inbound_request_id: int | None = None,
@@ -1095,11 +1096,19 @@ def create_request(
 ) -> BoxRequest:
     selected_box_ids = box_ids or []
     if direction == BoxRequestDirection.inbound:
+        if target_warehouse_id is not None:
+            raise RequestRuleError(
+                "inbound requests cannot specify target_warehouse_id"
+            )
         if source_inbound_request_id is not None or selected_box_ids:
             raise RequestRuleError(
                 "inbound requests cannot specify a source request or return boxes"
             )
     else:
+        if target_warehouse_id is None:
+            raise RequestRuleError(
+                "target_warehouse_id is required for return requests"
+            )
         if source_inbound_request_id is None:
             raise RequestRuleError(
                 "source_inbound_request_id is required for return requests"
@@ -1113,18 +1122,38 @@ def create_request(
                 "return quantity must match the number of selected boxes"
             )
 
-    # Serialize request creation per warehouse so two concurrent return
-    # requests cannot reserve the same physical boxes and inbound suggestions
-    # include any request committed immediately ahead of this one.
-    warehouse = db.scalar(
-        select(Warehouse).where(Warehouse.id == warehouse_id).with_for_update()
-    )
+    # Lock the source and return target in stable order. Besides serializing
+    # reservations per source, this prevents a target from being archived
+    # between validation and the request commit without deadlocking warehouse
+    # archival, which locks the same rows in ID order.
+    warehouse_ids = {warehouse_id}
+    if target_warehouse_id is not None:
+        warehouse_ids.add(target_warehouse_id)
+    locked_warehouses = {
+        warehouse.id: warehouse
+        for warehouse in db.scalars(
+            select(Warehouse)
+            .where(Warehouse.id.in_(sorted(warehouse_ids)))
+            .order_by(Warehouse.id)
+            .with_for_update()
+        ).all()
+    }
+    warehouse = locked_warehouses.get(warehouse_id)
     if warehouse is None:
         raise RequestRuleError("warehouse not found")
     if not warehouse.is_active:
         raise RequestRuleError("warehouse is archived")
     if not can_access(user, warehouse_id):
         raise RequestAccessError("no access to warehouse")
+    if direction == BoxRequestDirection.return_:
+        assert target_warehouse_id is not None
+        target_warehouse = locked_warehouses.get(target_warehouse_id)
+        if target_warehouse is None:
+            raise RequestRuleError(f"unknown warehouse_id: {target_warehouse_id}")
+        if not target_warehouse.is_active:
+            raise RequestRuleError(f"warehouse_id {target_warehouse_id} is archived")
+        if not can_access(user, target_warehouse_id):
+            raise RequestAccessError("no access to target warehouse")
     snapshot = calculate_suggestion(
         db, user=user, warehouse_id=warehouse_id, direction=direction
     )
@@ -1175,6 +1204,7 @@ def create_request(
     request = BoxRequest(
         direction=direction,
         warehouse_id=warehouse_id,
+        target_warehouse_id=target_warehouse_id,
         quantity=quantity,
         status=BoxRequestStatus.submitted,
         requester_user_id=user.id,
@@ -1232,6 +1262,11 @@ def create_request(
             user=user,
             from_status=None,
             to_status=BoxRequestStatus.submitted,
+            metadata={
+                "request_id": request.id,
+                "source_warehouse_id": request.warehouse_id,
+                "target_warehouse_id": request.target_warehouse_id,
+            },
         )
     )
     enqueue_request_event(
@@ -2330,6 +2365,15 @@ def complete_request(
             )
     else:
         _require_mover(user)
+        if request.target_warehouse_id is None:
+            raise RequestConflictError("return request has no target warehouse")
+        target_warehouse = db.scalar(
+            select(Warehouse)
+            .where(Warehouse.id == request.target_warehouse_id)
+            .with_for_update()
+        )
+        if target_warehouse is None or not target_warehouse.is_active:
+            raise RequestConflictError("target warehouse is archived")
         if len(request.items) != request.quantity:
             raise RequestConflictError("return allocation is incomplete")
         allocated_by_box_id = {
@@ -2346,9 +2390,16 @@ def complete_request(
             box_id not in allocated_by_box_id for box_id in selected_ids
         ):
             raise RequestRuleError("collected_box_ids must be a unique subset of the request")
+        locked_boxes = db.scalars(
+            select(Box)
+            .where(Box.id.in_(sorted(selected_ids)))
+            .order_by(Box.id)
+            .with_for_update(of=Box)
+        ).all()
+        boxes_by_id = {box.id: box for box in locked_boxes}
         return_boxes: list[Box] = []
         for box_id in selected_ids:
-            box = db.get(Box, box_id)
+            box = boxes_by_id.get(box_id)
             if (
                 box is None
                 or box.archived_at is not None
@@ -2362,14 +2413,14 @@ def complete_request(
             return_boxes.append(box)
         try:
             for box in return_boxes:
-                update_box(
+                move_return_box_for_request(
                     db,
                     user=user,
                     box=box,
-                    new_status=BoxStatus.returned,
-                    note=f"Returned through request #{request.id}",
+                    request_id=request.id,
+                    source_warehouse_id=request.warehouse_id,
+                    target_warehouse_id=target_warehouse.id,
                     commit=False,
-                    skip_request_guards=True,
                 )
         except BoxRuleError as exc:
             db.rollback()
@@ -2438,6 +2489,9 @@ def complete_request(
         ),
         now=now,
         metadata={
+            "request_id": request.id,
+            "source_warehouse_id": request.warehouse_id,
+            "target_warehouse_id": request.target_warehouse_id,
             "requested_quantity": request.quantity,
             "actual_quantity": request.actual_received_quantity,
             "variance_quantity": request.variance_quantity,
@@ -2504,6 +2558,7 @@ def _create_follow_up(
     follow_up = BoxRequest(
         direction=request.direction,
         warehouse_id=request.warehouse_id,
+        target_warehouse_id=request.target_warehouse_id,
         quantity=quantity,
         status=status,
         requester_user_id=request.requester_user_id,
@@ -2550,6 +2605,8 @@ def _create_follow_up(
                 "root_request_id": request.root_request_id or request.id,
                 "origin": origin.value,
                 "quantity": quantity,
+                "source_warehouse_id": follow_up.warehouse_id,
+                "target_warehouse_id": follow_up.target_warehouse_id,
             },
         )
     )

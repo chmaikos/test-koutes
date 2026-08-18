@@ -39,9 +39,12 @@ and threshold alerts (in-app + email via Microsoft Graph).
 - Fulfilment discrepancies support typed line records and photos. Partial
   inbound deliveries create backorders; partial collections release unresolved
   reservations into non-reserving follow-up drafts.
-- Returns are linked to a completed inbound order. Users select all or any
-  subset of that order's unreserved boxes currently marked Ready to Return;
-  remaining boxes can be included in later return requests.
+- Returns are linked to a completed inbound order and record an explicit source
+  and active target warehouse. The creator needs access to both; a warehouse
+  mover can complete the collection with source access alone. Completion
+  atomically moves the selected Ready-to-Return boxes to the target, marks them
+  Returned, and preserves the same target on partial-return follow-up drafts.
+  Remaining boxes can be included in later return requests.
 - XLSX imports and manual box creation automatically produce completed receipt
   batches, so those boxes use the same inbound-linked return workflow. Existing
   unlinked inventory is grouped into clearly labeled legacy receipt batches by
@@ -49,6 +52,10 @@ and threshold alerts (in-app + email via Microsoft Graph).
 - Request-linked boxes cannot be deleted or moved silently. Admin overrides
   require a reason; forced deletion archives the box and preserves its history,
   while conflicting active return requests are cancelled with an audit event.
+- Admins can correct the location of legacy Returned boxes individually or in
+  bulk without reopening them or changing `returned_at`. The audited relocation
+  requires an active destination and a reason, and reports any active return
+  requests cancelled by the correction.
 - Inbound receipt can be entered manually or populated from any `.xlsx`
   layout by choosing the worksheet, mapping columns, and selecting or skipping
   source rows. Repeated rows for the same lot and box number are merged, with
@@ -77,9 +84,10 @@ and threshold alerts (in-app + email via Microsoft Graph).
   lot summaries and productivity reports with employee averages and 90 days
   of daily-entry detail.
 - Low-inventory and max-capacity alerts in-app and via Graph email.
-- Admins can archive empty warehouses after open requests are closed. Archiving
-  preserves inventory and audit history, deactivates the roster, resolves open
-  alerts, and can be reversed from Settings.
+- Admins can archive empty warehouses after open requests are closed. A
+  warehouse used as either the source or target of blocking work cannot be
+  archived. Archiving preserves inventory and audit history, deactivates the
+  roster, resolves open alerts, and can be reversed from Settings.
 - Microsoft 365 SSO with four roles: **Admin**, **Warehouse Mover**,
   **Operator**, **Viewer**.
 - Mobile-friendly responsive UI; installable as a PWA on iOS and Android

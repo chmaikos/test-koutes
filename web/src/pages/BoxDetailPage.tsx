@@ -17,6 +17,7 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { LotPicker, type LotSelection } from "@/components/LotPicker";
 import { useHasRole } from "@/components/RoleGate";
 import {
+  formatCancelledRequestIds,
   hasRequiredOverrideReason,
   shouldOfferForceArchive,
 } from "@/pages/boxIntegrity";
@@ -56,6 +57,14 @@ export function BoxDetailPage() {
   const [targetLot, setTargetLot] = useState<LotSelection | null>(null);
   const [reassignmentReason, setReassignmentReason] = useState("");
   const [reassignmentError, setReassignmentError] = useState<string | null>(null);
+  const [relocationWarehouseId, setRelocationWarehouseId] = useState<number | "">(
+    "",
+  );
+  const [relocationReason, setRelocationReason] = useState("");
+  const [relocationCancelledIds, setRelocationCancelledIds] = useState<
+    number[] | null
+  >(null);
+  const [relocationError, setRelocationError] = useState<string | null>(null);
 
   if (!box) {
     return <p className="text-sm text-slate-500">Loading...</p>;
@@ -73,7 +82,7 @@ export function BoxDetailPage() {
     update.isPending ||
     box.archived_at !== null ||
     !hasRequiredOverrideReason(useOverride, overrideReason) ||
-    (!useOverride && box.status === "returned");
+    box.status === "returned";
   const currentBoxId = box.id;
 
   async function performUpdate(
@@ -137,7 +146,7 @@ export function BoxDetailPage() {
           <div className="flex items-center justify-between border-t border-slate-100 pt-3">
             <label
               className="flex items-center gap-1.5 text-xs text-amber-800"
-              title="Allow any status change or moving a returned box. Audit log will tag the change as [admin override]."
+              title="Allow protected status changes. Audit history will tag the change as an admin override."
             >
               <input
                 type="checkbox"
@@ -184,24 +193,26 @@ export function BoxDetailPage() {
                 {STATUS_LABEL[s]}
               </button>
             ))}
-            <select
-              className="input ml-auto inline-block w-auto text-xs"
-              value={box.current_warehouse_id}
-              disabled={warehouseSelectDisabled}
-              onChange={(e) =>
-                void performUpdate({
-                  warehouse_id: Number(e.target.value),
-                  force: useOverride || undefined,
-                  note: useOverride ? overrideReason.trim() : undefined,
-                })
-              }
-            >
-              {warehouses.data?.filter((w) => w.is_active).map((w) => (
-                <option key={w.id} value={w.id}>
-                  Move to {w.name}
-                </option>
-              ))}
-            </select>
+            {box.status !== "returned" && (
+              <select
+                className="input ml-auto inline-block w-auto text-xs"
+                value={box.current_warehouse_id}
+                disabled={warehouseSelectDisabled}
+                onChange={(e) =>
+                  void performUpdate({
+                    warehouse_id: Number(e.target.value),
+                    force: useOverride || undefined,
+                    note: useOverride ? overrideReason.trim() : undefined,
+                  })
+                }
+              >
+                {warehouses.data?.filter((w) => w.is_active).map((w) => (
+                  <option key={w.id} value={w.id}>
+                    Move to {w.name}
+                  </option>
+                ))}
+              </select>
+            )}
           </div>
         )}
         {actionError && (
@@ -210,6 +221,110 @@ export function BoxDetailPage() {
           </p>
         )}
       </header>
+
+      {isAdmin && box.status === "returned" && !box.archived_at && (
+        <section className="card card-pad border-amber-200 bg-amber-50/40">
+          <h2 className="font-semibold">Relocate returned box</h2>
+          <p className="mt-1 text-sm text-slate-600">
+            Admin-only audited correction. The box remains returned and keeps
+            its returned timestamp. Conflicting active return reservations will
+            be cancelled.
+          </p>
+          <form
+            className="mt-4 grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] md:items-end"
+            onSubmit={async (event) => {
+              event.preventDefault();
+              if (!relocationWarehouseId || !relocationReason.trim()) return;
+              setRelocationError(null);
+              setRelocationCancelledIds(null);
+              try {
+                const result = await update.mutateAsync({
+                  id: box.id,
+                  patch: {
+                    warehouse_id: relocationWarehouseId,
+                    force: true,
+                    note: relocationReason.trim(),
+                  },
+                });
+                setRelocationCancelledIds(result.cancelled_request_ids);
+                setRelocationWarehouseId("");
+                setRelocationReason("");
+              } catch (caught) {
+                setRelocationError(
+                  apiError(caught, "The returned box could not be relocated."),
+                );
+              }
+            }}
+          >
+            <label className="block">
+              <span className="text-xs text-slate-500">
+                Active destination warehouse
+              </span>
+              <select
+                required
+                className="input"
+                value={relocationWarehouseId}
+                disabled={update.isPending}
+                onChange={(event) =>
+                  setRelocationWarehouseId(
+                    event.target.value ? Number(event.target.value) : "",
+                  )
+                }
+              >
+                <option value="">Choose destination</option>
+                {warehouses.data
+                  ?.filter(
+                    (warehouse) =>
+                      warehouse.is_active &&
+                      warehouse.id !== box.current_warehouse_id,
+                  )
+                  .map((warehouse) => (
+                    <option key={warehouse.id} value={warehouse.id}>
+                      {warehouse.name}
+                    </option>
+                  ))}
+              </select>
+            </label>
+            <label className="block">
+              <span className="text-xs text-slate-500">Relocation reason</span>
+              <input
+                required
+                className="input"
+                maxLength={2000}
+                value={relocationReason}
+                disabled={update.isPending}
+                onChange={(event) => setRelocationReason(event.target.value)}
+                placeholder="Required for audit history"
+              />
+            </label>
+            <button
+              type="submit"
+              className="btn-primary"
+              disabled={
+                update.isPending ||
+                !relocationWarehouseId ||
+                !relocationReason.trim()
+              }
+            >
+              {update.isPending ? "Relocating…" : "Relocate returned box"}
+            </button>
+          </form>
+          {relocationCancelledIds !== null && (
+            <p className="mt-3 text-sm text-amber-900">
+              {relocationCancelledIds.length > 0
+                ? `Cancelled conflicting return request IDs: ${formatCancelledRequestIds(
+                    relocationCancelledIds,
+                  )}.`
+                : "No conflicting active return reservations were cancelled."}
+            </p>
+          )}
+          {relocationError && (
+            <p role="alert" className="mt-3 text-sm text-rose-600">
+              {relocationError}
+            </p>
+          )}
+        </section>
+      )}
 
       {isAdmin && !box.archived_at && (
         <section className="card card-pad">

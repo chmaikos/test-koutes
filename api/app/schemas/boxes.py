@@ -66,6 +66,10 @@ class BoxUpdate(BaseModel):
     force: bool = False
 
 
+class BoxUpdateResult(BoxOut):
+    cancelled_request_ids: list[int] = Field(default_factory=list)
+
+
 class BoxEventOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

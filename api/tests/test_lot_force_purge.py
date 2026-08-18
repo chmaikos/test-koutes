@@ -67,6 +67,9 @@ def _request(
     request = BoxRequest(
         direction=direction,
         warehouse_id=1,
+        target_warehouse_id=(
+            1 if direction == BoxRequestDirection.return_ else None
+        ),
         quantity=quantity if quantity is not None else len(items),
         status=status,
         requester_user_id=operator.id,

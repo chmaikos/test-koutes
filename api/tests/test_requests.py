@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.deps import get_current_user
 from app.main import app
-from app.models.boxes import Box, BoxStatus
+from app.models.boxes import Box, BoxEvent, BoxEventType, BoxStatus
 from app.models.requests import (
     BoxRequest,
     BoxRequestDirection,
@@ -20,7 +20,11 @@ from app.models.requests import (
 )
 from app.models.users import UserRole
 from app.models.warehouses import Warehouse
-from app.services.boxes import create_box
+from app.services.boxes import (
+    BoxRuleError,
+    create_box,
+    move_return_box_for_request,
+)
 from app.services.object_storage import StorageUnavailableError
 
 
@@ -56,6 +60,25 @@ def _document_data(client, request_id: int, **data):
         **data,
         "expected_version": str(_version(client, request_id)),
     }
+
+
+def _prepare_return_for_completion(client, request_id: int, mover, monkeypatch) -> None:
+    _as_user(app, mover)
+    assert _action(client, request_id, "approve").status_code == 200
+    monkeypatch.setattr("app.routers.requests.put_document", lambda **_: None)
+    uploaded = client.post(
+        f"/api/requests/{request_id}/documents",
+        data=_document_data(
+            client,
+            request_id,
+            document_type="return_note",
+            erp_reference=f"RN-{request_id}",
+        ),
+        files={"file": ("return.pdf", b"%PDF-1.7 return", "application/pdf")},
+    )
+    assert uploaded.status_code == 201
+    assert _action(client, request_id, "start-transit").status_code == 200
+    assert _action(client, request_id, "mark-arrived").status_code == 200
 
 
 def _box(session: Session, user, number: str, status: BoxStatus = BoxStatus.received) -> Box:
@@ -399,6 +422,7 @@ def test_return_workflow_reserves_and_returns_specific_boxes(
         json={
             "direction": "return",
             "warehouse_id": 1,
+            "target_warehouse_id": 1,
             "quantity": 2,
             "source_inbound_request_id": source_id,
             "box_ids": [boxes[0].id, boxes[2].id],
@@ -407,6 +431,7 @@ def test_return_workflow_reserves_and_returns_specific_boxes(
     assert created.status_code == 201
     request_id = created.json()["id"]
     assert created.json()["source_inbound_request_id"] == source_id
+    assert created.json()["target_warehouse_id"] == 1
     assert [item["box_id"] for item in created.json()["items"]] == [
         boxes[0].id,
         boxes[2].id,
@@ -433,7 +458,9 @@ def test_return_workflow_reserves_and_returns_specific_boxes(
     assert completed.json()["actual_received_quantity"] == 2
     assert completed.json()["variance_quantity"] == 0
     assert session.get(Box, boxes[0].id).status == BoxStatus.returned
+    assert session.get(Box, boxes[0].id).current_warehouse_id == 1
     assert session.get(Box, boxes[2].id).status == BoxStatus.returned
+    assert session.get(Box, boxes[2].id).current_warehouse_id == 1
     assert session.get(Box, boxes[1].id).status == BoxStatus.ready_to_return
 
     _as_user(app, requester)
@@ -442,6 +469,7 @@ def test_return_workflow_reserves_and_returns_specific_boxes(
         json={
             "direction": "return",
             "warehouse_id": 1,
+            "target_warehouse_id": 1,
             "quantity": 1,
             "source_inbound_request_id": source_id,
             "box_ids": [boxes[1].id],
@@ -472,7 +500,12 @@ def test_return_source_selection_validates_and_releases_reservations(
 
     missing_source = client.post(
         "/api/requests",
-        json={"direction": "return", "warehouse_id": 1, "quantity": 1},
+        json={
+            "direction": "return",
+            "warehouse_id": 1,
+            "target_warehouse_id": 1,
+            "quantity": 1,
+        },
     )
     assert missing_source.status_code == 400
     outside_source = client.post(
@@ -480,6 +513,7 @@ def test_return_source_selection_validates_and_releases_reservations(
         json={
             "direction": "return",
             "warehouse_id": 1,
+            "target_warehouse_id": 1,
             "quantity": 1,
             "source_inbound_request_id": source_id,
             "box_ids": [outside.id],
@@ -492,6 +526,7 @@ def test_return_source_selection_validates_and_releases_reservations(
         json={
             "direction": "return",
             "warehouse_id": 1,
+            "target_warehouse_id": 1,
             "quantity": 1,
             "source_inbound_request_id": source_id,
             "box_ids": [boxes[0].id],
@@ -503,6 +538,7 @@ def test_return_source_selection_validates_and_releases_reservations(
         json={
             "direction": "return",
             "warehouse_id": 1,
+            "target_warehouse_id": 1,
             "quantity": 1,
             "source_inbound_request_id": source_id,
             "box_ids": [boxes[0].id],
@@ -529,6 +565,7 @@ def test_return_source_selection_validates_and_releases_reservations(
         json={
             "direction": "return",
             "warehouse_id": 1,
+            "target_warehouse_id": 1,
             "quantity": 1,
             "source_inbound_request_id": source_id,
             "box_ids": [boxes[0].id],
@@ -574,6 +611,7 @@ def test_partial_return_creates_non_reserving_reselection_draft(
         json={
             "direction": "return",
             "warehouse_id": 1,
+            "target_warehouse_id": 2,
             "quantity": 2,
             "source_inbound_request_id": source_id,
             "box_ids": [box.id for box in boxes],
@@ -605,10 +643,12 @@ def test_partial_return_creates_non_reserving_reselection_draft(
     assert result["actual_received_quantity"] == 1
     assert result["variance_quantity"] == -1
     assert session.get(Box, boxes[0].id).status == BoxStatus.returned
+    assert session.get(Box, boxes[0].id).current_warehouse_id == 2
     assert session.get(Box, boxes[1].id).status == BoxStatus.ready_to_return
     draft = client.get(f"/api/requests/{result['child_request_ids'][0]}").json()
     assert draft["status"] == "draft"
     assert draft["origin"] == "return_reselection"
+    assert draft["target_warehouse_id"] == 2
     assert draft["items"] == []
     assert draft["parent_request_id"] == created["id"]
     _as_user(app, requester)
@@ -683,6 +723,7 @@ def test_return_completion_is_atomic_and_legacy_source_link_is_optional(
         json={
             "direction": "return",
             "warehouse_id": 1,
+            "target_warehouse_id": 1,
             "quantity": 2,
             "source_inbound_request_id": source_id,
             "box_ids": [box.id for box in boxes],
@@ -742,6 +783,7 @@ def test_admin_override_cancels_conflicting_return_and_audits_reason(
         json={
             "direction": "return",
             "warehouse_id": 1,
+            "target_warehouse_id": 1,
             "quantity": 1,
             "source_inbound_request_id": source_id,
             "box_ids": [boxes[0].id],
@@ -787,6 +829,7 @@ def test_return_completion_rejects_wrong_warehouse(
         json={
             "direction": "return",
             "warehouse_id": 1,
+            "target_warehouse_id": 1,
             "quantity": 1,
             "source_inbound_request_id": source_id,
             "box_ids": [boxes[0].id],
@@ -811,6 +854,274 @@ def test_return_completion_rejects_wrong_warehouse(
     completed = _action(client, return_id, "complete")
     assert completed.status_code == 409
     assert session.get(Box, boxes[0].id).status == BoxStatus.ready_to_return
+
+
+def test_return_creation_requires_active_accessible_target(
+    client, session, make_user, monkeypatch
+):
+    requester = make_user(UserRole.operator)
+    mover = make_user(UserRole.warehouse_mover)
+    source_id, boxes = _complete_inbound_order(
+        client,
+        session,
+        requester,
+        mover,
+        monkeypatch,
+        quantity=1,
+        lot="TARGET-CREATION",
+    )
+    boxes[0].status = BoxStatus.ready_to_return
+    session.commit()
+    _as_user(app, requester)
+
+    missing = client.post(
+        "/api/requests",
+        json={
+            "direction": "return",
+            "warehouse_id": 1,
+            "quantity": 1,
+            "source_inbound_request_id": source_id,
+            "box_ids": [boxes[0].id],
+        },
+    )
+    assert missing.status_code == 422
+
+    target = session.get(Warehouse, 2)
+    assert target is not None
+    target.is_active = False
+    session.commit()
+    inactive = client.post(
+        "/api/requests",
+        json={
+            "direction": "return",
+            "warehouse_id": 1,
+            "target_warehouse_id": 2,
+            "quantity": 1,
+            "source_inbound_request_id": source_id,
+            "box_ids": [boxes[0].id],
+        },
+    )
+    assert inactive.status_code == 400
+    assert "archived" in inactive.json()["detail"]
+
+    target.is_active = True
+    requester.warehouses = [session.get(Warehouse, 1)]
+    session.commit()
+    inaccessible = client.post(
+        "/api/requests",
+        json={
+            "direction": "return",
+            "warehouse_id": 1,
+            "target_warehouse_id": 2,
+            "quantity": 1,
+            "source_inbound_request_id": source_id,
+            "box_ids": [boxes[0].id],
+        },
+    )
+    assert inaccessible.status_code == 403
+    assert inaccessible.json()["detail"] == "no access to target warehouse"
+
+
+def test_cross_warehouse_return_moves_boxes_with_audit_and_source_only_mover(
+    client, session, make_user, monkeypatch
+):
+    requester = make_user(UserRole.operator)
+    mover = make_user(UserRole.warehouse_mover)
+    source_id, boxes = _complete_inbound_order(
+        client,
+        session,
+        requester,
+        mover,
+        monkeypatch,
+        quantity=1,
+        lot="CROSS-TARGET",
+    )
+    boxes[0].status = BoxStatus.ready_to_return
+    mover.warehouses = [session.get(Warehouse, 1)]
+    session.commit()
+    _as_user(app, requester)
+    created = client.post(
+        "/api/requests",
+        json={
+            "direction": "return",
+            "warehouse_id": 1,
+            "target_warehouse_id": 2,
+            "quantity": 1,
+            "source_inbound_request_id": source_id,
+            "box_ids": [boxes[0].id],
+        },
+    )
+    assert created.status_code == 201
+    request_id = created.json()["id"]
+    _prepare_return_for_completion(client, request_id, mover, monkeypatch)
+
+    published: list[tuple[str, dict[str, object]]] = []
+
+    async def capture(event_type: str, data: dict[str, object]) -> None:
+        published.append((event_type, data))
+
+    monkeypatch.setattr("app.routers.requests.bus.publish", capture)
+    completed = _action(client, request_id, "complete")
+
+    assert completed.status_code == 200
+    session.expire_all()
+    moved_box = session.get(Box, boxes[0].id)
+    assert moved_box is not None
+    assert moved_box.current_warehouse_id == 2
+    assert moved_box.status == BoxStatus.returned
+    assert moved_box.returned_at is not None
+
+    box_events = session.scalars(
+        select(BoxEvent)
+        .where(
+            BoxEvent.box_id == moved_box.id,
+            BoxEvent.event_type.in_((BoxEventType.moved, BoxEventType.returned)),
+        )
+        .order_by(BoxEvent.id)
+    ).all()
+    assert [event.event_type for event in box_events] == [
+        BoxEventType.moved,
+        BoxEventType.returned,
+    ]
+    for event in box_events:
+        assert event.event_metadata["request_id"] == request_id
+        assert event.event_metadata["source_warehouse_id"] == 1
+        assert event.event_metadata["target_warehouse_id"] == 2
+    assert box_events[0].from_warehouse_id == 1
+    assert box_events[0].to_warehouse_id == 2
+    assert box_events[1].from_warehouse_id == 1
+    assert box_events[1].to_warehouse_id == 2
+
+    completed_event = session.scalar(
+        select(BoxRequestEvent).where(
+            BoxRequestEvent.request_id == request_id,
+            BoxRequestEvent.event_type == BoxRequestEventType.completed,
+        )
+    )
+    assert completed_event is not None
+    assert completed_event.event_metadata["source_warehouse_id"] == 1
+    assert completed_event.event_metadata["target_warehouse_id"] == 2
+    request_sse = next(
+        data
+        for event_type, data in published
+        if event_type == "request.updated"
+    )
+    box_sse = [
+        data for event_type, data in published if event_type == "box.updated"
+    ]
+    assert {payload["warehouse_id"] for payload in box_sse} == {1, 2}
+    for payload in (request_sse, *box_sse):
+        assert payload["request_id"] == request_id
+        assert payload["source_warehouse_id"] == 1
+        assert payload["target_warehouse_id"] == 2
+
+
+def test_target_archived_before_completion_rolls_back_return(
+    client, session, make_user, monkeypatch
+):
+    requester = make_user(UserRole.operator)
+    mover = make_user(UserRole.warehouse_mover)
+    source_id, boxes = _complete_inbound_order(
+        client,
+        session,
+        requester,
+        mover,
+        monkeypatch,
+        quantity=1,
+        lot="ARCHIVED-TARGET-RACE",
+    )
+    boxes[0].status = BoxStatus.ready_to_return
+    session.commit()
+    _as_user(app, requester)
+    request_id = client.post(
+        "/api/requests",
+        json={
+            "direction": "return",
+            "warehouse_id": 1,
+            "target_warehouse_id": 2,
+            "quantity": 1,
+            "source_inbound_request_id": source_id,
+            "box_ids": [boxes[0].id],
+        },
+    ).json()["id"]
+    _prepare_return_for_completion(client, request_id, mover, monkeypatch)
+    target = session.get(Warehouse, 2)
+    assert target is not None
+    target.is_active = False
+    session.commit()
+
+    completed = _action(client, request_id, "complete")
+
+    assert completed.status_code == 409
+    assert "target warehouse is archived" in str(completed.json()["detail"])
+    session.expire_all()
+    unchanged = session.get(Box, boxes[0].id)
+    assert unchanged is not None
+    assert unchanged.current_warehouse_id == 1
+    assert unchanged.status == BoxStatus.ready_to_return
+    request = session.get(BoxRequest, request_id)
+    assert request is not None
+    assert request.status == BoxRequestStatus.awaiting_confirmation
+
+
+def test_cross_warehouse_return_rolls_back_all_boxes_on_move_failure(
+    client, session, make_user, monkeypatch
+):
+    requester = make_user(UserRole.operator)
+    mover = make_user(UserRole.warehouse_mover)
+    source_id, boxes = _complete_inbound_order(
+        client,
+        session,
+        requester,
+        mover,
+        monkeypatch,
+        quantity=2,
+        lot="ATOMIC-TARGET-MOVE",
+    )
+    for box in boxes:
+        box.status = BoxStatus.ready_to_return
+    session.commit()
+    _as_user(app, requester)
+    request_id = client.post(
+        "/api/requests",
+        json={
+            "direction": "return",
+            "warehouse_id": 1,
+            "target_warehouse_id": 2,
+            "quantity": 2,
+            "source_inbound_request_id": source_id,
+            "box_ids": [box.id for box in boxes],
+        },
+    ).json()["id"]
+    _prepare_return_for_completion(client, request_id, mover, monkeypatch)
+    calls = 0
+
+    def fail_second_move(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise BoxRuleError("simulated second move failure")
+        return move_return_box_for_request(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "app.services.requests.move_return_box_for_request",
+        fail_second_move,
+    )
+    completed = _action(client, request_id, "complete")
+
+    assert completed.status_code == 409
+    session.expire_all()
+    assert {
+        (
+            session.get(Box, box.id).current_warehouse_id,
+            session.get(Box, box.id).status,
+        )
+        for box in boxes
+    } == {(1, BoxStatus.ready_to_return)}
+    request = session.get(BoxRequest, request_id)
+    assert request is not None
+    assert request.status == BoxRequestStatus.awaiting_confirmation
+    assert request.actual_received_quantity is None
 
 
 def test_only_movers_can_approve_and_requester_can_cancel(client, session, make_user):

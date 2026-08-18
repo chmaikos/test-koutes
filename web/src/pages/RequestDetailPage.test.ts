@@ -43,6 +43,7 @@ function request(
     direction,
     status,
     warehouse_id: 1,
+    target_warehouse_id: direction === "return" ? 1 : null,
     quantity: 2,
     requester_user_id: 1,
     requester_name: "Requester",

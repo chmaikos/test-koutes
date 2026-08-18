@@ -39,6 +39,14 @@ import {
   returnSourceLabel,
   toggleReturnBox,
 } from "@/pages/returnSelection";
+import { requestLots } from "@/pages/requestLots";
+import {
+  activeTargetWarehouses,
+  defaultTargetWarehouseId,
+  requestWarehousePayload,
+  requestWarehouseRoute,
+  requestWarehouseValidationError,
+} from "@/pages/requestWarehouses";
 
 const PAGE_SIZE = 25;
 const DIRECTIONS: RequestDirection[] = ["inbound", "return"];
@@ -67,8 +75,6 @@ const SORT_FIELDS: { value: RequestSortField; label: string }[] = [
   { value: "created_at", label: "Created" },
   { value: "updated_at", label: "Updated" },
   { value: "priority", label: "Priority" },
-  { value: "sla_deadline", label: "SLA deadline" },
-  { value: "scheduled_window_start", label: "Transport window" },
   { value: "assignment", label: "Assignment" },
 ];
 
@@ -342,7 +348,7 @@ export function RequestPage() {
                 <th className="px-4 py-2.5 text-right">Quantity</th>
                 <th className="px-4 py-2.5">Priority</th>
                 <th className="px-4 py-2.5">Assigned</th>
-                <th className="px-4 py-2.5">Transport</th>
+                <th className="px-4 py-2.5">Lot</th>
                 <th className="px-4 py-2.5">Status</th>
               </tr>
             </thead>
@@ -365,11 +371,10 @@ export function RequestPage() {
                 <RequestRow
                   key={request.id}
                   request={request}
-                  warehouseName={
-                    warehouses.data?.find(
-                      (warehouse) => warehouse.id === request.warehouse_id,
-                    )?.name ?? `#${request.warehouse_id}`
-                  }
+                  warehouseLabel={requestWarehouseRoute(
+                    request,
+                    warehouses.data ?? [],
+                  ).label}
                 />
               ))}
             </tbody>
@@ -391,11 +396,10 @@ export function RequestPage() {
             <RequestCard
               key={request.id}
               request={request}
-              warehouseName={
-                warehouses.data?.find(
-                  (warehouse) => warehouse.id === request.warehouse_id,
-                )?.name ?? `#${request.warehouse_id}`
-              }
+              warehouseLabel={requestWarehouseRoute(
+                request,
+                warehouses.data ?? [],
+              ).label}
             />
           ))}
         </div>
@@ -434,13 +438,14 @@ export function RequestPage() {
 
 function RequestRow({
   request,
-  warehouseName,
+  warehouseLabel,
 }: {
   request: BoxRequest;
-  warehouseName: string;
+  warehouseLabel: string;
 }) {
   const DirectionIcon =
     request.direction === "inbound" ? ArrowDownToLine : ArrowUpFromLine;
+  const lots = requestLots(request);
   return (
     <tr className="hover:bg-slate-50">
       <td className="px-4 py-3 font-medium">
@@ -451,7 +456,7 @@ function RequestRow({
           #{request.id}
         </Link>
       </td>
-      <td className="px-4 py-3">{warehouseName}</td>
+      <td className="px-4 py-3">{warehouseLabel}</td>
       <td className="px-4 py-3">
         <span className="inline-flex items-center gap-1.5">
           <DirectionIcon className="h-4 w-4 text-slate-400" />
@@ -467,8 +472,8 @@ function RequestRow({
           <span className="text-amber-700">Unassigned</span>
         )}
       </td>
-      <td className="whitespace-nowrap px-4 py-3 text-xs text-slate-600">
-        {formatTransportWindow(request)}
+      <td className="px-4 py-3 text-xs text-slate-600">
+        <RequestLotLinks lots={lots} />
       </td>
       <td className="px-4 py-3">
         <RequestStatusBadge
@@ -482,11 +487,12 @@ function RequestRow({
 
 function RequestCard({
   request,
-  warehouseName,
+  warehouseLabel,
 }: {
   request: BoxRequest;
-  warehouseName: string;
+  warehouseLabel: string;
 }) {
+  const lots = requestLots(request);
   return (
     <Link
       to={`/requests/${request.id}`}
@@ -505,12 +511,14 @@ function RequestCard({
         />
       </div>
       <div className="mt-2 flex items-center justify-between text-xs text-slate-500">
-        <span>{warehouseName}</span>
+        <span>{warehouseLabel}</span>
         <PriorityBadge priority={request.priority} />
       </div>
       <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-slate-500">
         <span>{request.assigned_mover_name ?? "Unassigned"}</span>
-        <span className="text-right">{formatTransportWindow(request)}</span>
+        <span className="text-right">
+          <RequestLotLinks lots={lots} linked={false} />
+        </span>
       </div>
     </Link>
   );
@@ -530,22 +538,50 @@ function PriorityBadge({ priority }: { priority: RequestPriority }) {
   );
 }
 
-function formatTransportWindow(request: BoxRequest) {
-  if (!request.scheduled_window_start) return "Not scheduled";
-  const start = new Date(request.scheduled_window_start).toLocaleString();
-  if (!request.scheduled_window_end) return start;
-  return `${start} – ${new Date(request.scheduled_window_end).toLocaleTimeString()}`;
+function RequestLotLinks({
+  lots,
+  linked = true,
+}: {
+  lots: ReturnType<typeof requestLots>;
+  linked?: boolean;
+}) {
+  if (lots.length === 0) return <span>—</span>;
+  return (
+    <span className="inline-flex flex-wrap gap-x-1">
+      {lots.map((lot, index) => (
+        <span key={lot.key}>
+          {index > 0 && <span className="text-slate-400">, </span>}
+          {lot.id === null || !linked ? (
+            lot.name
+          ) : (
+            <Link
+              className="text-brand-700 hover:underline"
+              to={`/lots/${lot.id}`}
+              onClick={(event) => event.stopPropagation()}
+            >
+              {lot.name}
+            </Link>
+          )}
+        </span>
+      ))}
+    </span>
+  );
 }
 
 function CreateRequestDialog({ onClose }: { onClose: () => void }) {
   const warehouses = useWarehouses();
   const create = useCreateRequest();
+  const availableWarehouses = useMemo(
+    () => activeTargetWarehouses(warehouses.data ?? []),
+    [warehouses.data],
+  );
   const [direction, setDirection] = useState<RequestDirection>("inbound");
   const [warehouseId, setWarehouseId] = useState<number | undefined>();
+  const [targetWarehouseId, setTargetWarehouseId] = useState<
+    number | undefined
+  >();
   const [quantity, setQuantity] = useState(1);
   const [priority, setPriority] = useState<RequestPriority>("normal");
-  const [requestedDate, setRequestedDate] = useState("");
-  const [slaDeadline, setSlaDeadline] = useState("");
   const [destinationContact, setDestinationContact] = useState("");
   const [internalLocation, setInternalLocation] = useState("");
   const [specialInstructions, setSpecialInstructions] = useState("");
@@ -574,6 +610,7 @@ function CreateRequestDialog({ onClose }: { onClose: () => void }) {
     setSourceInboundRequestId(undefined);
     setSelectedBoxIds([]);
     setInitializedSourceId(undefined);
+    setError(null);
   }, [warehouseId, direction]);
 
   useEffect(() => {
@@ -614,12 +651,31 @@ function CreateRequestDialog({ onClose }: { onClose: () => void }) {
           onSubmit={async (event) => {
             event.preventDefault();
             if (!warehouseId) {
-              setError("Choose a warehouse.");
+              setError(
+                direction === "return"
+                  ? "Choose a source warehouse."
+                  : "Choose a warehouse.",
+              );
+              return;
+            }
+            const targetError = requestWarehouseValidationError(
+              direction,
+              targetWarehouseId,
+              availableWarehouses,
+            );
+            if (targetError) {
+              setError(targetError);
               return;
             }
             setError(null);
             try {
               if (direction === "return") {
+                const warehousePayload = requestWarehousePayload(
+                  direction,
+                  warehouseId,
+                  targetWarehouseId,
+                  availableWarehouses,
+                );
                 if (
                   !canSubmitReturnSelection(
                     sourceInboundRequestId,
@@ -633,30 +689,28 @@ function CreateRequestDialog({ onClose }: { onClose: () => void }) {
                 }
                 await create.mutateAsync({
                   direction,
-                  warehouse_id: warehouseId,
+                  ...warehousePayload,
                   quantity: selectedBoxIds.length,
                   source_inbound_request_id: sourceInboundRequestId!,
                   box_ids: selectedBoxIds,
                   priority,
-                  requested_date: requestedDate || undefined,
-                  sla_deadline: slaDeadline
-                    ? new Date(slaDeadline).toISOString()
-                    : undefined,
                   destination_contact: destinationContact || undefined,
                   internal_location: internalLocation || undefined,
                   special_handling_instructions:
                     specialInstructions || undefined,
                 });
               } else {
+                const warehousePayload = requestWarehousePayload(
+                  direction,
+                  warehouseId,
+                  targetWarehouseId,
+                  availableWarehouses,
+                );
                 await create.mutateAsync({
                   direction,
-                  warehouse_id: warehouseId,
+                  ...warehousePayload,
                   quantity,
                   priority,
-                  requested_date: requestedDate || undefined,
-                  sla_deadline: slaDeadline
-                    ? new Date(slaDeadline).toISOString()
-                    : undefined,
                   destination_contact: destinationContact || undefined,
                   internal_location: internalLocation || undefined,
                   special_handling_instructions:
@@ -689,7 +743,12 @@ function CreateRequestDialog({ onClose }: { onClose: () => void }) {
                       name="direction"
                       value={value}
                       checked={direction === value}
-                      onChange={() => setDirection(value)}
+                      onChange={() => {
+                        setDirection(value);
+                        setTargetWarehouseId(
+                          defaultTargetWarehouseId(value, warehouseId),
+                        );
+                      }}
                     />
                     <Icon className="h-4 w-4" />
                     {REQUEST_DIRECTION_LABEL[value]}
@@ -700,19 +759,25 @@ function CreateRequestDialog({ onClose }: { onClose: () => void }) {
           </fieldset>
 
           <label className="block">
-            <span className="text-xs text-slate-500">Warehouse</span>
+            <span className="text-xs text-slate-500">
+              {direction === "return" ? "Source warehouse" : "Warehouse"}
+            </span>
             <select
               required
               className="input"
               value={warehouseId ?? ""}
-              onChange={(event) =>
-                setWarehouseId(
-                  event.target.value ? Number(event.target.value) : undefined,
-                )
-              }
+              onChange={(event) => {
+                const nextWarehouseId = event.target.value
+                  ? Number(event.target.value)
+                  : undefined;
+                setWarehouseId(nextWarehouseId);
+                setTargetWarehouseId(
+                  defaultTargetWarehouseId(direction, nextWarehouseId),
+                );
+              }}
             >
               <option value="">Choose a warehouse</option>
-              {warehouses.data?.map((warehouse) => (
+              {availableWarehouses.map((warehouse) => (
                 <option key={warehouse.id} value={warehouse.id}>
                   {warehouse.name}
                 </option>
@@ -720,7 +785,37 @@ function CreateRequestDialog({ onClose }: { onClose: () => void }) {
             </select>
           </label>
 
-          <div className="grid gap-3 sm:grid-cols-3">
+          {direction === "return" && (
+            <label className="block">
+              <span className="text-xs text-slate-500">Target warehouse</span>
+              <select
+                required
+                className="input"
+                value={targetWarehouseId ?? ""}
+                onChange={(event) => {
+                  setTargetWarehouseId(
+                    event.target.value
+                      ? Number(event.target.value)
+                      : undefined,
+                  );
+                  setError(null);
+                }}
+              >
+                <option value="">Choose a target warehouse</option>
+                {availableWarehouses.map((warehouse) => (
+                  <option key={warehouse.id} value={warehouse.id}>
+                    {warehouse.name}
+                  </option>
+                ))}
+              </select>
+              <span className="mt-1 block text-xs text-slate-500">
+                Returned boxes will move from the source warehouse to this
+                warehouse.
+              </span>
+            </label>
+          )}
+
+          <div className="grid gap-3 sm:grid-cols-2">
             <label className="block">
               <span className="text-xs text-slate-500">Priority</span>
               <select
@@ -736,24 +831,6 @@ function CreateRequestDialog({ onClose }: { onClose: () => void }) {
                   </option>
                 ))}
               </select>
-            </label>
-            <label className="block">
-              <span className="text-xs text-slate-500">Requested date</span>
-              <input
-                className="input"
-                type="date"
-                value={requestedDate}
-                onChange={(event) => setRequestedDate(event.target.value)}
-              />
-            </label>
-            <label className="block">
-              <span className="text-xs text-slate-500">SLA deadline</span>
-              <input
-                className="input"
-                type="datetime-local"
-                value={slaDeadline}
-                onChange={(event) => setSlaDeadline(event.target.value)}
-              />
             </label>
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
@@ -981,6 +1058,11 @@ function CreateRequestDialog({ onClose }: { onClose: () => void }) {
               disabled={
                 create.isPending ||
                 !warehouseId ||
+                !!requestWarehouseValidationError(
+                  direction,
+                  targetWarehouseId,
+                  availableWarehouses,
+                ) ||
                 (direction === "inbound"
                   ? quantity < 1
                   : !canSubmitReturnSelection(

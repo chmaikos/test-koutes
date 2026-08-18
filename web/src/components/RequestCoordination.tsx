@@ -10,11 +10,6 @@ import {
   useUploadRequestAttachment,
 } from "@/api/hooks";
 import type { BoxRequest, RequestPriority } from "@/api/types";
-import {
-  toLocalDateTimeInput,
-  toUtcDateTime,
-  validTransportWindow,
-} from "@/pages/requestCoordination";
 
 const PRIORITIES: RequestPriority[] = ["low", "normal", "high", "urgent"];
 
@@ -28,64 +23,26 @@ export function RequestCoordinationPanel({
     request.permissions.can_assign ? request.warehouse_id : undefined,
   );
   const [priority, setPriority] = useState(request.priority);
-  const [requestedDate, setRequestedDate] = useState(request.requested_date ?? "");
-  const [windowStart, setWindowStart] = useState(
-    toLocalDateTimeInput(request.scheduled_window_start),
-  );
-  const [windowEnd, setWindowEnd] = useState(
-    toLocalDateTimeInput(request.scheduled_window_end),
-  );
-  const [slaDeadline, setSlaDeadline] = useState(
-    toLocalDateTimeInput(request.sla_deadline),
-  );
   const [assigneeId, setAssigneeId] = useState(
     request.assigned_mover_user_id?.toString() ?? "",
-  );
-  const [contact, setContact] = useState(request.destination_contact ?? "");
-  const [location, setLocation] = useState(request.internal_location ?? "");
-  const [instructions, setInstructions] = useState(
-    request.special_handling_instructions ?? "",
   );
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     setPriority(request.priority);
-    setRequestedDate(request.requested_date ?? "");
-    setWindowStart(toLocalDateTimeInput(request.scheduled_window_start));
-    setWindowEnd(toLocalDateTimeInput(request.scheduled_window_end));
-    setSlaDeadline(toLocalDateTimeInput(request.sla_deadline));
     setAssigneeId(request.assigned_mover_user_id?.toString() ?? "");
-    setContact(request.destination_contact ?? "");
-    setLocation(request.internal_location ?? "");
-    setInstructions(request.special_handling_instructions ?? "");
   }, [request]);
 
-  const editable =
+  const priorityEditable =
     request.permissions.can_assign || request.permissions.can_schedule;
+  const assigneeEditable = request.permissions.can_assign;
+  const editable = priorityEditable || assigneeEditable;
   const dirty = useMemo(
     () =>
       priority !== request.priority ||
-      requestedDate !== (request.requested_date ?? "") ||
-      windowStart !== toLocalDateTimeInput(request.scheduled_window_start) ||
-      windowEnd !== toLocalDateTimeInput(request.scheduled_window_end) ||
-      slaDeadline !== toLocalDateTimeInput(request.sla_deadline) ||
       assigneeId !==
-        (request.assigned_mover_user_id?.toString() ?? "") ||
-      contact !== (request.destination_contact ?? "") ||
-      location !== (request.internal_location ?? "") ||
-      instructions !== (request.special_handling_instructions ?? ""),
-    [
-      assigneeId,
-      contact,
-      instructions,
-      location,
-      priority,
-      request,
-      requestedDate,
-      slaDeadline,
-      windowEnd,
-      windowStart,
-    ],
+        (request.assigned_mover_user_id?.toString() ?? ""),
+    [assigneeId, priority, request],
   );
 
   return (
@@ -93,16 +50,16 @@ export function RequestCoordinationPanel({
       <header className="border-b border-slate-100 px-5 py-3">
         <h2 className="font-semibold">Coordination</h2>
         <p className="text-xs text-slate-500">
-          Assignment and transport planning. Every change is versioned and
-          recorded in the timeline.
+          Priority and mover assignment. Every change is versioned and recorded
+          in the timeline.
         </p>
       </header>
-      <div className="grid gap-3 p-5 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-3 p-5 sm:grid-cols-2">
         <Field label="Priority">
           <select
             className="input"
             value={priority}
-            disabled={!editable}
+            disabled={!priorityEditable}
             onChange={(event) =>
               setPriority(event.target.value as RequestPriority)
             }
@@ -115,7 +72,7 @@ export function RequestCoordinationPanel({
           </select>
         </Field>
         <Field label="Assigned mover">
-          {editable ? (
+          {assigneeEditable ? (
             <select
               className="input"
               value={assigneeId}
@@ -132,109 +89,32 @@ export function RequestCoordinationPanel({
             <Value>{request.assigned_mover_name ?? "Unassigned"}</Value>
           )}
         </Field>
-        <Field label="Requested date">
-          <input
-            className="input"
-            type="date"
-            value={requestedDate}
-            disabled={!editable}
-            onChange={(event) => setRequestedDate(event.target.value)}
-          />
-        </Field>
-        <Field label="SLA deadline">
-          <input
-            className="input"
-            type="datetime-local"
-            value={slaDeadline}
-            disabled={!editable}
-            onChange={(event) => setSlaDeadline(event.target.value)}
-          />
-        </Field>
-        <Field label="Transport window start">
-          <input
-            className="input"
-            type="datetime-local"
-            value={windowStart}
-            disabled={!request.permissions.can_schedule}
-            onChange={(event) => setWindowStart(event.target.value)}
-          />
-        </Field>
-        <Field label="Transport window end">
-          <input
-            className="input"
-            type="datetime-local"
-            value={windowEnd}
-            disabled={!request.permissions.can_schedule}
-            onChange={(event) => setWindowEnd(event.target.value)}
-          />
-        </Field>
-        <Field label="Destination contact">
-          <input
-            className="input"
-            value={contact}
-            maxLength={320}
-            disabled={!editable}
-            onChange={(event) => setContact(event.target.value)}
-          />
-        </Field>
-        <Field label="Internal location">
-          <input
-            className="input"
-            value={location}
-            maxLength={320}
-            disabled={!editable}
-            onChange={(event) => setLocation(event.target.value)}
-          />
-        </Field>
-        <label className="block sm:col-span-2 lg:col-span-4">
-          <span className="text-xs text-slate-500">
-            Special handling instructions
-          </span>
-          <textarea
-            className="input min-h-20"
-            value={instructions}
-            maxLength={5000}
-            disabled={!editable}
-            onChange={(event) => setInstructions(event.target.value)}
-          />
-        </label>
         {error && (
-          <p className="text-sm text-rose-600 sm:col-span-2 lg:col-span-4">
+          <p className="text-sm text-rose-600 sm:col-span-2">
             {error}
           </p>
         )}
         {editable && (
-          <div className="flex justify-end sm:col-span-2 lg:col-span-4">
+          <div className="flex justify-end sm:col-span-2">
             <button
               type="button"
               className="btn-primary"
               disabled={!dirty || update.isPending}
               onClick={async () => {
                 setError(null);
-                if (!validTransportWindow(windowStart, windowEnd)) {
-                  setError(
-                    windowStart
-                      ? "Transport window end must be after its start."
-                      : "Set a transport window start before the end.",
-                  );
-                  return;
-                }
                 try {
                   await update.mutateAsync({
                     id: request.id,
                     expectedVersion: request.version,
                     patch: {
-                      priority,
-                      requested_date: requestedDate || null,
-                      scheduled_window_start: toUtcDateTime(windowStart),
-                      scheduled_window_end: toUtcDateTime(windowEnd),
-                      sla_deadline: toUtcDateTime(slaDeadline),
-                      assigned_mover_user_id: assigneeId
-                        ? Number(assigneeId)
-                        : null,
-                      destination_contact: contact || null,
-                      internal_location: location || null,
-                      special_handling_instructions: instructions || null,
+                      ...(priorityEditable ? { priority } : {}),
+                      ...(assigneeEditable
+                        ? {
+                            assigned_mover_user_id: assigneeId
+                              ? Number(assigneeId)
+                              : null,
+                          }
+                        : {}),
                     },
                   });
                 } catch (caught) {

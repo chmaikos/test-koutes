@@ -8,6 +8,7 @@ from app.models.alerts import Alert, AlertType
 from app.models.boxes import Box, BoxStatus
 from app.models.employees import Employee
 from app.models.lots import Lot
+from app.models.requests import BoxRequest, BoxRequestDirection, BoxRequestStatus
 from app.models.users import UserRole
 from app.models.warehouses import Warehouse
 
@@ -193,3 +194,45 @@ def test_cannot_archive_last_active_warehouse(client, session):
 
     assert response.status_code == 409
     assert response.json()["detail"]["last_active_warehouse"] is True
+
+
+def test_return_target_blocks_archive_and_reports_target_role(client, session):
+    session.add(
+        BoxRequest(
+            direction=BoxRequestDirection.return_,
+            warehouse_id=1,
+            target_warehouse_id=2,
+            quantity=1,
+            status=BoxRequestStatus.submitted,
+        )
+    )
+    session.commit()
+
+    response = client.delete("/api/warehouses/2")
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["active_requests"] == 1
+    assert detail["active_source_requests"] == 0
+    assert detail["active_target_requests"] == 1
+
+
+def test_same_source_target_request_is_counted_once(client, session):
+    session.add(
+        BoxRequest(
+            direction=BoxRequestDirection.return_,
+            warehouse_id=1,
+            target_warehouse_id=1,
+            quantity=1,
+            status=BoxRequestStatus.submitted,
+        )
+    )
+    session.commit()
+
+    response = client.delete("/api/warehouses/1")
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["active_requests"] == 1
+    assert detail["active_source_requests"] == 1
+    assert detail["active_target_requests"] == 1

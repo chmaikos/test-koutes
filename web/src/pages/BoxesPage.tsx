@@ -38,7 +38,9 @@ import { ImportBoxesDialog } from "@/components/ImportBoxesDialog";
 import { LotPicker, type LotSelection } from "@/components/LotPicker";
 import { useHasRole } from "@/components/RoleGate";
 import {
+  canRelocateReturnedSelection,
   deleteActionLabel,
+  formatCancelledRequestIds,
   hasRequiredOverrideReason,
 } from "@/pages/boxIntegrity";
 import { importResultTitle } from "@/pages/importResults";
@@ -160,6 +162,9 @@ export function BoxesPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [selectedReturnedIds, setSelectedReturnedIds] = useState<Set<number>>(
+    new Set(),
+  );
   const [dialog, setDialog] = useState<DialogState>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleteOverride, setDeleteOverride] = useState(false);
@@ -171,6 +176,15 @@ export function BoxesPage() {
 
   const visibleIds = useMemo(
     () => data?.items.map((b) => b.id) ?? [],
+    [data?.items],
+  );
+  const visibleReturnedIds = useMemo(
+    () =>
+      new Set(
+        data?.items
+          .filter((box) => box.status === "returned")
+          .map((box) => box.id) ?? [],
+      ),
     [data?.items],
   );
   const visibleSelectedCount = visibleIds.filter((id) =>
@@ -196,22 +210,39 @@ export function BoxesPage() {
     setParams(next);
   }
 
-  function toggleId(id: number) {
+  function toggleId(id: number, status: BoxStatus) {
     setSelectedIds((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
       return next;
     });
+    if (status === "returned") {
+      setSelectedReturnedIds((prev) => {
+        const next = new Set(prev);
+        if (next.has(id)) next.delete(id);
+        else next.add(id);
+        return next;
+      });
+    }
   }
 
   function togglePage() {
+    const selecting = !allVisibleSelected;
     setSelectedIds((prev) => {
       const next = new Set(prev);
-      if (allVisibleSelected) {
+      if (!selecting) {
         for (const id of visibleIds) next.delete(id);
       } else {
         for (const id of visibleIds) next.add(id);
+      }
+      return next;
+    });
+    setSelectedReturnedIds((prev) => {
+      const next = new Set(prev);
+      for (const id of visibleReturnedIds) {
+        if (selecting) next.add(id);
+        else next.delete(id);
       }
       return next;
     });
@@ -219,6 +250,7 @@ export function BoxesPage() {
 
   function clearSelection() {
     setSelectedIds(new Set());
+    setSelectedReturnedIds(new Set());
   }
 
   return (
@@ -324,6 +356,7 @@ export function BoxesPage() {
       {canWrite && selectedIds.size > 0 && (
         <BulkActionBar
           count={selectedIds.size}
+          returnedCount={selectedReturnedIds.size}
           warehouses={(warehouses.data ?? []).filter(
             (warehouse) => warehouse.is_active,
           )}
@@ -441,7 +474,7 @@ export function BoxesPage() {
                   }
                   canWrite={canWrite}
                   selected={selectedIds.has(box.id)}
-                  onToggle={() => toggleId(box.id)}
+                  onToggle={() => toggleId(box.id, box.status)}
                 />
               ))}
             </tbody>
@@ -468,7 +501,7 @@ export function BoxesPage() {
               }
               canWrite={canWrite}
               selected={selectedIds.has(box.id)}
-              onToggle={() => toggleId(box.id)}
+              onToggle={() => toggleId(box.id, box.status)}
             />
           ))}
         </div>
@@ -536,7 +569,13 @@ export function BoxesPage() {
       )}
       {dialog?.kind === "bulk" && (
         <BulkResultDialog
-          title="Bulk update result"
+          title={`Bulk update result${
+            dialog.result.cancelled_request_ids.length
+              ? ` · cancelled request IDs ${formatCancelledRequestIds(
+                  dialog.result.cancelled_request_ids,
+                )}`
+              : ""
+          }`}
           successLabel="updated"
           successCount={dialog.result.updated.length}
           skipped={dialog.result.skipped.map<BulkResultSkipRow>((s) => ({
@@ -732,6 +771,7 @@ function SortableTh({
 
 function BulkActionBar({
   count,
+  returnedCount,
   warehouses,
   isPending,
   isAdmin,
@@ -740,6 +780,7 @@ function BulkActionBar({
   onRequestDelete,
 }: {
   count: number;
+  returnedCount: number;
   warehouses: { id: number; name: string }[];
   isPending: boolean;
   isAdmin: boolean;
@@ -756,6 +797,14 @@ function BulkActionBar({
   const [statusValue, setStatusValue] = useState<BoxStatus | "">("");
   const [override, setOverride] = useState(false);
   const [overrideReason, setOverrideReason] = useState("");
+  const relocatingReturned = returnedCount > 0 && warehouseId !== "";
+  const canRelocateReturned = canRelocateReturnedSelection(
+    returnedCount,
+    warehouseId !== "",
+    isAdmin,
+    override,
+    overrideReason,
+  );
 
   return (
     <div
@@ -803,7 +852,8 @@ function BulkActionBar({
           disabled={
             !warehouseId ||
             isPending ||
-            !hasRequiredOverrideReason(override, overrideReason)
+            !hasRequiredOverrideReason(override, overrideReason) ||
+            !canRelocateReturned
           }
           onClick={async () => {
             if (!warehouseId) return;
@@ -817,6 +867,21 @@ function BulkActionBar({
         >
           Move {count}
         </button>
+        {relocatingReturned && (
+          <p className="text-xs text-amber-800 md:max-w-sm">
+            {isAdmin
+              ? `${returnedCount} returned box${
+                  returnedCount === 1 ? "" : "es"
+                } selected. Enable the admin override and enter a reason to relocate ${
+                  returnedCount === 1 ? "it" : "them"
+                }; conflicting active return reservations will be cancelled.`
+              : `Returned boxes can only be relocated by an administrator. Deselect the ${returnedCount} returned box${
+                  returnedCount === 1 ? "" : "es"
+                } to avoid skipping ${
+                  returnedCount === 1 ? "it" : "them"
+                }; other selected boxes can still move.`}
+          </p>
+        )}
       </div>
       <div className="flex flex-col gap-2 md:flex-row md:items-center">
         <select

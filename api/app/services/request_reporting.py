@@ -70,10 +70,17 @@ def _request_rows(
     user: User,
     filters: RequestReportFilters,
     apply_date: bool = True,
-) -> list[tuple[BoxRequest, str, str | None]]:
+) -> list[tuple[BoxRequest, str, str | None, str | None]]:
     assignee = aliased(User)
+    target_warehouse = aliased(Warehouse)
     stmt = (
-        select(BoxRequest, Warehouse.name, assignee.display_name, assignee.email)
+        select(
+            BoxRequest,
+            Warehouse.name,
+            target_warehouse.name,
+            assignee.display_name,
+            assignee.email,
+        )
         .options(
             noload(BoxRequest.items),
             noload(BoxRequest.documents),
@@ -83,6 +90,11 @@ def _request_rows(
             noload(BoxRequest.operational_exceptions),
         )
         .join(Warehouse, Warehouse.id == BoxRequest.warehouse_id)
+        .join(
+            target_warehouse,
+            target_warehouse.id == BoxRequest.target_warehouse_id,
+            isouter=True,
+        )
         .join(assignee, assignee.id == BoxRequest.assigned_mover_user_id, isouter=True)
     )
     if filters.warehouse_id is not None:
@@ -97,8 +109,10 @@ def _request_rows(
         stmt = stmt.where(BoxRequest.submitted_at < filters.to_at)
     stmt = apply_warehouse_filter(stmt, user, BoxRequest.warehouse_id)
     return [
-        (request, warehouse_name, display_name or email)
-        for request, warehouse_name, display_name, email in db.execute(stmt).all()
+        (request, warehouse_name, target_name, display_name or email)
+        for request, warehouse_name, target_name, display_name, email in db.execute(
+            stmt
+        ).all()
     ]
 
 
@@ -135,9 +149,14 @@ def build_reconciliation(
 ) -> RequestReconciliationOut:
     generated_at = _aware(now or datetime.now(UTC))
     rows = _request_rows(db, user=user, filters=filters, apply_date=False)
-    requests = {request.id: request for request, _, _ in rows}
-    warehouse_names = {request.id: warehouse for request, warehouse, _ in rows}
-    assignee_names = {request.id: assignee for request, _, assignee in rows}
+    requests = {request.id: request for request, _, _, _ in rows}
+    warehouse_names = {
+        request.id: warehouse for request, warehouse, _, _ in rows
+    }
+    target_warehouse_names = {
+        request.id: target for request, _, target, _ in rows
+    }
+    assignee_names = {request.id: assignee for request, _, _, assignee in rows}
     request_ids = list(requests)
     if not request_ids:
         return RequestReconciliationOut(
@@ -225,6 +244,8 @@ def build_reconciliation(
                 box_id=box_id,
                 warehouse_id=request.warehouse_id,
                 warehouse_name=warehouse_names[request.id],
+                target_warehouse_id=request.target_warehouse_id,
+                target_warehouse_name=target_warehouse_names[request.id],
                 assigned_mover_user_id=request.assigned_mover_user_id,
                 assigned_mover_name=assignee_names[request.id],
                 request_status=request.status,
@@ -529,13 +550,14 @@ def build_request_analytics(
 ) -> RequestAnalyticsOut:
     generated_at = _aware(now or datetime.now(UTC))
     rows = _request_rows(db, user=user, filters=filters)
-    requests = [request for request, _, _ in rows]
+    requests = [request for request, _, _, _ in rows]
     warehouse_names = {
-        request.warehouse_id: warehouse_name for request, warehouse_name, _ in rows
+        request.warehouse_id: warehouse_name
+        for request, warehouse_name, _, _ in rows
     }
     assignee_names = {
         request.assigned_mover_user_id: assignee_name
-        for request, _, assignee_name in rows
+        for request, _, _, assignee_name in rows
         if request.assigned_mover_user_id is not None
     }
     completed = [

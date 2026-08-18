@@ -35,6 +35,7 @@ from app.schemas.boxes import (
     BoxEventOut,
     BoxOut,
     BoxUpdate,
+    BoxUpdateResult,
     BulkBoxUpdate,
     BulkDeleteRequest,
     BulkDeleteResult,
@@ -252,8 +253,7 @@ async def bulk_update(
 
     # Single SSE event per affected warehouse keeps the dashboard live without
     # spamming subscribers with hundreds of identical box.updated messages.
-    affected_warehouses = {b.current_warehouse_id for b in outcome.updated}
-    for wid in affected_warehouses:
+    for wid in outcome.affected_warehouse_ids:
         await bus.publish("box.updated", {"warehouse_id": wid, "bulk": True})
     for request_id in outcome.cancelled_request_ids:
         await _publish_request_update(db, request_id)
@@ -473,17 +473,18 @@ async def reassign_lot(
     return BoxOut.model_validate(box)
 
 
-@router.patch("/{box_id}", response_model=BoxOut)
+@router.patch("/{box_id}", response_model=BoxUpdateResult)
 async def patch_box(
     box_id: int,
     payload: BoxUpdate,
     db: DbSession,
     background: BackgroundTasks,
     user: Annotated[CurrentUser, Depends(require_operator)],
-) -> BoxOut:
+) -> BoxUpdateResult:
     box = db.get(Box, box_id)
     if box is None or not can_access(user, box.current_warehouse_id):
         raise HTTPException(status_code=404, detail="not found")
+    source_warehouse_id = box.current_warehouse_id
     _check_force(payload.force, user, payload.note)
     cancelled_request_ids: set[int] = set()
     try:
@@ -501,14 +502,17 @@ async def patch_box(
     except BoxRuleError as exc:
         db.rollback()
         raise _rule_error_to_http(exc) from exc
-    await bus.publish(
-        "box.updated",
-        {"id": box.id, "warehouse_id": box.current_warehouse_id, "status": box.status.value},
-    )
+    for warehouse_id in {source_warehouse_id, box.current_warehouse_id}:
+        await bus.publish(
+            "box.updated",
+            {"id": box.id, "warehouse_id": warehouse_id, "status": box.status.value},
+        )
     for request_id in cancelled_request_ids:
         await _publish_request_update(db, request_id)
     background.add_task(evaluate_safe, db)
-    return BoxOut.model_validate(box)
+    return BoxUpdateResult.model_validate(box).model_copy(
+        update={"cancelled_request_ids": sorted(cancelled_request_ids)}
+    )
 
 
 async def _perform_single_delete(

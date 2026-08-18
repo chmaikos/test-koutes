@@ -265,6 +265,7 @@ def _request_out(
         id=request.id,
         direction=request.direction,
         warehouse_id=request.warehouse_id,
+        target_warehouse_id=request.target_warehouse_id,
         quantity=request.quantity,
         status=request.status,
         requester_user_id=request.requester_user_id,
@@ -436,6 +437,9 @@ async def _publish(request: BoxRequest, event_type: str = "request.updated") -> 
         {
             "id": request.id,
             "warehouse_id": request.warehouse_id,
+            "source_warehouse_id": request.warehouse_id,
+            "target_warehouse_id": request.target_warehouse_id,
+            "request_id": request.id,
             "direction": request.direction.value,
             "status": request.status.value,
         },
@@ -750,6 +754,7 @@ async def submit_request(
             db,
             user=user,
             warehouse_id=payload.warehouse_id,
+            target_warehouse_id=payload.target_warehouse_id,
             direction=payload.direction,
             quantity=payload.quantity,
             source_inbound_request_id=payload.source_inbound_request_id,
@@ -1261,10 +1266,20 @@ async def complete(
         expected_version=payload.expected_version,
         idempotency_key=payload.idempotency_key,
     )
-    await bus.publish(
-        "box.updated",
-        {"warehouse_id": result.warehouse_id, "request_id": result.id, "bulk": True},
-    )
+    affected_warehouse_ids = {result.warehouse_id}
+    if result.target_warehouse_id is not None:
+        affected_warehouse_ids.add(result.target_warehouse_id)
+    for warehouse_id in affected_warehouse_ids:
+        await bus.publish(
+            "box.updated",
+            {
+                "warehouse_id": warehouse_id,
+                "source_warehouse_id": result.warehouse_id,
+                "target_warehouse_id": result.target_warehouse_id,
+                "request_id": result.id,
+                "bulk": True,
+            },
+        )
     background.add_task(evaluate_safe, db)
     return result
 

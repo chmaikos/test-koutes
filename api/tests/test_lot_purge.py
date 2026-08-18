@@ -215,6 +215,7 @@ def test_returns_families_and_incoming_references_are_blocked(session, make_user
     follow_up = BoxRequest(
         direction=BoxRequestDirection.return_,
         warehouse_id=1,
+        target_warehouse_id=1,
         quantity=1,
         status=BoxRequestStatus.completed,
         requester_user_id=operator.id,

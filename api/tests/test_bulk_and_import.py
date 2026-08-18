@@ -418,6 +418,7 @@ def test_imported_boxes_are_available_to_linked_return_flow(client):
         json={
             "direction": "return",
             "warehouse_id": 1,
+            "target_warehouse_id": 1,
             "quantity": 1,
             "source_inbound_request_id": source_id,
             "box_ids": [imported["created"][0]["id"]],

@@ -8,6 +8,7 @@ from sqlalchemy import (
     JSON,
     BigInteger,
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     Enum,
@@ -129,6 +130,11 @@ class BoxRequestDiscrepancyType(str, enum.Enum):
 class BoxRequest(Base):
     __tablename__ = "box_requests"
     __table_args__ = (
+        CheckConstraint(
+            "(direction = 'return' AND target_warehouse_id IS NOT NULL) OR "
+            "(direction = 'inbound' AND target_warehouse_id IS NULL)",
+            name="ck_box_requests_direction_target_warehouse",
+        ),
         Index("ix_box_requests_warehouse_status", "warehouse_id", "status"),
         Index("ix_box_requests_requester_created", "requester_user_id", "created_at"),
         Index("ix_box_requests_warehouse_submitted", "warehouse_id", "submitted_at"),
@@ -151,6 +157,15 @@ class BoxRequest(Base):
     )
     warehouse_id: Mapped[int] = mapped_column(
         ForeignKey("warehouses.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    target_warehouse_id: Mapped[int | None] = mapped_column(
+        ForeignKey(
+            "warehouses.id",
+            name="fk_box_requests_target_warehouse_id",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
+        index=True,
     )
     quantity: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[BoxRequestStatus] = mapped_column(

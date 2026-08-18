@@ -629,6 +629,7 @@ def test_archived_overwrite_target_survives_and_preserves_request_history(
         request = BoxRequest(
             direction=BoxRequestDirection.return_,
             warehouse_id=1,
+            target_warehouse_id=1,
             quantity=1,
             status=status,
             requester_user_id=operator.id,
@@ -767,6 +768,7 @@ def test_archived_overwrite_relinks_every_history_shape_without_collateral_delet
         request = BoxRequest(
             direction=BoxRequestDirection.return_,
             warehouse_id=1,
+            target_warehouse_id=1,
             quantity=1,
             status=status,
             requester_user_id=admin.id,
@@ -791,6 +793,7 @@ def test_archived_overwrite_relinks_every_history_shape_without_collateral_delet
     follow_up = BoxRequest(
         direction=BoxRequestDirection.return_,
         warehouse_id=1,
+        target_warehouse_id=1,
         quantity=1,
         status=BoxRequestStatus.draft,
         requester_user_id=admin.id,
@@ -1011,6 +1014,7 @@ def test_overwrite_rejects_link_graph_drift_with_refreshed_candidate(
     request = BoxRequest(
         direction=BoxRequestDirection.return_,
         warehouse_id=1,
+        target_warehouse_id=1,
         quantity=1,
         status=BoxRequestStatus.in_transit,
         requester_user_id=operator.id,

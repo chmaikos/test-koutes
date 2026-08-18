@@ -107,6 +107,10 @@ export interface Box {
   receipt_request_id: number | null;
 }
 
+export interface BoxUpdateResult extends Box {
+  cancelled_request_ids: number[];
+}
+
 export interface StagedReceiptResult {
   outcome: "staged";
   staged_receipt_id: number;
@@ -542,6 +546,7 @@ export interface BoxRequest {
   id: number;
   direction: RequestDirection;
   warehouse_id: number;
+  target_warehouse_id: number | null;
   quantity: number;
   status: RequestStatus;
   requester_user_id: number | null;
@@ -616,6 +621,29 @@ export interface BoxRequest {
   };
 }
 
+interface CreateBoxRequestBase {
+  warehouse_id: number;
+  quantity: number;
+  priority?: BoxRequest["priority"];
+  requested_date?: string;
+  sla_deadline?: string;
+  destination_contact?: string;
+  internal_location?: string;
+  special_handling_instructions?: string;
+}
+
+export type CreateBoxRequestInput =
+  | (CreateBoxRequestBase & {
+      direction: "inbound";
+      target_warehouse_id?: never;
+    })
+  | (CreateBoxRequestBase & {
+      direction: "return";
+      target_warehouse_id: number;
+      source_inbound_request_id: number;
+      box_ids: number[];
+    });
+
 export interface RequestEvent {
   id: number;
   event_type: string;
@@ -638,6 +666,8 @@ export interface RequestReconciliationIssue {
   box_id: number | null;
   warehouse_id: number;
   warehouse_name: string;
+  target_warehouse_id: number | null;
+  target_warehouse_name: string | null;
   assigned_mover_user_id: number | null;
   assigned_mover_name: string | null;
   request_status: RequestStatus;

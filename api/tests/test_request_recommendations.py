@@ -191,6 +191,7 @@ def test_pending_backorders_and_scheduled_work_are_explained(session, make_user)
             BoxRequest(
                 direction=BoxRequestDirection.return_,
                 warehouse_id=1,
+                target_warehouse_id=1,
                 quantity=3,
                 status=BoxRequestStatus.approved,
                 requester_user_id=user.id,

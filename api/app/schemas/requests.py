@@ -22,6 +22,7 @@ from app.services.boxes import BoxRuleError, normalize_box_number
 class BoxRequestCreate(BaseModel):
     direction: BoxRequestDirection
     warehouse_id: int = Field(ge=1)
+    target_warehouse_id: int | None = Field(default=None, ge=1)
     quantity: int = Field(ge=1, le=5000)
     source_inbound_request_id: int | None = Field(default=None, ge=1)
     box_ids: list[int] | None = Field(default=None, min_length=1, max_length=5000)
@@ -40,6 +41,20 @@ class BoxRequestCreate(BaseModel):
         if value is not None and any(box_id < 1 for box_id in value):
             raise ValueError("box_ids must contain positive IDs")
         return value
+
+    @model_validator(mode="after")
+    def validate_target_warehouse(self) -> BoxRequestCreate:
+        if (
+            self.direction == BoxRequestDirection.return_
+            and self.target_warehouse_id is None
+        ):
+            raise ValueError("target_warehouse_id is required for return requests")
+        if (
+            self.direction == BoxRequestDirection.inbound
+            and self.target_warehouse_id is not None
+        ):
+            raise ValueError("inbound requests cannot specify target_warehouse_id")
+        return self
 
 
 class RequestAction(BaseModel):
@@ -296,6 +311,7 @@ class BoxRequestOut(BaseModel):
     id: int
     direction: BoxRequestDirection
     warehouse_id: int
+    target_warehouse_id: int | None
     quantity: int
     status: BoxRequestStatus
     requester_user_id: int | None
@@ -386,6 +402,8 @@ class RequestReconciliationIssue(BaseModel):
     box_id: int | None = None
     warehouse_id: int
     warehouse_name: str
+    target_warehouse_id: int | None = None
+    target_warehouse_name: str | None = None
     assigned_mover_user_id: int | None = None
     assigned_mover_name: str | None = None
     request_status: BoxRequestStatus

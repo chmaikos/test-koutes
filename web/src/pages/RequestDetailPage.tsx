@@ -59,6 +59,7 @@ import {
   groupInboundItems,
   hasRequiredDiscrepancyReason,
 } from "@/pages/xlsxMapping";
+import { requestWarehouseRoute } from "@/pages/requestWarehouses";
 
 type ReasonDialog = "reject" | "cancel" | null;
 type OperationalDialog =
@@ -101,9 +102,13 @@ export function RequestDetailPage() {
   }
 
   const request = requestQuery.data;
-  const warehouseName =
-    warehouses.data?.find((warehouse) => warehouse.id === request.warehouse_id)
-      ?.name ?? `#${request.warehouse_id}`;
+  const warehouseRoute = requestWarehouseRoute(
+    request,
+    warehouses.data ?? [],
+  );
+  const warehouseName = warehouseRoute.sourceName;
+  const targetWarehouseName =
+    warehouseRoute.targetName ?? warehouseRoute.sourceName;
   const {
     canMove,
     canApprove,
@@ -158,9 +163,21 @@ export function RequestDetailPage() {
             <h1 className="text-2xl font-semibold tracking-tight">
               Request #{request.id}
             </h1>
-            <p className="mt-0.5 text-sm text-slate-500">
-              {REQUEST_DIRECTION_LABEL[request.direction]} · {warehouseName}
-            </p>
+            {request.direction === "return" ? (
+              <div className="mt-1">
+                <p className="text-xs font-medium uppercase tracking-wider text-slate-400">
+                  Return route
+                </p>
+                <p className="text-lg font-semibold text-slate-800">
+                  {warehouseRoute.label}
+                </p>
+              </div>
+            ) : (
+              <p className="mt-0.5 text-sm text-slate-500">
+                {REQUEST_DIRECTION_LABEL[request.direction]} · Warehouse:{" "}
+                {warehouseName}
+              </p>
+            )}
             {request.direction === "return" &&
               request.source_inbound_request_id !== null && (
                 <Link
@@ -204,10 +221,12 @@ export function RequestDetailPage() {
           <Field label="Requested by">
             {request.requester_name ?? `User #${request.requester_user_id}`}
           </Field>
-          <Field label="Submitted">
-            {formatDate(request.submitted_at ?? request.created_at)}
+          <Field label="Priority">
+            {humanize(request.priority)}
           </Field>
-          <Field label="Last updated">{formatDate(request.updated_at)}</Field>
+          <Field label="Assigned mover">
+            {request.assigned_mover_name ?? "Unassigned"}
+          </Field>
         </dl>
 
         <InventorySnapshot request={request} />
@@ -489,7 +508,11 @@ export function RequestDetailPage() {
       <RequestCoordinationPanel request={request} />
 
       {request.items.length > 0 && (
-        <ItemsSection request={request} warehouseName={warehouseName} />
+        <ItemsSection
+          request={request}
+          warehouseName={warehouseName}
+          targetWarehouseName={targetWarehouseName}
+        />
       )}
       {request.discrepancies.length > 0 && (
         <DiscrepanciesSection request={request} />
@@ -606,6 +629,8 @@ export function RequestDetailPage() {
       {showCompletion && (
         <CompletionDialog
           request={request}
+          sourceWarehouseName={warehouseName}
+          targetWarehouseName={targetWarehouseName}
           pending={action.isPending}
           error={actionError}
           onClose={() => setShowCompletion(false)}
@@ -673,9 +698,11 @@ function InventorySnapshot({ request }: { request: BoxRequest }) {
 function ItemsSection({
   request,
   warehouseName,
+  targetWarehouseName,
 }: {
   request: BoxRequest;
   warehouseName: string;
+  targetWarehouseName: string;
 }) {
   return (
     <section className="card overflow-hidden">
@@ -684,7 +711,7 @@ function ItemsSection({
         <p className="text-xs text-slate-500">
           {request.direction === "inbound"
             ? `Boxes received at ${warehouseName}.`
-            : `Boxes selected for this return from ${warehouseName}.`}
+            : `Returned boxes are moved from ${warehouseName} to ${targetWarehouseName} when this request is completed.`}
         </p>
       </header>
       <div className="overflow-x-auto">
@@ -1512,12 +1539,16 @@ function DiscrepancyEditor({
 
 function CompletionDialog({
   request,
+  sourceWarehouseName,
+  targetWarehouseName,
   pending,
   error,
   onClose,
   onSubmit,
 }: {
   request: BoxRequest;
+  sourceWarehouseName: string;
+  targetWarehouseName: string;
   pending: boolean;
   error: string | null;
   onClose: () => void;
@@ -1800,10 +1831,19 @@ function CompletionDialog({
               );
             }}
           >
-            <p className="text-sm text-slate-600">
-              Select the boxes actually collected. Unselected reservations are
-              released and moved into a non-reserving follow-up draft.
-            </p>
+            <div className="rounded-lg border border-brand-200 bg-brand-50 p-3">
+              <p className="text-xs font-medium uppercase tracking-wider text-brand-700">
+                Return destination
+              </p>
+              <p className="mt-0.5 text-lg font-semibold text-brand-950">
+                {targetWarehouseName}
+              </p>
+              <p className="mt-1 text-sm text-brand-900">
+                Collected boxes will move from {sourceWarehouseName} to{" "}
+                {targetWarehouseName}. Unselected reservations are released
+                and moved into a non-reserving follow-up draft.
+              </p>
+            </div>
             <div className="space-y-2">
               {request.items.map((item) => (
                 <label
@@ -1870,8 +1910,8 @@ function CompletionDialog({
               onClose={onClose}
               confirmLabel={
                 collectedBoxIds.size === request.quantity
-                  ? "Accept return"
-                  : "Accept partial return"
+                  ? `Accept return at ${targetWarehouseName}`
+                  : `Accept partial return at ${targetWarehouseName}`
               }
             />
           </form>
