@@ -141,6 +141,33 @@ class LotHardBoxOverlapOut(BaseModel):
     target_active_box_ids: list[int]
 
 
+class LotPalletCollisionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    normalized_pallet_number: str
+    source_pallet_id: int
+    source_pallet_number: str
+    source_warehouse_id: int
+    source_is_active: bool
+    target_pallet_id: int
+    target_pallet_number: str
+    target_warehouse_id: int
+    target_is_active: bool
+    reason: Literal["warehouse_mismatch", "inactive_target"]
+
+
+class LotPalletMergeActionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    source_pallet_id: int
+    source_pallet_number: str
+    source_warehouse_id: int
+    source_is_active: bool
+    action: Literal["combine", "transfer"]
+    target_pallet_id: int | None
+    box_count: int
+
+
 class LotMergeCandidateOut(BaseModel):
     source: LotIdentityOut
     target: LotIdentityOut
@@ -154,6 +181,12 @@ class LotMergeCandidateOut(BaseModel):
     hard_overlaps: list[LotHardBoxOverlapOut]
     hard_overlap_count: int
     hard_overlaps_truncated: bool
+    pallet_collisions: list[LotPalletCollisionOut]
+    pallet_collision_count: int
+    pallet_collisions_truncated: bool
+    pallet_actions: list[LotPalletMergeActionOut]
+    pallet_action_count: int
+    pallet_actions_truncated: bool
     merge_allowed_with_archived_overwrite: bool
     requires_explicit_overwrite: bool
     collision_signature: str = Field(
@@ -170,6 +203,10 @@ class LotMergeOut(BaseModel):
     relinked_request_item_count: int = 0
     relinked_discrepancy_count: int = 0
     deleted_box_event_count: int = 0
+    combined_pallet_count: int = 0
+    moved_pallet_count: int = 0
+    absorbed_pallet_ids: list[int] = Field(default_factory=list)
+    moved_pallet_ids: list[int] = Field(default_factory=list)
 
 
 class LotMergeConflictOut(BaseModel):
@@ -244,6 +281,12 @@ class LotPurgePreviewOut(BaseModel):
     archived_box_count: int
     archived_box_ids: list[int]
     archived_box_ids_truncated: bool
+    active_pallet_count: int
+    active_pallet_ids: list[int]
+    active_pallet_ids_truncated: bool
+    archived_pallet_count: int
+    archived_pallet_ids: list[int]
+    archived_pallet_ids_truncated: bool
     linked_request_count: int
     linked_request_ids: list[int]
     linked_request_ids_truncated: bool
@@ -279,6 +322,7 @@ class LotPurgeResultOut(BaseModel):
     purge_audit_id: int
     deleted_lot: LotIdentityOut
     archived_box_count: int
+    pallet_count: int
     receipt_count: int
     object_key_count: int
     object_cleanup_status: LotPurgeCleanupStatus
@@ -387,6 +431,12 @@ class LotForcePurgePreviewOut(BaseModel):
     archived_box_ids: list[int]
     archived_box_count: int
     archived_box_ids_truncated: bool
+    active_pallet_ids: list[int]
+    active_pallet_count: int
+    active_pallet_ids_truncated: bool
+    archived_pallet_ids: list[int]
+    archived_pallet_count: int
+    archived_pallet_ids_truncated: bool
     touched_request_ids: list[int]
     touched_request_count: int
     touched_request_ids_truncated: bool
@@ -424,6 +474,7 @@ class LotForcePurgeResultOut(BaseModel):
     purge_mode: Literal["force"] = "force"
     active_box_count: int
     archived_box_count: int
+    pallet_count: int
     touched_request_count: int
     rewritten_request_count: int
     deleted_request_count: int
@@ -458,6 +509,14 @@ class BoxLotReassignment(BaseModel):
     lot_id: int = Field(ge=1)
     reason: str = Field(min_length=1, max_length=2000)
     expected_lot_version: int = Field(ge=1)
+    pallet_id: int | None = Field(default=None, ge=1)
+    detach_pallet: bool = False
+
+    @model_validator(mode="after")
+    def validate_pallet_action(self) -> BoxLotReassignment:
+        if self.pallet_id is not None and self.detach_pallet:
+            raise ValueError("pallet_id and detach_pallet cannot both be supplied")
+        return self
 
 
 class LotFilters(BaseModel):
@@ -480,6 +539,8 @@ __all__ = [
     "LotIdentityOut",
     "LotArchivedBoxCollisionOut",
     "LotHardBoxOverlapOut",
+    "LotPalletCollisionOut",
+    "LotPalletMergeActionOut",
     "LotMerge",
     "LotMergeCandidateOut",
     "LotMergeConflictOut",

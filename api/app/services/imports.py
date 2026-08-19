@@ -32,8 +32,10 @@ from app.services.lots import (
     validate_lot_name,
 )
 from app.services.requests import (
+    RequestRuleError,
     create_completed_receipt,
     create_staged_receipt,
+    merge_inbound_items,
     receipt_requires_review,
 )
 
@@ -49,6 +51,11 @@ _HEADER_ALIASES = {
     "lot": "lot",
     "lot number": "lot",
     "lot_number": "lot",
+    "pallet_number": "pallet_number",
+    "pallet number": "pallet_number",
+    "pallet": "pallet_number",
+    "pallet_id": "pallet_id",
+    "pallet id": "pallet_id",
     "contents": "contents",
     "description": "contents",
     "warehouse_id": "warehouse_id",
@@ -107,7 +114,7 @@ def import_mapped_boxes(
     *,
     user: User,
     warehouse_id: int,
-    items: list[tuple[str, str, str | None]],
+    items: list[tuple[str, str, str, int | None, str | None]],
     restore_archived: bool = False,
 ) -> ImportOutcome:
     outcome = ImportOutcome()
@@ -116,9 +123,10 @@ def import_mapped_boxes(
         raise BoxRuleError(f"warehouse {warehouse_id} does not exist or is archived")
     if not can_access(user, warehouse_id):
         raise BoxAccessError(f"no access to warehouse {warehouse_id}")
-    canonical_items: list[tuple[int, str, str, str | None]] = []
-    seen_pairs: set[tuple[str, str]] = set()
-    for position, (box_number, lot, contents) in enumerate(items, start=1):
+    canonical_rows: list[InboundBoxItem] = []
+    for position, (box_number, lot, pallet_number, pallet_id, contents) in enumerate(
+        items, start=1
+    ):
         try:
             cleaned_number = normalize_box_number(box_number)
             cleaned_lot = validate_lot_name(lot)
@@ -131,18 +139,23 @@ def import_mapped_boxes(
                 )
             )
             continue
-        pair = (normalize_lot_name(cleaned_lot), cleaned_number)
-        if pair in seen_pairs:
-            outcome.skipped.append(
-                ImportSkipEntry(
-                    row=position,
-                    box_number=cleaned_number,
-                    reason="duplicate (lot, box_number) within the uploaded file",
-                )
+        canonical_rows.append(
+            InboundBoxItem(
+                box_number=cleaned_number,
+                lot=cleaned_lot,
+                pallet_number=pallet_number,
+                pallet_id=pallet_id,
+                contents=contents,
             )
-            continue
-        seen_pairs.add(pair)
-        canonical_items.append((position, cleaned_number, cleaned_lot, contents))
+        )
+    try:
+        merged_rows = merge_inbound_items(canonical_rows)
+    except RequestRuleError as exc:
+        raise BoxRuleError(str(exc)) from exc
+    canonical_items = [
+        (position, item)
+        for position, item in enumerate(merged_rows, start=1)
+    ]
     if not canonical_items:
         return outcome
     if receipt_requires_review(
@@ -155,12 +168,7 @@ def import_mapped_boxes(
             user=user,
             warehouse_id=warehouse_id,
             items=[
-                InboundBoxItem(
-                    box_number=box_number,
-                    lot=lot,
-                    contents=contents,
-                )
-                for _position, box_number, lot, contents in canonical_items
+                item for _position, item in canonical_items
             ],
             origin=BoxRequestOrigin.xlsx_import,
             restore_archived=restore_archived,
@@ -171,21 +179,23 @@ def import_mapped_boxes(
         lots_by_name = resolve_lot_names_for_use(
             db,
             user=user,
-            names=[lot for _position, _box_number, lot, _contents in canonical_items],
+            names=[item.lot for _position, item in canonical_items],
             warehouse_id=warehouse_id,
         )
     except LotRuleError as exc:
         raise BoxRuleError(str(exc)) from exc
-    for position, box_number, lot, contents in canonical_items:
-        lot_record = lots_by_name[normalize_lot_name(lot)]
+    for position, item in canonical_items:
+        lot_record = lots_by_name[normalize_lot_name(item.lot)]
         try:
             restored = (
                 restore_archived_box(
                     db,
                     user=user,
-                    box_number=box_number,
+                    box_number=item.box_number,
                     lot_id=lot_record.id,
-                    contents=contents,
+                    pallet_number=item.pallet_number,
+                    pallet_id=item.pallet_id,
+                    contents=item.contents,
                     warehouse_id=warehouse_id,
                     note="Explicitly restored during mapped XLSX import.",
                     commit=False,
@@ -196,9 +206,11 @@ def import_mapped_boxes(
             box = restored or create_box(
                 db,
                 user=user,
-                box_number=box_number,
+                box_number=item.box_number,
                 lot_id=lot_record.id,
-                contents=contents,
+                pallet_number=item.pallet_number,
+                pallet_id=item.pallet_id,
+                contents=item.contents,
                 warehouse_id=warehouse_id,
                 commit=False,
             )
@@ -206,7 +218,7 @@ def import_mapped_boxes(
             outcome.skipped.append(
                 ImportSkipEntry(
                     row=position,
-                    box_number=box_number,
+                    box_number=item.box_number,
                     reason=str(exc),
                 )
             )
@@ -288,6 +300,11 @@ def import_boxes_xlsx(
             "(recognised headers: box_number, lot, contents, "
             "warehouse_id, warehouse)"
         )
+    if "pallet_number" not in headers:
+        raise BoxRuleError(
+            "missing required column 'pallet_number' "
+            "(recognised headers include pallet_number, pallet number, pallet)"
+        )
 
     # Pre-resolve warehouses so we don't hit the DB once per row.
     warehouses_by_id = {
@@ -309,9 +326,7 @@ def import_boxes_xlsx(
     pending_by_warehouse: dict[
         int, list[tuple[int, InboundBoxItem]]
     ] = {}
-    # Box numbers are unique per ``lot`` (see ``services.boxes.create_box``),
-    # so the in-file dedupe key must be the pair, not the number alone.
-    seen_pairs: set[tuple[str, str]] = set()
+    pending_identity: dict[tuple[str, str], tuple[int, int]] = {}
 
     for offset, row in enumerate(rows_iter, start=2):  # row 1 was the header
         if offset - 1 > MAX_ROWS:
@@ -331,6 +346,8 @@ def import_boxes_xlsx(
 
         raw_box_number = _mapped_cell(headers, cells, "box_number")
         lot = _mapped_cell(headers, cells, "lot")
+        pallet_number = _mapped_cell(headers, cells, "pallet_number")
+        pallet_id_raw = _mapped_cell(headers, cells, "pallet_id")
         contents_raw = _mapped_cell(headers, cells, "contents")
         contents = contents_raw or None
         wh_id_raw = _mapped_cell(headers, cells, "warehouse_id")
@@ -373,19 +390,37 @@ def import_boxes_xlsx(
                 )
             )
             continue
-        pair = (normalize_lot_name(lot), box_number)
-        if pair in seen_pairs:
+        if not pallet_number:
             outcome.skipped.append(
                 ImportSkipEntry(
                     row=offset,
                     box_number=box_number,
-                    reason=(
-                        "duplicate (lot, box_number) within the uploaded file"
-                    ),
+                    reason="pallet_number is empty",
                 )
             )
             continue
-        seen_pairs.add(pair)
+        pallet_id: int | None = None
+        if pallet_id_raw:
+            try:
+                pallet_id = int(pallet_id_raw)
+            except ValueError:
+                outcome.skipped.append(
+                    ImportSkipEntry(
+                        row=offset,
+                        box_number=box_number,
+                        reason=f"pallet_id {pallet_id_raw!r} is not an integer",
+                    )
+                )
+                continue
+            if pallet_id < 1:
+                outcome.skipped.append(
+                    ImportSkipEntry(
+                        row=offset,
+                        box_number=box_number,
+                        reason="pallet_id must be positive",
+                    )
+                )
+                continue
 
         warehouse_id: int | None = None
         if wh_id_raw:
@@ -436,16 +471,51 @@ def import_boxes_xlsx(
             )
             continue
 
-        pending_by_warehouse.setdefault(warehouse_id, []).append(
-            (
-                offset,
-                InboundBoxItem(
-                    box_number=box_number,
-                    lot=lot,
-                    contents=contents,
-                ),
-            )
+        item = InboundBoxItem(
+            box_number=box_number,
+            lot=lot,
+            pallet_number=pallet_number,
+            pallet_id=pallet_id,
+            contents=contents,
         )
+        pair = (normalize_lot_name(lot), box_number)
+        duplicate = pending_identity.get(pair)
+        if duplicate is not None:
+            existing_warehouse_id, existing_index = duplicate
+            if existing_warehouse_id != warehouse_id:
+                outcome.skipped.append(
+                    ImportSkipEntry(
+                        row=offset,
+                        box_number=box_number,
+                        reason=(
+                            "duplicate (lot, box_number) rows specify different "
+                            "warehouses"
+                        ),
+                    )
+                )
+                continue
+            existing_offset, existing_item = pending_by_warehouse[warehouse_id][
+                existing_index
+            ]
+            try:
+                merged = merge_inbound_items([existing_item, item])[0]
+            except RequestRuleError as exc:
+                outcome.skipped.append(
+                    ImportSkipEntry(
+                        row=offset,
+                        box_number=box_number,
+                        reason=str(exc),
+                    )
+                )
+                continue
+            pending_by_warehouse[warehouse_id][existing_index] = (
+                existing_offset,
+                merged,
+            )
+            continue
+        pending_rows = pending_by_warehouse.setdefault(warehouse_id, [])
+        pending_identity[pair] = (warehouse_id, len(pending_rows))
+        pending_rows.append((offset, item))
 
     for warehouse_id, pending_rows in pending_by_warehouse.items():
         warehouse = warehouses_by_id[warehouse_id]
@@ -526,6 +596,8 @@ def import_boxes_xlsx(
                         user=user,
                         box_number=item.box_number,
                         lot_id=lot_record.id,
+                        pallet_number=item.pallet_number,
+                        pallet_id=item.pallet_id,
                         contents=item.contents,
                         warehouse_id=warehouse_id,
                         note=f"Explicitly restored from XLSX row {offset}.",
@@ -539,6 +611,8 @@ def import_boxes_xlsx(
                     user=user,
                     box_number=item.box_number,
                     lot_id=lot_record.id,
+                    pallet_number=item.pallet_number,
+                    pallet_id=item.pallet_id,
                     contents=item.contents,
                     warehouse_id=warehouse_id,
                     commit=False,

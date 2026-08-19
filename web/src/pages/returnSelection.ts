@@ -13,6 +13,28 @@ export function toggleReturnBox(
     : [...selectedBoxIds, boxId];
 }
 
+export function palletCandidateIds(
+  candidates: ReturnCandidate[],
+  palletId: number | null,
+): number[] {
+  return candidates
+    .filter((candidate) => candidate.pallet_id === palletId)
+    .map((candidate) => candidate.box_id);
+}
+
+export function toggleReturnPallet(
+  selectedBoxIds: number[],
+  candidates: ReturnCandidate[],
+  palletId: number | null,
+): number[] {
+  const palletIds = palletCandidateIds(candidates, palletId);
+  const allSelected =
+    palletIds.length > 0 && palletIds.every((id) => selectedBoxIds.includes(id));
+  return allSelected
+    ? selectedBoxIds.filter((id) => !palletIds.includes(id))
+    : [...new Set([...selectedBoxIds, ...palletIds])];
+}
+
 export function canSubmitReturnSelection(
   sourceInboundRequestId: number | undefined,
   selectedBoxIds: number[],

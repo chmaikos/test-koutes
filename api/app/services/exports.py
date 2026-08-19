@@ -15,11 +15,14 @@ from app.models.boxes import Box, BoxStatus
 from app.models.employees import ProductivityEntry
 from app.schemas.requests import RequestAnalyticsOut, RequestReconciliationIssue
 from app.services.lots import LotSummary
+from app.services.pallets import PalletSummary
 from app.services.productivity import EmployeeAverages
 
 EXPORT_COLUMNS = [
     "Box Number",
     "Lot",
+    "Pallet ID",
+    "Pallet Number",
     "Contents",
     "Warehouse ID",
     "Warehouse",
@@ -32,7 +35,7 @@ EXPORT_COLUMNS = [
 
 # Indices of columns whose values are datetimes. Used by the XLSX writer to
 # apply a date number_format and by the CSV writer to format them as text.
-_DATETIME_COLUMN_INDICES = (6, 7, 8, 9)
+_DATETIME_COLUMN_INDICES = (8, 9, 10, 11)
 
 STATUS_LABELS: dict[BoxStatus, str] = {
     BoxStatus.quarantined: "Quarantined",
@@ -78,6 +81,8 @@ REQUEST_RECONCILIATION_COLUMNS = [
     "Issue Type",
     "Request ID",
     "Box ID",
+    "Pallet ID",
+    "Pallet Number",
     "Warehouse ID",
     "Warehouse",
     "Assignee ID",
@@ -129,6 +134,25 @@ LOT_SUMMARY_COLUMNS = [
     "Metrics Scope",
 ]
 
+PALLET_SUMMARY_COLUMNS = [
+    "Pallet ID",
+    "Pallet Number",
+    "Lot ID",
+    "Lot",
+    "Warehouse ID",
+    "Warehouse",
+    "Active",
+    "Physical Box Count",
+    "Total Non-Archived Boxes",
+    "Eligible Box Count",
+    "Completed Box Count",
+    "Completion Percent",
+    "Progress State",
+    "Latest Activity",
+    "Created At",
+    "Updated At",
+]
+
 
 @dataclass(frozen=True)
 class ProductivitySummaryExportRow:
@@ -167,6 +191,8 @@ def _row_for(box: Box, warehouses: Mapping[int, str]) -> list:
     return [
         box.box_number,
         box.lot,
+        getattr(box, "pallet_id", None),
+        getattr(box, "pallet_number", None) or "",
         box.contents or "",
         box.current_warehouse_id,
         warehouses.get(box.current_warehouse_id, ""),
@@ -288,6 +314,52 @@ def lot_summaries_to_xlsx(summaries: Iterable[LotSummary]) -> bytes:
     return buf.getvalue()
 
 
+def _pallet_summary_row(summary: PalletSummary) -> list:
+    return [
+        summary.id,
+        summary.pallet_number,
+        summary.lot_id,
+        summary.lot_name,
+        summary.current_warehouse_id,
+        summary.warehouse_name,
+        summary.is_active,
+        summary.physical_box_count,
+        summary.box_count,
+        summary.eligible_box_count,
+        summary.completed_box_count,
+        summary.completion_percent,
+        summary.progress_state,
+        _to_naive_utc(summary.latest_activity),
+        _to_naive_utc(summary.created_at),
+        _to_naive_utc(summary.updated_at),
+    ]
+
+
+def pallet_summaries_to_csv(summaries: Iterable[PalletSummary]) -> bytes:
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(PALLET_SUMMARY_COLUMNS)
+    for summary in summaries:
+        writer.writerow(
+            [_format_csv_value(value) for value in _pallet_summary_row(summary)]
+        )
+    return ("\ufeff" + buf.getvalue()).encode("utf-8")
+
+
+def pallet_summaries_to_xlsx(summaries: Iterable[PalletSummary]) -> bytes:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Pallet summary"
+    _write_sheet(
+        sheet,
+        PALLET_SUMMARY_COLUMNS,
+        (_pallet_summary_row(summary) for summary in summaries),
+    )
+    buf = io.BytesIO()
+    workbook.save(buf)
+    return buf.getvalue()
+
+
 def _summary_export_row(row: ProductivitySummaryExportRow) -> list:
     average = row.average
     return [
@@ -398,6 +470,8 @@ def _reconciliation_row(issue: RequestReconciliationIssue) -> list:
         issue.issue_type,
         issue.request_id,
         issue.box_id,
+        issue.pallet_id,
+        issue.pallet_number,
         issue.warehouse_id,
         issue.warehouse_name,
         issue.assigned_mover_user_id,

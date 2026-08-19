@@ -23,6 +23,7 @@ from app.models.notifications import (
     RequestEmailOutbox,
     RequestNotificationKind,
 )
+from app.models.pallets import Pallet, PalletEvent, PalletEventType
 from app.models.requests import (
     BoxRequest,
     BoxRequestAttachment,
@@ -66,6 +67,9 @@ __all__ = [
     "LotPurgeAudit",
     "LotPurgeCleanupStatus",
     "LotPurgeEvent",
+    "Pallet",
+    "PalletEvent",
+    "PalletEventType",
     "ProductivityEntry",
     "ProductivityReportRun",
     "BoxRequest",

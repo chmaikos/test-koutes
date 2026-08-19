@@ -15,6 +15,8 @@ class BoxOut(BaseModel):
     box_number: str
     lot: str
     lot_id: int
+    pallet_id: int | None
+    pallet_number: str | None
     contents: str | None
     current_warehouse_id: int
     status: BoxStatus
@@ -33,7 +35,9 @@ class BoxCreate(BaseModel):
     box_number: str = Field(min_length=1, max_length=64)
     lot: str | None = Field(default=None, min_length=1, max_length=64)
     lot_id: int | None = Field(default=None, ge=1)
-    contents: str | None = Field(default=None, max_length=200)
+    pallet_number: str = Field(min_length=1, max_length=64)
+    pallet_id: int | None = Field(default=None, ge=1)
+    contents: str | None = Field(default=None, max_length=2000)
     warehouse_id: int = Field(ge=1)
     note: str | None = Field(default=None, max_length=2000)
 
@@ -61,13 +65,22 @@ class BoxUpdate(BaseModel):
 
     status: BoxStatus | None = None
     warehouse_id: int | None = Field(default=None, ge=1)
-    contents: str | None = Field(default=None, max_length=200)
+    contents: str | None = Field(default=None, max_length=2000)
     note: str | None = Field(default=None, max_length=2000)
+    pallet_id: int | None = Field(default=None, ge=1)
+    detach_pallet: bool = False
     force: bool = False
+
+    @model_validator(mode="after")
+    def _pallet_action_is_unambiguous(self) -> BoxUpdate:
+        if self.pallet_id is not None and self.detach_pallet:
+            raise ValueError("pallet_id and detach_pallet cannot both be supplied")
+        return self
 
 
 class BoxUpdateResult(BoxOut):
     cancelled_request_ids: list[int] = Field(default_factory=list)
+    detached_pallet_id: int | None = None
 
 
 class BoxEventOut(BaseModel):
@@ -145,7 +158,9 @@ class ImportSkip(BaseModel):
 class MappedImportItem(BaseModel):
     box_number: str = Field(min_length=1, max_length=64)
     lot: str = Field(min_length=1, max_length=64)
-    contents: str | None = Field(default=None, max_length=200)
+    pallet_number: str = Field(min_length=1, max_length=64)
+    pallet_id: int | None = Field(default=None, ge=1)
+    contents: str | None = Field(default=None, max_length=2000)
 
 
 class MappedImportRequest(BaseModel):

@@ -23,6 +23,7 @@ from app.db import Base
 
 if TYPE_CHECKING:
     from app.models.boxes import Box
+    from app.models.pallets import Pallet
 
 
 MAX_LOT_NAME_LENGTH = 64
@@ -121,6 +122,7 @@ class Lot(Base):
     __mapper_args__ = {"version_id_col": version}
 
     boxes: Mapped[list[Box]] = relationship(back_populates="lot_record")
+    pallets: Mapped[list[Pallet]] = relationship(back_populates="lot")
     events: Mapped[list[LotEvent]] = relationship(
         back_populates="lot",
         order_by="LotEvent.occurred_at",
@@ -201,6 +203,10 @@ class LotPurgeEvent(Base):
             "object_key_count >= 0",
             name="ck_lot_purge_events_object_key_count_nonnegative",
         ),
+        CheckConstraint(
+            "pallet_count >= 0",
+            name="ck_lot_purge_events_pallet_count_nonnegative",
+        ),
         Index("ix_lot_purge_events_lot_created", "lot_id", "created_at"),
         Index("ix_lot_purge_events_actor_created", "actor_user_id", "created_at"),
         Index(
@@ -227,6 +233,13 @@ class LotPurgeEvent(Base):
         JSON, nullable=False, default=list, server_default="[]"
     )
     archived_box_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    pallet_ids: Mapped[list[int]] = mapped_column(
+        JSON, nullable=False, default=list, server_default="[]"
+    )
+    pallet_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    pallet_snapshots: Mapped[list[dict[str, object]]] = mapped_column(
+        JSON, nullable=False, default=list, server_default="[]"
+    )
     object_keys: Mapped[list[str]] = mapped_column(
         JSON, nullable=False, default=list, server_default="[]"
     )

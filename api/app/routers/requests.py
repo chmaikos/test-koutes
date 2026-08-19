@@ -38,6 +38,7 @@ from app.models.requests import (
     BoxRequestEvent,
     BoxRequestEventType,
     BoxRequestExceptionKind,
+    BoxRequestItem,
     BoxRequestOrigin,
     BoxRequestPriority,
     BoxRequestStatus,
@@ -557,6 +558,14 @@ def list_requests(
                 BoxRequest.destination_contact.ilike(needle),
                 BoxRequest.internal_location.ilike(needle),
                 BoxRequest.special_handling_instructions.ilike(needle),
+                BoxRequest.id.in_(
+                    select(BoxRequestItem.request_id).where(
+                        or_(
+                            BoxRequestItem.pallet.ilike(needle),
+                            cast(BoxRequestItem.pallet_id, String).ilike(needle),
+                        )
+                    )
+                ),
             )
         )
     stmt = apply_warehouse_filter(stmt, user, BoxRequest.warehouse_id)
@@ -798,6 +807,8 @@ def list_return_candidates(
             box_number=box.box_number,
             lot=box.lot,
             lot_id=box.lot_id,
+            pallet_id=box.pallet_id,
+            pallet_number=box.pallet_number,
             contents=box.contents,
             status=box.status,
         )

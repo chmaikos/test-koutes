@@ -41,6 +41,20 @@ import type {
   MergedLot,
   NotificationPage,
   Page,
+  PalletBoxMutationPayload,
+  PalletBoxMutationResult,
+  PalletCreatePayload,
+  PalletDetail,
+  PalletEvent,
+  PalletFilters,
+  PalletIntegrity,
+  PalletMovePayload,
+  PalletMoveResult,
+  PalletOption,
+  PalletOptionFilters,
+  PalletRenamePayload,
+  PalletStateChangePayload,
+  PalletSummary,
   ProductivityEntry,
   ProductivitySummary,
   RequestDirection,
@@ -98,6 +112,15 @@ export const queryKeys = {
     ["lot-force-purge-preview", id] as const,
   lotBoxes: (id: number, filters: BoxFilters, page: number, pageSize: number) =>
     ["lot-boxes", id, filters, page, pageSize] as const,
+  pallets: (filters: PalletFilters, page: number, pageSize: number) =>
+    ["pallets", filters, page, pageSize] as const,
+  palletOptions: (filters: PalletOptionFilters, page: number, limit: number) =>
+    ["pallet-options", filters, page, limit] as const,
+  pallet: (id: number, includeInactive = false) =>
+    ["pallet", id, includeInactive] as const,
+  palletEvents: (id: number, includeInactive = false) =>
+    ["pallet-events", id, includeInactive] as const,
+  palletIntegrity: ["pallet-integrity"] as const,
   requests: (filters: RequestFilters, page: number, pageSize: number) =>
     ["requests", filters, page, pageSize] as const,
   request: (id: number) => ["request", id] as const,
@@ -558,6 +581,207 @@ export function useLotBoxes(
   });
 }
 
+function invalidatePalletState(
+  qc: ReturnType<typeof useQueryClient>,
+  palletIds: number[] = [],
+) {
+  qc.invalidateQueries({ queryKey: ["pallets"] });
+  qc.invalidateQueries({ queryKey: ["pallet-options"] });
+  qc.invalidateQueries({ queryKey: ["pallet-integrity"] });
+  if (palletIds.length === 0) {
+    qc.invalidateQueries({ queryKey: ["pallet"] });
+    qc.invalidateQueries({ queryKey: ["pallet-events"] });
+  } else {
+    for (const id of new Set(palletIds)) {
+      qc.invalidateQueries({ queryKey: ["pallet", id] });
+      qc.invalidateQueries({ queryKey: ["pallet-events", id] });
+    }
+  }
+  invalidateLotState(qc);
+  qc.invalidateQueries({ queryKey: ["boxes"] });
+  qc.invalidateQueries({ queryKey: ["box"] });
+  qc.invalidateQueries({ queryKey: ["requests"] });
+  qc.invalidateQueries({ queryKey: ["request"] });
+  qc.invalidateQueries({ queryKey: ["return-sources"] });
+  qc.invalidateQueries({ queryKey: ["return-candidates"] });
+  qc.invalidateQueries({ queryKey: queryKeys.dashboard });
+}
+
+export function usePallets(
+  filters: PalletFilters,
+  page: number,
+  pageSize: number,
+) {
+  return useQuery({
+    queryKey: queryKeys.pallets(filters, page, pageSize),
+    queryFn: async () =>
+      (
+        await api.get<Page<PalletSummary>>(
+          `/pallets${buildQueryString({ ...filters, page, page_size: pageSize })}`,
+        )
+      ).data,
+    placeholderData: (previous) => previous,
+  });
+}
+
+export function usePalletOptions(
+  filters: PalletOptionFilters,
+  page = 1,
+  limit = 25,
+) {
+  return useQuery({
+    queryKey: queryKeys.palletOptions(filters, page, limit),
+    queryFn: async () =>
+      (
+        await api.get<Page<PalletOption>>(
+          `/pallets/options${buildQueryString({ ...filters, page, limit })}`,
+        )
+      ).data,
+    enabled:
+      filters.lot_id !== undefined && filters.warehouse_id !== undefined,
+  });
+}
+
+export function usePallet(id: number | undefined, includeInactive = false) {
+  return useQuery({
+    queryKey: id
+      ? queryKeys.pallet(id, includeInactive)
+      : ["pallet", "noop"],
+    queryFn: async () =>
+      (
+        await api.get<PalletDetail>(
+          `/pallets/${id}${buildQueryString({
+            include_inactive: includeInactive,
+          })}`,
+        )
+      ).data,
+    enabled: !!id,
+  });
+}
+
+export function usePalletEvents(
+  id: number | undefined,
+  includeInactive = false,
+) {
+  return useQuery({
+    queryKey: id
+      ? queryKeys.palletEvents(id, includeInactive)
+      : ["pallet-events", "noop"],
+    queryFn: async () =>
+      (
+        await api.get<PalletEvent[]>(
+          `/pallets/${id}/events${buildQueryString({
+            include_inactive: includeInactive,
+          })}`,
+        )
+      ).data,
+    enabled: !!id,
+  });
+}
+
+export function usePalletIntegrity(enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.palletIntegrity,
+    queryFn: async () =>
+      (await api.get<PalletIntegrity>("/pallets/integrity")).data,
+    enabled,
+  });
+}
+
+export function useCreatePallet() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (payload: PalletCreatePayload) =>
+      (await api.post<PalletSummary>("/pallets", payload)).data,
+    onSuccess: (pallet) => invalidatePalletState(qc, [pallet.id]),
+  });
+}
+
+export function useRenamePallet() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: {
+      id: number;
+      payload: PalletRenamePayload;
+    }) =>
+      (
+        await api.patch<PalletSummary>(
+          `/pallets/${input.id}/rename`,
+          input.payload,
+        )
+      ).data,
+    onSettled: (_data, _error, input) =>
+      invalidatePalletState(qc, [input.id]),
+  });
+}
+
+function usePalletStateMutation(action: "archive" | "restore") {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: {
+      id: number;
+      payload: PalletStateChangePayload;
+    }) =>
+      (
+        await api.post<PalletSummary>(
+          `/pallets/${input.id}/${action}`,
+          input.payload,
+        )
+      ).data,
+    onSettled: (_data, _error, input) =>
+      invalidatePalletState(qc, [input.id]),
+  });
+}
+
+export function useArchivePallet() {
+  return usePalletStateMutation("archive");
+}
+
+export function useRestorePallet() {
+  return usePalletStateMutation("restore");
+}
+
+function usePalletBoxMutation(action: "assign" | "detach") {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: {
+      id: number;
+      payload: PalletBoxMutationPayload;
+    }) =>
+      (
+        await api.post<PalletBoxMutationResult>(
+          `/pallets/${input.id}/boxes/${action}`,
+          input.payload,
+        )
+      ).data,
+    onSettled: (_data, _error, input) =>
+      invalidatePalletState(qc, [input.id]),
+  });
+}
+
+export function useAssignPalletBoxes() {
+  return usePalletBoxMutation("assign");
+}
+
+export function useDetachPalletBoxes() {
+  return usePalletBoxMutation("detach");
+}
+
+export function useMovePallet() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: { id: number; payload: PalletMovePayload }) =>
+      (
+        await api.post<PalletMoveResult>(
+          `/pallets/${input.id}/move`,
+          input.payload,
+        )
+      ).data,
+    onSettled: (_data, _error, input) =>
+      invalidatePalletState(qc, [input.id]),
+  });
+}
+
 export function useCreateLot() {
   const qc = useQueryClient();
   return useMutation({
@@ -733,11 +957,14 @@ export function useCreateBox() {
       box_number: string;
       lot?: string;
       lot_id?: number;
+      pallet_number: string;
+      pallet_id?: number;
       contents?: string;
       warehouse_id: number;
       note?: string;
     }) => (await api.post<Box | StagedReceiptResult>("/boxes", input)).data,
     onSuccess: () => {
+      invalidatePalletState(qc);
       invalidateLotState(qc);
       qc.invalidateQueries({ queryKey: ["boxes"] });
       qc.invalidateQueries({ queryKey: queryKeys.dashboard });
@@ -758,11 +985,14 @@ export function useUpdateBox() {
         warehouse_id: number;
         contents: string;
         note: string;
+        pallet_id: number;
+        detach_pallet: boolean;
         force: boolean;
       }>;
     }) =>
       (await api.patch<BoxUpdateResult>(`/boxes/${input.id}`, input.patch)).data,
     onSuccess: (data) => {
+      invalidatePalletState(qc, data.pallet_id ? [data.pallet_id] : []);
       invalidateLotState(qc, [data.lot_id]);
       qc.invalidateQueries({ queryKey: ["boxes"] });
       qc.invalidateQueries({ queryKey: queryKeys.box(data.id) });

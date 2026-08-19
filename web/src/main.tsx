@@ -23,6 +23,8 @@ import { BoxesPage } from "@/pages/BoxesPage";
 import { BoxDetailPage } from "@/pages/BoxDetailPage";
 import { LotsPage } from "@/pages/LotsPage";
 import { LotDetailPage } from "@/pages/LotDetailPage";
+import { PalletsPage } from "@/pages/PalletsPage";
+import { PalletDetailPage } from "@/pages/PalletDetailPage";
 import { AlertsPage } from "@/pages/AlertsPage";
 import { AlertDetailPage } from "@/pages/AlertDetailPage";
 import { ExportsPage } from "@/pages/ExportsPage";
@@ -140,6 +142,8 @@ async function bootstrap() {
                     <Route path="boxes/:id" element={<BoxDetailPage />} />
                     <Route path="lots" element={<LotsPage />} />
                     <Route path="lots/:id" element={<LotDetailPage />} />
+                    <Route path="pallets" element={<PalletsPage />} />
+                    <Route path="pallets/:id" element={<PalletDetailPage />} />
                     <Route path="requests" element={<RequestPage />} />
                     <Route
                       path="requests/reconciliation"

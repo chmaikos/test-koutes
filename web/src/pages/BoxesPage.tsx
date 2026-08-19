@@ -14,6 +14,8 @@ import {
 } from "lucide-react";
 import {
   useBoxes,
+  useAssignPalletBoxes,
+  useDetachPalletBoxes,
   useBulkDeleteBoxes,
   useBulkUpdateBoxes,
   useCreateBox,
@@ -36,6 +38,7 @@ import {
 } from "@/components/BulkResultDialog";
 import { ImportBoxesDialog } from "@/components/ImportBoxesDialog";
 import { LotPicker, type LotSelection } from "@/components/LotPicker";
+import { PalletPicker, type PalletSelection } from "@/components/PalletPicker";
 import { useHasRole } from "@/components/RoleGate";
 import {
   canRelocateReturnedSelection,
@@ -103,6 +106,9 @@ export function BoxesPage() {
     if (lot) out.lot = lot;
     const lotId = Number(params.get("lot_id"));
     if (Number.isInteger(lotId) && lotId > 0) out.lot_id = lotId;
+    const palletId = Number(params.get("pallet_id"));
+    if (Number.isInteger(palletId) && palletId > 0) out.pallet_id = palletId;
+    if (params.get("unassigned_pallet") === "true") out.unassigned_pallet = true;
     const search = params.get("q");
     if (search) out.search = search;
     const sortBy = params.get("sort_by");
@@ -282,14 +288,14 @@ export function BoxesPage() {
         )}
       </header>
 
-      <div className="card card-pad grid gap-3 md:grid-cols-4">
+      <div className="card card-pad grid gap-3 md:grid-cols-2 xl:grid-cols-5">
         <label className="block">
           <span className="text-xs text-slate-500">Search</span>
           <div className="relative">
             <Search className="pointer-events-none absolute left-2 top-2.5 h-4 w-4 text-slate-400" />
             <input
               className="input pl-8"
-              placeholder="Box #, lot, or contents"
+              placeholder="Box #, lot, pallet, or item descriptions"
               value={filters.search ?? ""}
               onChange={(e) => setParam("q", e.target.value || undefined)}
             />
@@ -301,7 +307,15 @@ export function BoxesPage() {
             className="input"
             value={filters.warehouse_id ?? ""}
             onChange={(e) =>
-              setParam("warehouse_id", e.target.value || undefined)
+              {
+                const next = new URLSearchParams(params);
+                if (e.target.value) next.set("warehouse_id", e.target.value);
+                else next.delete("warehouse_id");
+                next.delete("pallet_id");
+                next.delete("pallet_number");
+                next.delete("page");
+                setParams(next);
+              }
             }
           >
             <option value="">All</option>
@@ -348,12 +362,61 @@ export function BoxesPage() {
               next.delete("lot_id");
               next.delete("lot_name");
             }
+            next.delete("pallet_id");
+            next.delete("pallet_number");
             setParams(next);
           }}
         />
+        <PalletPicker
+          label="Pallet"
+          lotId={filters.lot_id}
+          warehouseId={filters.warehouse_id}
+          disabled={!filters.lot_id || !filters.warehouse_id}
+          value={filters.pallet_id ? { id: filters.pallet_id, pallet_number: params.get("pallet_number") ?? `#${filters.pallet_id}` } : null}
+          onChange={(selection) => {
+            const next = new URLSearchParams(params);
+            next.delete("page");
+            if (selection) {
+              next.set("pallet_id", String(selection.id));
+              next.set("pallet_number", selection.pallet_number);
+              next.delete("unassigned_pallet");
+            } else {
+              next.delete("pallet_id");
+              next.delete("pallet_number");
+            }
+            setParams(next);
+          }}
+        />
+        {filters.lot_id && filters.warehouse_id && (
+          <label className="flex items-center gap-2 self-end pb-2 text-xs text-slate-700">
+            <input
+              type="checkbox"
+              checked={!!filters.unassigned_pallet}
+              onChange={(event) => {
+                const next = new URLSearchParams(params);
+                if (event.target.checked) {
+                  next.set("unassigned_pallet", "true");
+                  next.delete("pallet_id");
+                  next.delete("pallet_number");
+                } else {
+                  next.delete("unassigned_pallet");
+                }
+                next.delete("page");
+                setParams(next);
+              }}
+            />
+            Unassigned pallets only
+          </label>
+        )}
       </div>
 
       {canWrite && selectedIds.size > 0 && (
+        <>
+        <BulkPalletAction
+          boxes={(data?.items ?? []).filter((box) => selectedIds.has(box.id))}
+          selectedIds={[...selectedIds]}
+          onComplete={clearSelection}
+        />
         <BulkActionBar
           count={selectedIds.size}
           returnedCount={selectedReturnedIds.size}
@@ -378,6 +441,7 @@ export function BoxesPage() {
             setConfirmDelete(true);
           }}
         />
+        </>
       )}
 
       <div className="card overflow-hidden">
@@ -411,7 +475,8 @@ export function BoxesPage() {
                   direction={activeSortDir}
                   onToggle={toggleSort}
                 />
-                <th className="px-4 py-2.5 text-left">Contents</th>
+                <th className="px-4 py-2.5 text-left">Item descriptions</th>
+                <th className="px-4 py-2.5 text-left">Pallet</th>
                 <SortableTh
                   label="Warehouse"
                   field="warehouse"
@@ -448,7 +513,7 @@ export function BoxesPage() {
                 <tr>
                   <td
                     className="px-4 py-8 text-center text-slate-400"
-                    colSpan={canWrite ? 9 : 8}
+                    colSpan={canWrite ? 10 : 9}
                   >
                     Loading...
                   </td>
@@ -458,7 +523,7 @@ export function BoxesPage() {
                 <tr>
                   <td
                     className="px-4 py-8 text-center text-slate-400"
-                    colSpan={canWrite ? 9 : 8}
+                    colSpan={canWrite ? 10 : 9}
                   >
                     No boxes match your filters.
                   </td>
@@ -769,6 +834,95 @@ function SortableTh({
   );
 }
 
+function BulkPalletAction({
+  boxes,
+  selectedIds,
+  onComplete,
+}: {
+  boxes: import("@/api/types").Box[];
+  selectedIds: number[];
+  onComplete: () => void;
+}) {
+  const assign = useAssignPalletBoxes();
+  const detach = useDetachPalletBoxes();
+  const [pallet, setPallet] = useState<PalletSelection | null>(null);
+  const [reason, setReason] = useState("");
+  const [message, setMessage] = useState<string | null>(null);
+  const completeSelection = boxes.length === selectedIds.length;
+  const lotId = completeSelection && boxes.every((box) => box.lot_id === boxes[0]?.lot_id)
+    ? boxes[0]?.lot_id
+    : undefined;
+  const warehouseId =
+    completeSelection &&
+    boxes.every(
+      (box) => box.current_warehouse_id === boxes[0]?.current_warehouse_id,
+    )
+      ? boxes[0]?.current_warehouse_id
+      : undefined;
+  const currentPalletId =
+    completeSelection &&
+    boxes[0]?.pallet_id &&
+    boxes.every((box) => box.pallet_id === boxes[0]?.pallet_id)
+      ? boxes[0].pallet_id
+      : undefined;
+  return (
+    <section className="card card-pad border-brand-200 bg-brand-50/40">
+      <h2 className="text-sm font-semibold">Bulk pallet assignment</h2>
+      {!lotId || !warehouseId ? (
+        <p className="mt-1 text-xs text-amber-800">
+          Select boxes from one lot and warehouse on the current page to assign
+          them together.
+        </p>
+      ) : (
+        <div className="mt-2 grid gap-2 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto_auto] md:items-end">
+          <PalletPicker
+            value={pallet}
+            onChange={setPallet}
+            lotId={lotId}
+            warehouseId={warehouseId}
+            label="Target pallet"
+          />
+          <label className="block">
+            <span className="text-xs text-slate-500">Reason</span>
+            <input className="input" maxLength={2000} value={reason} onChange={(event) => setReason(event.target.value)} />
+          </label>
+          <button
+            className="btn-primary"
+            disabled={!pallet || !reason.trim() || assign.isPending}
+            onClick={async () => {
+              if (!pallet) return;
+              const result = await assign.mutateAsync({
+                id: pallet.id,
+                payload: { box_ids: selectedIds, reason: reason.trim() },
+              });
+              setMessage(`${result.updated_box_ids.length} boxes assigned.`);
+              onComplete();
+            }}
+          >
+            Assign pallet
+          </button>
+          <button
+            className="btn-secondary"
+            disabled={!currentPalletId || !reason.trim() || detach.isPending}
+            onClick={async () => {
+              if (!currentPalletId) return;
+              const result = await detach.mutateAsync({
+                id: currentPalletId,
+                payload: { box_ids: selectedIds, reason: reason.trim() },
+              });
+              setMessage(`${result.updated_box_ids.length} boxes detached.`);
+              onComplete();
+            }}
+          >
+            Detach
+          </button>
+        </div>
+      )}
+      {message && <p role="status" className="mt-2 text-xs text-emerald-800">{message}</p>}
+    </section>
+  );
+}
+
 function BulkActionBar({
   count,
   returnedCount,
@@ -1006,6 +1160,15 @@ function BoxRow({
           <span className="text-slate-400">—</span>
         )}
       </td>
+      <td className="px-4 py-2.5">
+        {box.pallet_id ? (
+          <Link className="text-brand-700 hover:underline" to={`/pallets/${box.pallet_id}`}>
+            {box.pallet_number ?? `Pallet #${box.pallet_id}`}
+          </Link>
+        ) : (
+          <span className="text-slate-400">Unassigned</span>
+        )}
+      </td>
       <td className="px-4 py-2.5">{warehouseName}</td>
       <td className="px-4 py-2.5">
         <StatusBadge status={box.status} />
@@ -1093,9 +1256,19 @@ function BoxCard({
             </dd>
             <dt className="text-slate-500">Warehouse</dt>
             <dd className="truncate text-slate-800">{warehouseName}</dd>
+            <dt className="text-slate-500">Pallet</dt>
+            <dd className="truncate">
+              {box.pallet_id ? (
+                <Link className="text-brand-700 hover:underline" to={`/pallets/${box.pallet_id}`}>
+                  {box.pallet_number ?? `#${box.pallet_id}`}
+                </Link>
+              ) : (
+                "Unassigned"
+              )}
+            </dd>
             {box.contents && (
               <>
-                <dt className="text-slate-500">Contents</dt>
+                <dt className="text-slate-500">Item descriptions</dt>
                 <dd className="line-clamp-2 break-words text-slate-700">
                   {box.contents}
                 </dd>
@@ -1138,6 +1311,8 @@ function CreateBoxModal({ onClose }: { onClose: () => void }) {
   const create = useCreateBox();
   const [boxNumber, setBoxNumber] = useState("");
   const [lot, setLot] = useState<LotSelection | null>(null);
+  const [pallet, setPallet] = useState<PalletSelection | null>(null);
+  const [palletNumber, setPalletNumber] = useState("");
   const [contents, setContents] = useState("");
   const [warehouseId, setWarehouseId] = useState<number | "">("");
   const [error, setError] = useState<string | null>(null);
@@ -1151,8 +1326,8 @@ function CreateBoxModal({ onClose }: { onClose: () => void }) {
           onSubmit={async (e) => {
             e.preventDefault();
             setError(null);
-            if (!warehouseId) {
-              setError("Pick a warehouse");
+            if (!warehouseId || !lot || !pallet || !palletNumber.trim()) {
+              setError("Pick a warehouse, lot, and pallet.");
               return;
             }
             try {
@@ -1168,6 +1343,8 @@ function CreateBoxModal({ onClose }: { onClose: () => void }) {
               await create.mutateAsync({
                 box_number: normalizedNumber,
                 lot_id: lot!.id,
+                pallet_id: pallet.id,
+                pallet_number: pallet.pallet_number,
                 contents: trimmedContents || undefined,
                 warehouse_id: Number(warehouseId),
               });
@@ -1196,14 +1373,17 @@ function CreateBoxModal({ onClose }: { onClose: () => void }) {
             />
           </label>
           <label className="block">
-            <span className="text-xs text-slate-500">Contents (optional)</span>
+            <span className="text-xs text-slate-500">Item descriptions (optional)</span>
             <textarea
-              maxLength={200}
+              maxLength={2000}
               rows={2}
               className="input"
               value={contents}
               onChange={(e) => setContents(e.target.value)}
             />
+            <span className="mt-1 block text-xs text-slate-500">
+              Free text only; individual items are not separately tracked.
+            </span>
           </label>
           <LotPicker
             value={lot}
@@ -1213,6 +1393,18 @@ function CreateBoxModal({ onClose }: { onClose: () => void }) {
             disabled={!warehouseId || create.isPending}
             label={warehouseId ? "Lot" : "Lot (choose warehouse first)"}
           />
+          <PalletPicker
+            value={pallet}
+            onChange={setPallet}
+            numberValue={palletNumber}
+            onNumberChange={setPalletNumber}
+            lotId={lot?.id}
+            warehouseId={warehouseId || undefined}
+            canCreate
+            required
+            disabled={!warehouseId || !lot || create.isPending}
+            label={lot ? "Pallet" : "Pallet (choose lot first)"}
+          />
           <label className="block">
             <span className="text-xs text-slate-500">Warehouse</span>
             <select
@@ -1220,7 +1412,11 @@ function CreateBoxModal({ onClose }: { onClose: () => void }) {
               className="input"
               value={warehouseId}
               onChange={(e) =>
-                setWarehouseId(e.target.value ? Number(e.target.value) : "")
+                {
+                  setWarehouseId(e.target.value ? Number(e.target.value) : "");
+                  setLot(null);
+                  setPallet(null);
+                }
               }
             >
               <option value="">Pick a warehouse</option>
@@ -1237,14 +1433,14 @@ function CreateBoxModal({ onClose }: { onClose: () => void }) {
               type="button"
               className="btn-secondary"
               onClick={onClose}
-              disabled={create.isPending || !lot || !warehouseId}
+              disabled={create.isPending}
             >
               Cancel
             </button>
             <button
               type="submit"
               className="btn-primary"
-              disabled={create.isPending}
+              disabled={create.isPending || !lot || !warehouseId || !pallet}
             >
               {create.isPending ? "Saving..." : "Receive"}
             </button>

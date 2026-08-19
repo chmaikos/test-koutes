@@ -326,6 +326,10 @@ function SafeImpact({ preview }: { preview: LotPurgePreview }) {
           value={String(preview.archived_box_count)}
         />
         <PreviewMetric
+          label="Pallets deleted"
+          value={String(preview.active_pallet_count + preview.archived_pallet_count)}
+        />
+        <PreviewMetric
           label="Exclusive self-receipts"
           value={String(preview.linked_request_count)}
         />
@@ -342,6 +346,24 @@ function SafeImpact({ preview }: { preview: LotPurgePreview }) {
           path={(id) => `/boxes/${id}`}
           truncated={preview.archived_box_ids_truncated}
           total={preview.archived_box_count}
+        />
+      )}
+      {preview.active_pallet_ids.length > 0 && (
+        <EntityLinks
+          label="Active pallets"
+          ids={preview.active_pallet_ids}
+          path={(id) => `/pallets/${id}`}
+          truncated={preview.active_pallet_ids_truncated}
+          total={preview.active_pallet_count}
+        />
+      )}
+      {preview.archived_pallet_ids.length > 0 && (
+        <EntityLinks
+          label="Archived pallets"
+          ids={preview.archived_pallet_ids}
+          path={(id) => `/pallets/${id}`}
+          truncated={preview.archived_pallet_ids_truncated}
+          total={preview.archived_pallet_count}
         />
       )}
       {preview.linked_request_ids.length > 0 && (

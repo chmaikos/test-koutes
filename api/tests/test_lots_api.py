@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 from datetime import UTC, datetime
+from functools import partial
 
 from openpyxl import load_workbook
 from sqlalchemy import event, select
@@ -21,9 +22,11 @@ from app.models import (
 )
 from app.models.requests import BoxRequestOrigin
 from app.schemas.requests import InboundBoxItem
-from app.services.boxes import create_box
+from app.services.boxes import create_box as _create_box
 from app.services.lots import list_lot_summaries
 from app.services.requests import create_staged_receipt
+
+create_box = partial(_create_box, legacy_allow_unassigned=True)
 
 
 def _restrict_to(session, user, *warehouse_ids: int) -> None:
@@ -114,7 +117,13 @@ def test_lot_acl_scopes_before_aggregation_and_includes_staged_receipts(
         session,
         user=admin,
         warehouse_id=1,
-        items=[InboundBoxItem(box_number="3", lot="  SHARED\tLOT ")],
+        items=[
+            InboundBoxItem(
+                box_number="3",
+                lot="  SHARED\tLOT ",
+                pallet_number="PALLET-SHARED",
+            )
+        ],
         origin=BoxRequestOrigin.manual_entry,
     )
     assert staged_receipt.items[0].lot_id == lot.id
@@ -150,7 +159,13 @@ def test_mapped_import_returns_forbidden_outside_warehouse_acl(
         "/api/boxes/import-mapped",
         json={
             "warehouse_id": 2,
-            "items": [{"box_number": "1", "lot": "Hidden Import"}],
+            "items": [
+                {
+                    "box_number": "1",
+                    "lot": "Hidden Import",
+                    "pallet_number": "PALLET-HIDDEN",
+                }
+            ],
         },
     )
 
@@ -170,6 +185,7 @@ def test_lot_api_search_sort_filter_pagination_exports_and_options(client):
             json={
                 "box_number": "1",
                 "lot": name,
+                "pallet_number": f"PALLET-{name}",
                 "warehouse_id": warehouse_id,
             },
         )
@@ -288,11 +304,21 @@ def test_lot_create_rename_reassignment_audit_conflicts_and_sse(
 
     source = client.post(
         "/api/boxes",
-        json={"box_number": "7", "lot": "Source", "warehouse_id": 1},
+        json={
+            "box_number": "7",
+            "lot": "Source",
+            "pallet_number": "PALLET-SOURCE",
+            "warehouse_id": 1,
+        },
     ).json()
     target = client.post(
         "/api/boxes",
-        json={"box_number": "8", "lot": "Target", "warehouse_id": 1},
+        json={
+            "box_number": "8",
+            "lot": "Target",
+            "pallet_number": "PALLET-TARGET",
+            "warehouse_id": 1,
+        },
     ).json()
     source_lot = session.get(Lot, source["lot_id"])
     mixed = client.patch(
@@ -344,7 +370,12 @@ def test_staged_receipt_sse_is_warehouse_scoped(client, session, monkeypatch):
 
     response = client.post(
         "/api/boxes",
-        json={"box_number": "1", "lot": "Staged SSE", "warehouse_id": 1},
+        json={
+            "box_number": "1",
+            "lot": "Staged SSE",
+            "pallet_number": "PALLET-STAGED",
+            "warehouse_id": 1,
+        },
     )
 
     assert response.status_code == 201

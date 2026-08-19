@@ -41,6 +41,7 @@ import type {
 } from "@/api/types";
 import { ExcelRowMapper } from "@/components/ExcelRowMapper";
 import { LotPicker, type LotSelection } from "@/components/LotPicker";
+import { PalletPicker, type PalletSelection } from "@/components/PalletPicker";
 import {
   REQUEST_DIRECTION_LABEL,
   RequestStatusBadge,
@@ -56,8 +57,8 @@ import {
 } from "@/pages/requestConflict";
 import {
   deliveryVariance,
-  groupInboundItems,
   hasRequiredDiscrepancyReason,
+  tryGroupInboundItems,
 } from "@/pages/xlsxMapping";
 import { requestWarehouseRoute } from "@/pages/requestWarehouses";
 
@@ -720,7 +721,8 @@ function ItemsSection({
             <tr>
               <th className="px-4 py-2.5">Box #</th>
               <th className="px-4 py-2.5">Lot</th>
-              <th className="px-4 py-2.5">Contents</th>
+              <th className="px-4 py-2.5">Pallet</th>
+              <th className="px-4 py-2.5">Item descriptions</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
@@ -745,6 +747,15 @@ function ItemsSection({
                     </Link>
                   ) : (
                     item.lot ?? "—"
+                  )}
+                </td>
+                <td className="px-4 py-2.5">
+                  {item.pallet_id ? (
+                    <Link className="text-brand-700 hover:underline" to={`/pallets/${item.pallet_id}`}>
+                      {item.pallet_number ?? item.pallet ?? `#${item.pallet_id}`}
+                    </Link>
+                  ) : (
+                    <span className="text-amber-700">Unassigned</span>
                   )}
                 </td>
                 <td className="px-4 py-2.5 text-slate-600">
@@ -798,6 +809,9 @@ function DraftSubmission({ request }: { request: BoxRequest }) {
             >
               {box.lot}
             </Link>
+            <span className="text-xs text-slate-500">
+              {box.pallet_number ?? "Unassigned"}
+            </span>
           </label>
         ))}
       </div>
@@ -1413,7 +1427,7 @@ function DiscrepancyEditor({
         <div>
           <h3 className="text-sm font-medium">Line discrepancies</h3>
           <p className="text-xs text-slate-500">
-            Record damage, wrong lot/contents, rejected, missing, or unexpected boxes.
+            Record damage, wrong lot/item descriptions, rejected, missing, or unexpected boxes.
           </p>
         </div>
         <button
@@ -1451,7 +1465,9 @@ function DiscrepancyEditor({
             {["missing", "unexpected", "damaged", "wrong_lot", "wrong_contents", "rejected"].map(
               (type) => (
                 <option key={type} value={type}>
-                  {humanize(type)}
+                  {type === "wrong_contents"
+                    ? "Wrong item descriptions"
+                    : humanize(type)}
                 </option>
               ),
             )}
@@ -1566,12 +1582,14 @@ function CompletionDialog({
       ? Array.from({ length: request.quantity }, () => ({
           lot: "",
           box_number: "",
+          pallet_number: "",
           contents: "",
         }))
       : [],
   );
   const [showExcelMapper, setShowExcelMapper] = useState(false);
   const [rowLots, setRowLots] = useState<Record<number, LotSelection | null>>({});
+  const [rowPallets, setRowPallets] = useState<Record<number, PalletSelection | null>>({});
   const [discrepancyReason, setDiscrepancyReason] = useState("");
   const [lineDiscrepancies, setLineDiscrepancies] = useState<
     RequestDiscrepancyInput[]
@@ -1584,9 +1602,13 @@ function CompletionDialog({
         ),
       ),
   );
-  const actualCount = groupInboundItems(
-    rows.filter((row) => row.box_number.trim() && row.lot.trim()),
-  ).length;
+  const groupedRows = tryGroupInboundItems(
+    rows.filter(
+      (row) =>
+        row.box_number.trim() && row.lot.trim() && row.pallet_number.trim(),
+    ),
+  );
+  const actualCount = groupedRows.items.length;
   const variance = deliveryVariance(request.quantity, actualCount);
   const hasMismatch = variance !== 0;
   const allLotsConfirmed =
@@ -1596,6 +1618,14 @@ function CompletionDialog({
         !!rowLots[index] &&
         rowLots[index]?.name.trim().toLocaleLowerCase() ===
           row.lot.trim().replace(/\s+/g, " ").toLocaleLowerCase(),
+    );
+  const allPalletsConfirmed =
+    !inbound ||
+    rows.every(
+      (row, index) =>
+        !!rowPallets[index] &&
+        rowPallets[index]?.pallet_number.trim().toLocaleUpperCase() ===
+          row.pallet_number.trim().replace(/\s+/g, " ").toLocaleUpperCase(),
     );
 
   function updateRow(
@@ -1627,9 +1657,13 @@ function CompletionDialog({
             onSubmit={(event) => {
               event.preventDefault();
               void onSubmit(
-                rows.map((row) => ({
+                rows.map((row, index) => ({
                   lot: row.lot.trim(),
                   box_number: row.box_number.trim(),
+                  pallet_number: row.pallet_number.trim(),
+                  ...(rowPallets[index]?.id
+                    ? { pallet_id: rowPallets[index]!.id }
+                    : {}),
                   contents: row.contents?.trim() || undefined,
                 })),
                 hasMismatch ? discrepancyReason.trim() || undefined : undefined,
@@ -1672,6 +1706,7 @@ function CompletionDialog({
                   onApply={(mappedRows) => {
                     setRows(mappedRows);
                     setRowLots({});
+                    setRowPallets({});
                     setShowExcelMapper(false);
                   }}
                 />
@@ -1701,7 +1736,7 @@ function CompletionDialog({
                       <Trash2 className="h-4 w-4" /> Remove
                     </button>
                   </div>
-                  <div className="grid gap-3 sm:grid-cols-3">
+                  <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                     <label className="block">
                       <span className="text-xs text-slate-500">Box number</span>
                       <input
@@ -1729,12 +1764,33 @@ function CompletionDialog({
                       }
                       label="Lot"
                     />
+                    <PalletPicker
+                      value={rowPallets[index] ?? null}
+                      numberValue={row.pallet_number}
+                      onNumberChange={(number) =>
+                        updateRow(index, "pallet_number", number)
+                      }
+                      onChange={(selection) =>
+                        setRowPallets((current) => ({
+                          ...current,
+                          [index]: selection,
+                        }))
+                      }
+                      lotId={rowLots[index]?.id}
+                      warehouseId={request.warehouse_id}
+                      canCreate={
+                        me.data?.role === "admin" || me.data?.role === "operator"
+                      }
+                      required
+                      label="Pallet"
+                    />
                     <label className="block">
                       <span className="text-xs text-slate-500">
-                        Contents (optional)
+                        Item descriptions (optional)
                       </span>
                       <input
                         className="input"
+                        maxLength={2000}
                         value={row.contents ?? ""}
                         onChange={(event) =>
                           updateRow(index, "contents", event.target.value)
@@ -1750,7 +1806,7 @@ function CompletionDialog({
                 onClick={() =>
                   setRows((current) => [
                     ...current,
-                    { lot: "", box_number: "", contents: "" },
+                    { lot: "", box_number: "", pallet_number: "", contents: "" },
                   ])
                 }
               >
@@ -1766,6 +1822,17 @@ function CompletionDialog({
                 Select an existing lot for every row, or use the explicit
                 “Create new lot” confirmation in the lot picker. Spreadsheet
                 names are preserved until you confirm them.
+              </p>
+            )}
+            {!allPalletsConfirmed && (
+              <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                Select an existing pallet for every row, or create one in the
+                selected lot and warehouse. Pallet assignment is required.
+              </p>
+            )}
+            {groupedRows.error && (
+              <p role="alert" className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">
+                {groupedRows.error}
               </p>
             )}
             {hasMismatch && (
@@ -1806,6 +1873,8 @@ function CompletionDialog({
               disabled={
                 actualCount < 1 ||
                 !allLotsConfirmed ||
+                !allPalletsConfirmed ||
+                !!groupedRows.error ||
                 !hasRequiredDiscrepancyReason(
                   request.quantity,
                   actualCount,

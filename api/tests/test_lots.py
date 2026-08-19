@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from functools import partial
+
 import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -18,7 +20,14 @@ from app.models import (
     UserRole,
 )
 from app.models.lots import clean_lot_name, normalize_lot_name
-from app.services.boxes import BoxAccessError, BoxConflictError, create_box, reassign_box_lot
+from app.services.boxes import (
+    BoxAccessError,
+    BoxConflictError,
+    reassign_box_lot,
+)
+from app.services.boxes import (
+    create_box as _create_box,
+)
 from app.services.lots import (
     LotAccessError,
     LotConflictError,
@@ -27,6 +36,8 @@ from app.services.lots import (
 )
 from app.services.requests import create_completed_receipt
 from scripts.lot_migration_preflight import analyze_box_rows
+
+create_box = partial(_create_box, legacy_allow_unassigned=True)
 
 
 def test_lot_name_normalization() -> None:
@@ -314,13 +325,23 @@ def test_admin_box_reassignment_is_audited_and_collision_safe(
 def test_box_api_lot_id_compatibility_filter_sort_search_and_export(client) -> None:
     first = client.post(
         "/api/boxes",
-        json={"box_number": "41", "lot": "API Lot", "warehouse_id": 1},
+        json={
+            "box_number": "41",
+            "lot": "API Lot",
+            "pallet_number": "PALLET-API",
+            "warehouse_id": 1,
+        },
     )
     assert first.status_code == 201, first.text
     lot_id = first.json()["lot_id"]
     by_id = client.post(
         "/api/boxes",
-        json={"box_number": "42", "lot_id": lot_id, "warehouse_id": 1},
+        json={
+            "box_number": "42",
+            "lot_id": lot_id,
+            "pallet_number": "PALLET-API",
+            "warehouse_id": 1,
+        },
     )
     assert by_id.status_code == 201, by_id.text
     assert by_id.json()["lot"] == "API Lot"

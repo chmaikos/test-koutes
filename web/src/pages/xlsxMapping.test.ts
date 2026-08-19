@@ -16,20 +16,22 @@ describe("Excel inbound row grouping", () => {
   it("merges repeated box numbers and combines distinct contents", () => {
     expect(
       groupInboundItems([
-        { lot: "PR100", box_number: "1", contents: "Folder A" },
-        { lot: "PR100", box_number: "001", contents: "Folder B" },
-        { lot: "PR100", box_number: "1", contents: "Folder B" },
-        { lot: "PR100", box_number: "2", contents: "Folder C" },
+        { lot: "PR100", pallet_number: "PAL-1", box_number: "1", contents: "Folder A" },
+        { lot: "PR100", pallet_number: " pal-1 ", box_number: "001", contents: "Folder B" },
+        { lot: "PR100", pallet_number: "PAL-1", box_number: "1", contents: "Folder B" },
+        { lot: "PR100", pallet_number: "PAL-2", box_number: "2", contents: "Folder C" },
       ]),
     ).toEqual([
       {
         lot: "PR100",
         box_number: "001",
+        pallet_number: "PAL-1",
         contents: "Folder A | Folder B",
       },
       {
         lot: "PR100",
         box_number: "002",
+        pallet_number: "PAL-2",
         contents: "Folder C",
       },
     ]);
@@ -38,10 +40,19 @@ describe("Excel inbound row grouping", () => {
   it("keeps the same box number separate when the lot differs", () => {
     expect(
       groupInboundItems([
-        { lot: "PR100", box_number: "1", contents: "A" },
-        { lot: "PR200", box_number: "1", contents: "B" },
+        { lot: "PR100", pallet_number: "PAL-1", box_number: "1", contents: "A" },
+        { lot: "PR200", pallet_number: "PAL-2", box_number: "1", contents: "B" },
       ]),
     ).toHaveLength(2);
+  });
+
+  it("rejects the same lot and box mapped to different pallets", () => {
+    expect(() =>
+      groupInboundItems([
+        { lot: "PR100", pallet_number: "PAL-1", box_number: "1" },
+        { lot: "PR100", pallet_number: "PAL-2", box_number: "001" },
+      ]),
+    ).toThrow(/different pallets/);
   });
 });
 
@@ -64,11 +75,11 @@ describe("delivery count variance", () => {
 
 const previewSheet: XlsxPreviewSheet = {
   name: "Παραλαβές Αυγούστου",
-  max_columns: 3,
+  max_columns: 4,
   rows: [
-    { row_number: 1, cells: ["Αριθμός Κιβωτίου", "Παρτίδα", "Περιεχόμενα"] },
-    { row_number: 2, cells: ["1", "PR100", "A"] },
-    { row_number: 3, cells: ["2", "PR100", "B"] },
+    { row_number: 1, cells: ["Αριθμός Κιβωτίου", "Παλέτα", "Παρτίδα", "Περιεχόμενα"] },
+    { row_number: 2, cells: ["1", "PAL-1", "PR100", "A"] },
+    { row_number: 3, cells: ["2", "PAL-2", "PR100", "B"] },
   ],
 };
 
@@ -87,8 +98,9 @@ function template(
     header_fingerprint: "header",
     column_mappings: {
       box_number: { index: 0, header: "Αριθμός Κιβωτίου" },
-      lot: { index: 1, header: "Παρτίδα" },
-      contents: { index: 2, header: "Περιεχόμενα" },
+      pallet_number: { index: 1, header: "Παλέτα" },
+      lot: { index: 2, header: "Παρτίδα" },
+      contents: { index: 3, header: "Περιεχόμενα" },
     },
     lot_source: "column",
     fixed_lot: null,
@@ -113,7 +125,8 @@ describe("saved Excel mapping templates", () => {
     expect(resolved.warnings).toEqual([]);
     expect([...resolved.selectedRows]).toEqual([2, 3]);
     expect(resolved.boxColumn).toBe(0);
-    expect(resolved.lotColumn).toBe(1);
+    expect(resolved.palletColumn).toBe(1);
+    expect(resolved.lotColumn).toBe(2);
   });
 
   it("flags stale and out-of-range columns against the current preview", () => {
@@ -121,7 +134,8 @@ describe("saved Excel mapping templates", () => {
       template({
         column_mappings: {
           box_number: { index: 12, header: "Missing box field" },
-          lot: { index: 1, header: "Παρτίδα" },
+          pallet_number: { index: 1, header: "Παλέτα" },
+          lot: { index: 2, header: "Παρτίδα" },
           contents: { index: 20, header: "" },
         },
       }),
@@ -142,9 +156,10 @@ describe("saved Excel mapping templates", () => {
         filename: "boxes.xlsx",
         sheet: previewSheet,
         boxColumn: 0,
+        palletColumn: 1,
         lotSource: "fixed",
         fixedLot: " PR200 ",
-        contentsColumn: 2,
+        contentsColumn: 3,
         rowStart: 2,
         includeRowsByDefault: false,
       });

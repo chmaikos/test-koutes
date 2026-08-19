@@ -137,6 +137,39 @@ export function RenameLotDialog({
             <h3 id="merge-candidate-title" className="font-semibold">
               Lot “{candidate.target.name}” already exists.
             </h3>
+            {candidate.pallet_actions.length > 0 && (
+              <div className="mt-3 rounded border border-sky-200 bg-sky-50 p-3 text-sky-950">
+                <h4 className="font-semibold">Pallet actions</h4>
+                <ul className="mt-1 space-y-1">
+                  {candidate.pallet_actions.map((action) => (
+                    <li key={action.source_pallet_id}>
+                      Pallet{" "}
+                      <Link className="text-brand-700 underline" to={`/pallets/${action.source_pallet_id}`}>
+                        {action.source_pallet_number}
+                      </Link>{" "}
+                      will {action.action === "combine" ? `combine into pallet #${action.target_pallet_id}` : "transfer to the target lot"} ({action.box_count} boxes).
+                    </li>
+                  ))}
+                </ul>
+                {candidate.pallet_actions_truncated && <p className="mt-1">Showing {candidate.pallet_actions.length} of {candidate.pallet_action_count} actions.</p>}
+              </div>
+            )}
+            {candidate.pallet_collisions.length > 0 && (
+              <div className="mt-3 rounded border border-rose-300 bg-rose-50 p-3 text-rose-950">
+                <h4 className="font-semibold">Pallet collisions block this merge</h4>
+                <ul className="mt-1 space-y-1">
+                  {candidate.pallet_collisions.map((collision) => (
+                    <li key={`${collision.source_pallet_id}:${collision.target_pallet_id}`}>
+                      “{collision.source_pallet_number}” conflicts with “{collision.target_pallet_number}”:{" "}
+                      {collision.reason === "warehouse_mismatch"
+                        ? "same normalized number in different warehouses"
+                        : "the target pallet is archived"}.
+                    </li>
+                  ))}
+                </ul>
+                <p className="mt-2">Move, rename, restore, or otherwise reconcile these pallets, then retry to load a fresh merge preview.</p>
+              </div>
+            )}
             {mergeClassification === "normal" && (
               <p className="mt-1">
                 You may merge “{candidate.source.name}” into it. Every current

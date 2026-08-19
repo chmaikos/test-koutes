@@ -27,6 +27,7 @@ from app.db import Base
 
 if TYPE_CHECKING:
     from app.models.lots import Lot
+    from app.models.pallets import Pallet
 
 
 class BoxRequestDirection(str, enum.Enum):
@@ -336,13 +337,18 @@ class BoxRequestItem(Base):
     lot_id: Mapped[int | None] = mapped_column(
         ForeignKey("lots.id", ondelete="RESTRICT"), nullable=True, index=True
     )
+    pallet_id: Mapped[int | None] = mapped_column(
+        ForeignKey("pallets.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     # Immutable display snapshot captured when the request item is created.
     lot: Mapped[str | None] = mapped_column(String(64))
+    pallet: Mapped[str | None] = mapped_column(String(64))
     box_number: Mapped[str | None] = mapped_column(String(64))
-    contents: Mapped[str | None] = mapped_column(String(200))
+    contents: Mapped[str | None] = mapped_column(Text)
 
     request: Mapped[BoxRequest] = relationship(back_populates="items")
     lot_record: Mapped[Lot | None] = relationship()
+    pallet_record: Mapped[Pallet | None] = relationship()
 
     @validates("lot")
     def _keep_lot_snapshot_immutable(
@@ -353,6 +359,21 @@ class BoxRequestItem(Base):
         if "lot" in self.__dict__ and self.__dict__["lot"] != value:
             raise ValueError("request item lot snapshot is immutable")
         return value
+
+    @validates("pallet")
+    def _keep_pallet_snapshot_immutable(
+        self,
+        _key: str,
+        value: str | None,
+    ) -> str | None:
+        if "pallet" in self.__dict__ and self.__dict__["pallet"] != value:
+            raise ValueError("request item pallet snapshot is immutable")
+        return value
+
+    @property
+    def pallet_number(self) -> str | None:
+        """Explicit API alias for the immutable pallet display snapshot."""
+        return self.pallet
 
 
 class BoxRequestEvent(Base):

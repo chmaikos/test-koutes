@@ -3,8 +3,10 @@ import type { ReturnCandidate } from "@/api/types";
 import {
   canSubmitReturnSelection,
   returnCandidateIds,
+  palletCandidateIds,
   returnSourceLabel,
   toggleReturnBox,
+  toggleReturnPallet,
 } from "@/pages/returnSelection";
 
 const candidates: ReturnCandidate[] = [
@@ -13,6 +15,8 @@ const candidates: ReturnCandidate[] = [
     box_number: "001",
     lot: "LOT-A",
     lot_id: 21,
+    pallet_id: 5,
+    pallet_number: "PAL-5",
     contents: "A",
     status: "ready_to_return",
   },
@@ -21,6 +25,8 @@ const candidates: ReturnCandidate[] = [
     box_number: "002",
     lot: "LOT-A",
     lot_id: 21,
+    pallet_id: null,
+    pallet_number: null,
     contents: null,
     status: "ready_to_return",
   },
@@ -42,6 +48,12 @@ describe("partial return selection", () => {
     expect(canSubmitReturnSelection(undefined, [11])).toBe(false);
     expect(canSubmitReturnSelection(42, [])).toBe(false);
     expect(canSubmitReturnSelection(42, [11])).toBe(true);
+  });
+
+  it("expands pallet groups without forcing full-pallet returns", () => {
+    expect(palletCandidateIds(candidates, 5)).toEqual([11]);
+    expect(toggleReturnPallet([], candidates, 5)).toEqual([11]);
+    expect(toggleReturnPallet([11, 12], candidates, 5)).toEqual([12]);
   });
 
   it("labels workflow and generated receipt sources clearly", () => {

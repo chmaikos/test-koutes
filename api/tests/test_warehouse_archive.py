@@ -25,7 +25,12 @@ def test_only_admin_can_archive_warehouse(client, make_user):
 def test_archive_reports_box_and_request_blockers(client, session):
     created_box = client.post(
         "/api/boxes",
-        json={"box_number": "1", "lot": "ARCHIVE", "warehouse_id": 1},
+        json={
+            "box_number": "1",
+            "lot": "ARCHIVE",
+            "pallet_number": "PALLET-ARCHIVE",
+            "warehouse_id": 1,
+        },
     )
     assert created_box.status_code == 201
 
@@ -55,6 +60,21 @@ def test_archive_reports_box_and_request_blockers(client, session):
         },
     )
     assert cancelled.status_code == 200
+    detached = client.patch(
+        f"/api/boxes/{box.id}",
+        json={"detach_pallet": True, "note": "Preparing warehouse archive"},
+    )
+    assert detached.status_code == 200
+    pallet_id = created_box.json()["pallet_id"]
+    pallet = client.get(f"/api/pallets/{pallet_id}").json()
+    archived_pallet = client.post(
+        f"/api/pallets/{pallet_id}/archive",
+        json={
+            "reason": "Preparing warehouse archive",
+            "expected_version": pallet["version"],
+        },
+    )
+    assert archived_pallet.status_code == 200
     assert client.delete("/api/warehouses/1").status_code == 200
 
 
@@ -147,7 +167,12 @@ def test_archive_cleanup_listing_restore_and_mutation_guards(
     assert (
         client.post(
             "/api/boxes",
-            json={"box_number": "2", "lot": "BLOCKED", "warehouse_id": 1},
+            json={
+                "box_number": "2",
+                "lot": "BLOCKED",
+                "pallet_number": "PALLET-BLOCKED",
+                "warehouse_id": 1,
+            },
         ).status_code
         == 400
     )
@@ -177,7 +202,12 @@ def test_archive_cleanup_listing_restore_and_mutation_guards(
     assert (
         client.post(
             "/api/boxes",
-            json={"box_number": "2", "lot": "RESTORED", "warehouse_id": 1},
+            json={
+                "box_number": "2",
+                "lot": "RESTORED",
+                "pallet_number": "PALLET-RESTORED",
+                "warehouse_id": 1,
+            },
         ).status_code
         == 201
     )

@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Download } from "lucide-react";
 import { api } from "@/api/client";
 import { useRequestAssignees, useWarehouses } from "@/api/hooks";
-import type { BoxStatus, LotProgressState, RequestIssueSeverity } from "@/api/types";
+import type { BoxStatus, LotProgressState, PalletProgressState, RequestIssueSeverity } from "@/api/types";
 import { ALL_BOX_STATUSES } from "@/api/types";
 import { STATUS_LABEL } from "@/components/StatusBadge";
 
@@ -17,6 +17,10 @@ export function ExportsPage() {
   const [lotWarehouseId, setLotWarehouseId] = useState<number | "">("");
   const [lotProgress, setLotProgress] = useState<LotProgressState | "">("");
   const [lotDownloading, setLotDownloading] = useState<"csv" | "xlsx" | null>(null);
+  const [palletSearch, setPalletSearch] = useState("");
+  const [palletWarehouseId, setPalletWarehouseId] = useState<number | "">("");
+  const [palletProgress, setPalletProgress] = useState<PalletProgressState | "">("");
+  const [palletDownloading, setPalletDownloading] = useState<"csv" | "xlsx" | null>(null);
   const [productivityWarehouseId, setProductivityWarehouseId] = useState<
     number | ""
   >("");
@@ -141,6 +145,30 @@ export function ExportsPage() {
     }
   }
 
+  async function downloadPallets(format: "csv" | "xlsx") {
+    setPalletDownloading(format);
+    try {
+      const params: Record<string, string> = {};
+      if (palletSearch.trim()) params.search = palletSearch.trim();
+      if (palletWarehouseId) params.warehouse_id = String(palletWarehouseId);
+      if (palletProgress) params.progress_state = palletProgress;
+      const response = await api.get<Blob>(`/exports/pallets.${format}`, {
+        params,
+        responseType: "blob",
+      });
+      const url = URL.createObjectURL(response.data);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `pallets-${new Date().toISOString().replace(/[:.]/g, "-")}.${format}`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } finally {
+      setPalletDownloading(null);
+    }
+  }
+
   async function downloadRequestReport(
     report: "request-reconciliation" | "request-analytics",
     format: "csv" | "xlsx",
@@ -204,7 +232,8 @@ export function ExportsPage() {
         <div>
           <h2 className="font-semibold">Box inventory</h2>
           <p className="text-xs text-slate-500">
-            Download boxes matching the selected filters.
+            Download boxes with lot, pallet, status, and free-text item
+            descriptions matching the selected filters.
           </p>
         </div>
         <div className="grid gap-4 md:grid-cols-2">
@@ -280,6 +309,25 @@ export function ExportsPage() {
           <Download className="h-4 w-4" />
           {downloading === "xlsx" ? "Preparing..." : "Download XLSX"}
         </button>
+        </div>
+      </section>
+
+      <section className="card card-pad space-y-4">
+        <div>
+          <h2 className="font-semibold">Pallet summary</h2>
+          <p className="text-xs text-slate-500">
+            Export ACL-scoped pallet numbers, lots, warehouses, box counts,
+            status distribution, completion, and latest activity.
+          </p>
+        </div>
+        <div className="grid gap-4 md:grid-cols-3">
+          <label className="block"><span className="text-xs text-slate-500">Search</span><input className="input" placeholder="Pallet number or lot" value={palletSearch} onChange={(event) => setPalletSearch(event.target.value)} /></label>
+          <label className="block"><span className="text-xs text-slate-500">Warehouse</span><select className="input" value={palletWarehouseId} onChange={(event) => setPalletWarehouseId(event.target.value ? Number(event.target.value) : "")}><option value="">All accessible</option>{warehouses.data?.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}</select></label>
+          <label className="block"><span className="text-xs text-slate-500">Progress</span><select className="input" value={palletProgress} onChange={(event) => setPalletProgress(event.target.value as PalletProgressState | "")}><option value="">All</option><option value="active">Active</option><option value="in_progress">In progress</option><option value="complete">Complete</option><option value="no_eligible">No eligible boxes</option></select></label>
+        </div>
+        <div className="flex flex-wrap gap-3">
+          <button className="btn-primary" disabled={palletDownloading !== null} onClick={() => void downloadPallets("csv")}><Download className="h-4 w-4" />{palletDownloading === "csv" ? "Preparing…" : "Download pallets CSV"}</button>
+          <button className="btn-secondary" disabled={palletDownloading !== null} onClick={() => void downloadPallets("xlsx")}><Download className="h-4 w-4" />{palletDownloading === "xlsx" ? "Preparing…" : "Download pallets XLSX"}</button>
         </div>
       </section>
 
@@ -362,7 +410,7 @@ export function ExportsPage() {
           <h2 className="font-semibold">Request reconciliation and analytics</h2>
           <p className="text-xs text-slate-500">
             Export the same ACL-scoped issues and metrics shown on the
-            reconciliation dashboard.
+            reconciliation dashboard, including pallet context where present.
           </p>
         </div>
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-6">

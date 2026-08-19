@@ -302,6 +302,14 @@ export function RequestReconciliationPage() {
                             </Link>
                           </>
                         )}
+                        {issue.pallet_id && (
+                          <>
+                            {" · "}
+                            <Link className="link" to={`/pallets/${issue.pallet_id}`}>
+                              Pallet {issue.pallet_number ?? `#${issue.pallet_id}`}
+                            </Link>
+                          </>
+                        )}
                       </td>
                     </tr>
                   ))}
@@ -331,6 +339,11 @@ export function RequestReconciliationPage() {
                   {issue.box_path && (
                     <Link className="link ml-3 text-sm" to={issue.box_path}>
                       Open box #{issue.box_id}
+                    </Link>
+                  )}
+                  {issue.pallet_id && (
+                    <Link className="link ml-3 text-sm" to={`/pallets/${issue.pallet_id}`}>
+                      Open pallet {issue.pallet_number ?? `#${issue.pallet_id}`}
                     </Link>
                   )}
                 </article>

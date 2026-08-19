@@ -155,6 +155,12 @@ def _candidate_detail(candidate: LotMergeCandidate) -> dict[str, object]:
         hard_overlaps=candidate.hard_overlaps,
         hard_overlap_count=candidate.hard_overlap_count,
         hard_overlaps_truncated=candidate.hard_overlaps_truncated,
+        pallet_collisions=candidate.pallet_collisions,
+        pallet_collision_count=candidate.pallet_collision_count,
+        pallet_collisions_truncated=candidate.pallet_collisions_truncated,
+        pallet_actions=candidate.pallet_actions,
+        pallet_action_count=candidate.pallet_action_count,
+        pallet_actions_truncated=candidate.pallet_actions_truncated,
         merge_allowed_with_archived_overwrite=(
             candidate.merge_allowed_with_archived_overwrite
         ),
@@ -403,6 +409,7 @@ async def force_purge(
         "purge_mode": "force",
         "active_box_count": result.active_box_count,
         "archived_box_count": result.archived_box_count,
+        "pallet_count": result.pallet_count,
         "touched_request_count": result.touched_request_count,
         "rewritten_request_count": result.rewritten_request_count,
         "deleted_request_count": result.deleted_request_count,
@@ -429,6 +436,7 @@ async def force_purge(
         ),
         active_box_count=result.active_box_count,
         archived_box_count=result.archived_box_count,
+        pallet_count=result.pallet_count,
         touched_request_count=result.touched_request_count,
         rewritten_request_count=result.rewritten_request_count,
         deleted_request_count=result.deleted_request_count,
@@ -528,6 +536,7 @@ async def purge(
         "lot_name": result.lot_name,
         "lot_version": result.lot_version,
         "archived_box_count": result.archived_box_count,
+        "pallet_count": result.pallet_count,
         "receipt_count": result.receipt_count,
         "object_key_count": result.object_key_count,
         "purge_audit_id": result.audit_id,
@@ -549,6 +558,7 @@ async def purge(
             version=result.lot_version,
         ),
         archived_box_count=result.archived_box_count,
+        pallet_count=result.pallet_count,
         receipt_count=result.receipt_count,
         object_key_count=result.object_key_count,
         object_cleanup_status=cleanup_status,
@@ -806,6 +816,10 @@ async def merge(
         "relinked_request_item_count": result.relinked_request_item_count,
         "relinked_discrepancy_count": result.relinked_discrepancy_count,
         "deleted_box_event_count": result.deleted_box_event_count,
+        "combined_pallet_count": result.combined_pallet_count,
+        "moved_pallet_count": result.moved_pallet_count,
+        "absorbed_pallet_ids": result.absorbed_pallet_ids,
+        "moved_pallet_ids": result.moved_pallet_ids,
         "survivor_box_ids": result.survivor_box_ids,
         "removed_box_ids": result.removed_box_ids,
     }
@@ -834,6 +848,10 @@ async def merge(
         relinked_request_item_count=result.relinked_request_item_count,
         relinked_discrepancy_count=result.relinked_discrepancy_count,
         deleted_box_event_count=result.deleted_box_event_count,
+        combined_pallet_count=result.combined_pallet_count,
+        moved_pallet_count=result.moved_pallet_count,
+        absorbed_pallet_ids=result.absorbed_pallet_ids,
+        moved_pallet_ids=result.moved_pallet_ids,
     )
 
 

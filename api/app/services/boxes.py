@@ -8,13 +8,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
-from sqlalchemy import Select, select
+from sqlalchemy import Select, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.boxes import Box, BoxEvent, BoxEventType, BoxStatus
 from app.models.lots import Lot, LotEvent, LotEventType
 from app.models.notifications import RequestNotificationKind
+from app.models.pallets import Pallet, PalletEvent, PalletEventType
 from app.models.requests import (
     ACTIVE_REQUEST_STATUSES,
     BoxRequest,
@@ -89,6 +90,158 @@ def normalize_box_number(raw: str) -> str:
 
 class BoxAccessError(BoxRuleError):
     """The caller does not have ACL access to the warehouse involved."""
+
+
+def set_box_pallet_assignment(
+    db: Session,
+    *,
+    user: User,
+    box: Box,
+    target_pallet: Pallet | None,
+    reason: str,
+    expected_lot_id: int | None = None,
+    expected_warehouse_id: int | None = None,
+    metadata: dict[str, object] | None = None,
+    record_pallet_event: bool = True,
+) -> int | None:
+    """Change one current pallet link and append immutable box audit events."""
+    cleaned_reason = reason.strip()
+    if not cleaned_reason:
+        raise BoxRuleError("a reason is required to change pallet assignment")
+    lot_id = expected_lot_id if expected_lot_id is not None else box.lot_id
+    warehouse_id = (
+        expected_warehouse_id
+        if expected_warehouse_id is not None
+        else box.current_warehouse_id
+    )
+    if not can_access(user, box.current_warehouse_id) or not can_access(
+        user, warehouse_id
+    ):
+        raise BoxAccessError("warehouse access denied")
+    if target_pallet is not None:
+        if not target_pallet.is_active:
+            raise BoxConflictError("archived pallets cannot receive boxes")
+        if target_pallet.lot_id != lot_id:
+            raise BoxConflictError("box and pallet must belong to the same lot")
+        if target_pallet.current_warehouse_id != warehouse_id:
+            raise BoxConflictError("box and pallet must be in the same warehouse")
+        if not can_access(user, target_pallet.current_warehouse_id):
+            raise BoxAccessError("warehouse access denied")
+        if box.archived_at is not None:
+            raise BoxConflictError("archived boxes cannot be assigned")
+    source_pallet_id = box.pallet_id
+    target_pallet_id = target_pallet.id if target_pallet is not None else None
+    if source_pallet_id == target_pallet_id:
+        return source_pallet_id
+    now = datetime.now(UTC)
+    common_metadata = {
+        "from_pallet_id": source_pallet_id,
+        "to_pallet_id": target_pallet_id,
+        **(metadata or {}),
+    }
+    if source_pallet_id is not None:
+        db.add(
+            BoxEvent(
+                box_id=box.id,
+                warehouse_id=box.current_warehouse_id,
+                event_type=BoxEventType.pallet_unassigned,
+                from_status=box.status,
+                to_status=box.status,
+                from_warehouse_id=box.current_warehouse_id,
+                to_warehouse_id=warehouse_id,
+                occurred_at=now,
+                user_id=user.id,
+                note=cleaned_reason,
+                event_metadata=common_metadata,
+            )
+        )
+        if record_pallet_event:
+            db.add(
+                PalletEvent(
+                    pallet_id=source_pallet_id,
+                    event_type=PalletEventType.boxes_unassigned,
+                    actor_user_id=user.id,
+                    reason=cleaned_reason,
+                    occurred_at=now,
+                    event_metadata={
+                        **common_metadata,
+                        "box_ids": [box.id],
+                        "box_count": 1,
+                    },
+                )
+            )
+    box.pallet_id = target_pallet_id
+    if target_pallet_id is not None:
+        db.add(
+            BoxEvent(
+                box_id=box.id,
+                warehouse_id=warehouse_id,
+                event_type=BoxEventType.pallet_assigned,
+                from_status=box.status,
+                to_status=box.status,
+                from_warehouse_id=box.current_warehouse_id,
+                to_warehouse_id=warehouse_id,
+                occurred_at=now,
+                user_id=user.id,
+                note=cleaned_reason,
+                event_metadata=common_metadata,
+            )
+        )
+        if record_pallet_event:
+            db.add(
+                PalletEvent(
+                    pallet_id=target_pallet_id,
+                    event_type=PalletEventType.boxes_assigned,
+                    actor_user_id=user.id,
+                    reason=cleaned_reason,
+                    occurred_at=now,
+                    event_metadata={
+                        **common_metadata,
+                        "box_ids": [box.id],
+                        "box_count": 1,
+                    },
+                )
+            )
+    box.updated_by_user_id = user.id
+    box.updated_at = now
+    if source_pallet_id is not None and source_pallet_id != target_pallet_id:
+        source_pallet = db.get(Pallet, source_pallet_id)
+        if source_pallet is not None and source_pallet.is_active:
+            remaining = int(
+                db.scalar(
+                    select(func.count(Box.id)).where(
+                        Box.pallet_id == source_pallet_id
+                    )
+                )
+                or 0
+            )
+            if remaining == 0:
+                source_pallet.is_active = False
+                source_pallet.archived_at = now
+                source_pallet.archived_by_user_id = user.id
+                source_pallet.archive_reason = (
+                    f"Automatically archived after its final box was removed: "
+                    f"{cleaned_reason}"
+                )
+                source_pallet.updated_by_user_id = user.id
+                source_pallet.updated_at = now
+                db.add(
+                    PalletEvent(
+                        pallet_id=source_pallet.id,
+                        event_type=PalletEventType.archived,
+                        old_pallet_number=source_pallet.pallet_number,
+                        actor_user_id=user.id,
+                        reason=cleaned_reason,
+                        occurred_at=now,
+                        event_metadata={
+                            **common_metadata,
+                            "operation": "automatic_empty_pallet_cleanup",
+                            "trigger_box_id": box.id,
+                            "remaining_box_count": 0,
+                        },
+                    )
+                )
+    return source_pallet_id
 
 
 def _ensure_warehouse(db: Session, warehouse_id: int) -> Warehouse:
@@ -185,9 +338,13 @@ def create_box(
     lot: str | None = None,
     lot_id: int | None = None,
     warehouse_id: int,
+    pallet_number: str | None = None,
+    pallet_id: int | None = None,
     contents: str | None = None,
     note: str | None = None,
     initial_status: BoxStatus = BoxStatus.received,
+    legacy_allow_unassigned: bool = False,
+    receipt_authorized_pallet_creation: bool = False,
     commit: bool = True,
 ) -> Box:
     _ensure_warehouse(db, warehouse_id)
@@ -220,6 +377,31 @@ def create_box(
         raise BoxConflictError(
             f"box {cleaned_number!r} already exists in lot {lot_record.name!r}"
         )
+    target_pallet: Pallet | None = None
+    if pallet_number is None:
+        if not legacy_allow_unassigned:
+            raise BoxRuleError("pallet_number is required for new box receipts")
+    else:
+        from app.services.pallets import (
+            PalletConflictError,
+            PalletRuleError,
+            resolve_or_create_active_pallet,
+        )
+
+        try:
+            target_pallet = resolve_or_create_active_pallet(
+                db,
+                user=user,
+                lot_id=lot_record.id,
+                warehouse_id=warehouse_id,
+                pallet_number=pallet_number,
+                pallet_id=pallet_id,
+                receipt_creation_authorized=receipt_authorized_pallet_creation,
+            )
+        except PalletConflictError as exc:
+            raise BoxConflictError(str(exc)) from exc
+        except PalletRuleError as exc:
+            raise BoxRuleError(str(exc)) from exc
     now = datetime.now(UTC)
     box = Box(
         box_number=cleaned_number,
@@ -234,6 +416,15 @@ def create_box(
         with db.begin_nested():
             db.add(box)
             db.flush()
+            if target_pallet is not None:
+                set_box_pallet_assignment(
+                    db,
+                    user=user,
+                    box=box,
+                    target_pallet=target_pallet,
+                    reason=note or "Assigned during box receipt.",
+                    metadata={"operation": "box_receipt"},
+                )
             db.add(
                 BoxEvent(
                     box_id=box.id,
@@ -246,7 +437,13 @@ def create_box(
                     occurred_at=now,
                     user_id=user.id,
                     note=note,
-                    event_metadata={"lot_id": lot_record.id},
+                    event_metadata={
+                        "lot_id": lot_record.id,
+                        "pallet_id": target_pallet.id if target_pallet else None,
+                        "pallet_number": (
+                            target_pallet.pallet_number if target_pallet else None
+                        ),
+                    },
                 )
             )
             db.flush()
@@ -270,9 +467,12 @@ def restore_archived_box(
     lot: str | None = None,
     lot_id: int | None = None,
     warehouse_id: int,
+    pallet_number: str | None = None,
+    pallet_id: int | None = None,
     contents: str | None = None,
     note: str | None = None,
     restored_status: BoxStatus = BoxStatus.received,
+    legacy_allow_unassigned: bool = False,
     commit: bool = True,
 ) -> Box | None:
     """Reactivate an archived identity, returning ``None`` when none exists."""
@@ -312,6 +512,30 @@ def restore_archived_box(
         raise BoxConflictError(
             f"archived box {box.id} still has an active return reservation"
         )
+    target_pallet: Pallet | None = None
+    if pallet_number is None:
+        if not legacy_allow_unassigned:
+            raise BoxRuleError("pallet_number is required for restored box receipts")
+    else:
+        from app.services.pallets import (
+            PalletConflictError,
+            PalletRuleError,
+            resolve_or_create_active_pallet,
+        )
+
+        try:
+            target_pallet = resolve_or_create_active_pallet(
+                db,
+                user=user,
+                lot_id=lot_record.id,
+                warehouse_id=warehouse_id,
+                pallet_number=pallet_number,
+                pallet_id=pallet_id,
+            )
+        except PalletConflictError as exc:
+            raise BoxConflictError(str(exc)) from exc
+        except PalletRuleError as exc:
+            raise BoxRuleError(str(exc)) from exc
 
     now = datetime.now(UTC)
     old_status = box.status
@@ -329,6 +553,34 @@ def restore_archived_box(
     box.archive_reason = None
     box.updated_by_user_id = user.id
     box.updated_at = now
+
+    if target_pallet is not None:
+        set_box_pallet_assignment(
+            db,
+            user=user,
+            box=box,
+            target_pallet=target_pallet,
+            reason=note or "Assigned during box restoration.",
+            expected_warehouse_id=warehouse_id,
+            metadata={"operation": "box_restore_receipt"},
+        )
+    elif box.pallet_id is not None:
+        pallet = db.get(Pallet, box.pallet_id)
+        if (
+            pallet is None
+            or not pallet.is_active
+            or pallet.lot_id != box.lot_id
+            or pallet.current_warehouse_id != warehouse_id
+        ):
+            set_box_pallet_assignment(
+                db,
+                user=user,
+                box=box,
+                target_pallet=None,
+                reason=note or "Detached incompatible pallet during box restoration.",
+                expected_warehouse_id=warehouse_id,
+                metadata={"operation": "restore_incompatible_pallet_detach"},
+            )
 
     context = (note or "Restored during XLSX import.").strip()
     if previous_archive_reason:
@@ -392,6 +644,10 @@ def update_box(
     force: bool = False,
     commit: bool = True,
     cancelled_request_ids: set[int] | None = None,
+    target_pallet_id: int | None = None,
+    detach_pallet: bool = False,
+    preserve_pallet_on_move: bool = False,
+    additional_event_metadata: dict[str, object] | None = None,
     skip_request_guards: bool = False,
     _request_return_move: _RequestReturnMove | None = None,
 ) -> Box:
@@ -475,6 +731,39 @@ def update_box(
             if cancelled_request_ids is not None:
                 cancelled_request_ids.update(cancelled)
 
+    effective_warehouse_id = (
+        new_warehouse_id if moving and new_warehouse_id is not None else box.current_warehouse_id
+    )
+    if target_pallet_id is not None:
+        target_pallet = db.scalar(
+            select(Pallet)
+            .where(Pallet.id == target_pallet_id)
+            .with_for_update(of=Pallet)
+        )
+        if target_pallet is None:
+            raise BoxConflictError("target pallet not found")
+        source_pallet_id = set_box_pallet_assignment(
+            db,
+            user=user,
+            box=box,
+            target_pallet=target_pallet,
+            reason=note or "Changed pallet during box update.",
+            expected_warehouse_id=effective_warehouse_id,
+            metadata={"operation": "box_update_pallet_assignment"},
+        )
+        metadata_changed = source_pallet_id != target_pallet.id
+    elif detach_pallet or (moving and box.pallet_id is not None and not preserve_pallet_on_move):
+        source_pallet_id = set_box_pallet_assignment(
+            db,
+            user=user,
+            box=box,
+            target_pallet=None,
+            reason=note or "Detached pallet during box warehouse move.",
+            expected_warehouse_id=box.current_warehouse_id,
+            metadata={"operation": "box_update_pallet_detach"},
+        )
+        metadata_changed = source_pallet_id is not None
+
     if new_contents is not None:
         # Empty string clears the optional descriptor.
         stripped = new_contents.strip()
@@ -512,6 +801,7 @@ def update_box(
                     "operation": "forced_move" if force else "move",
                     "linked_request_ids": request_ids,
                     "cancelled_request_ids": sorted(cancelled),
+                    **(additional_event_metadata or {}),
                     **request_move_metadata,
                 },
             )
@@ -556,6 +846,7 @@ def update_box(
                     "operation": "forced_status_change" if force else "status_change",
                     "linked_request_ids": request_ids,
                     "cancelled_request_ids": sorted(cancelled),
+                    **(additional_event_metadata or {}),
                     **request_move_metadata,
                 },
             )
@@ -613,6 +904,8 @@ def reassign_box_lot(
     expected_version: int,
     lot: str | None = None,
     lot_id: int | None = None,
+    target_pallet_id: int | None = None,
+    detach_pallet: bool = False,
     commit: bool = True,
 ) -> Box:
     """Assign one physical box to another lot with an immutable audit trail."""
@@ -657,6 +950,25 @@ def reassign_box_lot(
     ):
         raise BoxConflictError("source and target lots must both be active")
 
+    preliminary_pallet_id = db.scalar(
+        select(Box.pallet_id).where(Box.id == box.id)
+    )
+    pallet_ids = sorted(
+        {
+            pallet_id
+            for pallet_id in (preliminary_pallet_id, target_pallet_id)
+            if pallet_id is not None
+        }
+    )
+    locked_pallets = {
+        pallet.id: pallet
+        for pallet in db.scalars(
+            select(Pallet)
+            .where(Pallet.id.in_(pallet_ids))
+            .order_by(Pallet.id)
+            .with_for_update(of=Pallet)
+        ).all()
+    }
     locked = db.scalar(
         select(Box).where(Box.id == box.id).with_for_update(of=Box)
     )
@@ -664,6 +976,10 @@ def reassign_box_lot(
         raise BoxRuleError("box not found")
     if locked.lot_id != source_lot.id:
         raise BoxConflictError("box lot changed concurrently; refresh and retry")
+    if locked.pallet_id != preliminary_pallet_id:
+        raise BoxConflictError(
+            "box pallet changed concurrently; refresh and retry"
+        )
     if locked.archived_at is not None:
         raise BoxConflictError("archived boxes cannot be reassigned")
     if source_lot.version != expected_version:
@@ -700,6 +1016,21 @@ def reassign_box_lot(
     now = datetime.now(UTC)
     try:
         with db.begin_nested():
+            target_pallet = None
+            if target_pallet_id is not None:
+                target_pallet = locked_pallets.get(target_pallet_id)
+                if target_pallet is None:
+                    raise BoxConflictError("target pallet not found")
+            if locked.pallet_id is not None or target_pallet is not None or detach_pallet:
+                set_box_pallet_assignment(
+                    db,
+                    user=user,
+                    box=locked,
+                    target_pallet=target_pallet,
+                    reason=cleaned_reason,
+                    expected_lot_id=target_lot.id,
+                    metadata={"operation": "lot_reassignment_pallet_change"},
+                )
             locked.lot_id = target_lot.id
             locked.lot_record = target_lot
             locked.updated_by_user_id = user.id
@@ -907,6 +1238,35 @@ def delete_box(
                     },
                 )
             )
+        archived = True
+    elif box.pallet_id is not None:
+        now = datetime.now(UTC)
+        archive_reason = (reason or "").strip() or (
+            "Archived to preserve pallet assignment history."
+        )
+        box.archived_at = now
+        box.archived_by_user_id = user.id
+        box.archive_reason = archive_reason
+        box.updated_by_user_id = user.id
+        box.updated_at = now
+        db.add(
+            BoxEvent(
+                box_id=box.id,
+                warehouse_id=warehouse_id,
+                event_type=BoxEventType.archived,
+                from_status=box.status,
+                to_status=box.status,
+                from_warehouse_id=warehouse_id,
+                to_warehouse_id=warehouse_id,
+                occurred_at=now,
+                user_id=user.id,
+                note=archive_reason,
+                event_metadata={
+                    "operation": "assigned_box_archive",
+                    "pallet_id": box.pallet_id,
+                },
+            )
+        )
         archived = True
     else:
         db.delete(box)

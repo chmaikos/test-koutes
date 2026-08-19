@@ -15,6 +15,7 @@ import type { BoxStatus } from "@/api/types";
 import { STATUS_LABEL, StatusBadge } from "@/components/StatusBadge";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { LotPicker, type LotSelection } from "@/components/LotPicker";
+import { PalletPicker, type PalletSelection } from "@/components/PalletPicker";
 import { useHasRole } from "@/components/RoleGate";
 import {
   formatCancelledRequestIds,
@@ -55,6 +56,10 @@ export function BoxDetailPage() {
   const [archiveReason, setArchiveReason] = useState("");
   const [actionError, setActionError] = useState<string | null>(null);
   const [targetLot, setTargetLot] = useState<LotSelection | null>(null);
+  const [targetLotPallet, setTargetLotPallet] = useState<PalletSelection | null>(null);
+  const [selectedPallet, setSelectedPallet] = useState<PalletSelection | null>(null);
+  const [palletReason, setPalletReason] = useState("");
+  const [palletMessage, setPalletMessage] = useState<string | null>(null);
   const [reassignmentReason, setReassignmentReason] = useState("");
   const [reassignmentError, setReassignmentError] = useState<string | null>(null);
   const [relocationWarehouseId, setRelocationWarehouseId] = useState<number | "">(
@@ -130,8 +135,17 @@ export function BoxDetailPage() {
           <Field label="Returned">
             {box.returned_at ? new Date(box.returned_at).toLocaleString() : "—"}
           </Field>
-          <Field label="Contents">
+          <Field label="Item descriptions">
             {box.contents ?? "—"}
+          </Field>
+          <Field label="Pallet">
+            {box.pallet_id ? (
+              <Link className="text-brand-700 hover:underline" to={`/pallets/${box.pallet_id}`}>
+                {box.pallet_number ?? `Pallet #${box.pallet_id}`}
+              </Link>
+            ) : (
+              "Unassigned"
+            )}
           </Field>
         </dl>
         {box.archived_at && (
@@ -221,6 +235,61 @@ export function BoxDetailPage() {
           </p>
         )}
       </header>
+
+      {canWrite && !box.archived_at && (
+        <section className="card card-pad">
+          <h2 className="font-semibold">Pallet assignment</h2>
+          <p className="mt-1 text-sm text-slate-600">
+            Assign or reassign this box within its current lot and warehouse,
+            or detach it from its pallet.
+          </p>
+          <div className="mt-3 grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto_auto] md:items-end">
+            <PalletPicker
+              value={selectedPallet}
+              onChange={setSelectedPallet}
+              lotId={box.lot_id}
+              warehouseId={box.current_warehouse_id}
+              label="Target pallet"
+            />
+            <label className="block">
+              <span className="text-xs text-slate-500">Reason</span>
+              <input className="input" maxLength={2000} value={palletReason} onChange={(event) => setPalletReason(event.target.value)} />
+            </label>
+            <button
+              className="btn-primary"
+              disabled={!selectedPallet || !palletReason.trim() || update.isPending}
+              onClick={async () => {
+                if (!selectedPallet) return;
+                try {
+                  const result = await update.mutateAsync({ id: box.id, patch: { pallet_id: selectedPallet.id, note: palletReason.trim() } });
+                  setPalletMessage(result.cancelled_request_ids.length ? `Pallet assigned; cancelled request IDs ${formatCancelledRequestIds(result.cancelled_request_ids)}.` : "Pallet assigned.");
+                  setPalletReason("");
+                } catch (caught) {
+                  setPalletMessage(apiError(caught, "The pallet could not be assigned."));
+                }
+              }}
+            >
+              Assign
+            </button>
+            <button
+              className="btn-secondary"
+              disabled={!box.pallet_id || !palletReason.trim() || update.isPending}
+              onClick={async () => {
+                try {
+                  const result = await update.mutateAsync({ id: box.id, patch: { detach_pallet: true, note: palletReason.trim() } });
+                  setPalletMessage(result.cancelled_request_ids.length ? `Pallet detached; cancelled request IDs ${formatCancelledRequestIds(result.cancelled_request_ids)}.` : "Pallet detached.");
+                  setPalletReason("");
+                } catch (caught) {
+                  setPalletMessage(apiError(caught, "The pallet could not be detached."));
+                }
+              }}
+            >
+              Detach
+            </button>
+          </div>
+          {palletMessage && <p role="status" className="mt-2 text-sm text-amber-800">{palletMessage}</p>}
+        </section>
+      )}
 
       {isAdmin && box.status === "returned" && !box.archived_at && (
         <section className="card card-pad border-amber-200 bg-amber-50/40">
@@ -333,11 +402,22 @@ export function BoxDetailPage() {
             Admin-only audited correction. This moves the existing box to a
             different lot and requires a reason.
           </p>
-          <div className="mt-4 grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] md:items-end">
+          <div className="mt-4 grid gap-3 md:grid-cols-2">
             <LotPicker
               label="Target lot"
               value={targetLot}
-              onChange={setTargetLot}
+              onChange={(selection) => {
+                setTargetLot(selection);
+                setTargetLotPallet(null);
+              }}
+            />
+            <PalletPicker
+              label="Target pallet"
+              value={targetLotPallet}
+              onChange={setTargetLotPallet}
+              lotId={targetLot?.id}
+              warehouseId={box.current_warehouse_id}
+              disabled={!targetLot}
             />
             <label className="block">
               <span className="text-xs text-slate-500">Correction reason</span>
@@ -355,22 +435,26 @@ export function BoxDetailPage() {
               disabled={
                 reassignLot.isPending ||
                 !targetLot ||
+                !targetLotPallet ||
                 targetLot.id === box.lot_id ||
                 !reassignmentReason.trim() ||
                 !sourceLot.data
               }
               onClick={async () => {
-                if (!targetLot || !sourceLot.data) return;
+                if (!targetLot || !targetLotPallet || !sourceLot.data) return;
                 setReassignmentError(null);
                 try {
                   await reassignLot.mutateAsync({
                     boxId: box.id,
                     sourceLotId: box.lot_id,
-                    payload: reassignmentPayload(
-                      targetLot.id,
-                      reassignmentReason,
-                      sourceLot.data.version,
-                    ),
+                    payload: {
+                      ...reassignmentPayload(
+                        targetLot.id,
+                        reassignmentReason,
+                        sourceLot.data.version,
+                      ),
+                      pallet_id: targetLotPallet.id,
+                    },
                   });
                   setTargetLot(null);
                   setReassignmentReason("");

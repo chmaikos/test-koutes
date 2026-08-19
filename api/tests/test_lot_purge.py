@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from functools import partial
 
 import pytest
 from sqlalchemy import func, select
@@ -38,7 +39,8 @@ from app.models import (
     UserRole,
 )
 from app.services import lots as lots_service
-from app.services.boxes import create_box, reassign_box_lot
+from app.services.boxes import create_box as _create_box
+from app.services.boxes import reassign_box_lot
 from app.services.lots import (
     LotPurgeConflictError,
     LotPurgeNotFoundError,
@@ -53,6 +55,8 @@ from app.services.lots import (
     purge_lot,
 )
 from app.services.requests import create_completed_receipt
+
+create_box = partial(_create_box, legacy_allow_unassigned=True)
 
 
 def _eligible_lot(session, make_user, *, receipt_count: int = 1):
@@ -348,6 +352,7 @@ def test_purge_analyzer_missing_lot_and_lock_sql(session):
             box_ids=[9, 3],
             request_ids=[9, 3],
             discrepancy_ids=[9, 3],
+            pallet_ids=[9, 3],
         ),
     )
     postgres_sql = [
@@ -391,6 +396,7 @@ def test_purge_analyzer_missing_lot_and_lock_sql(session):
         "request_email_outbox",
         "box_request_discrepancy_photos",
         "box_events",
+        "pallet_events",
         "lot_events",
     }
     assert all("FOR UPDATE" not in sql for sql in sqlite_sql)
@@ -445,6 +451,7 @@ def test_all_operational_inbound_foreign_keys_are_explicitly_accounted_for():
         ("boxes", "lot_id", "RESTRICT"),
         ("lot_events", "lot_id", "RESTRICT"),
         ("box_request_items", "lot_id", "RESTRICT"),
+        ("pallets", "lot_id", "RESTRICT"),
     }
 
 

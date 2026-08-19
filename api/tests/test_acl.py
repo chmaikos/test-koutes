@@ -61,9 +61,9 @@ def restore_user_override():
 def test_admin_sees_every_warehouse_and_every_box(client):
     # Seed boxes across two warehouses while running as admin.
     for payload in (
-        {"box_number": "001", "lot": "x", "warehouse_id": 1},
-        {"box_number": "002", "lot": "x", "warehouse_id": 2},
-        {"box_number": "003", "lot": "x", "warehouse_id": 3},
+        {"box_number": "001", "lot": "x", "pallet_number": "P1", "warehouse_id": 1},
+        {"box_number": "002", "lot": "x", "pallet_number": "P2", "warehouse_id": 2},
+        {"box_number": "003", "lot": "x", "pallet_number": "P3", "warehouse_id": 3},
     ):
         assert client.post("/api/boxes", json=payload).status_code == 201
 
@@ -88,7 +88,7 @@ def test_default_new_user_sees_nothing(
     # Admin seeds a box in warehouse 1.
     create = client.post(
         "/api/boxes",
-        json={"box_number": "001", "lot": "x", "warehouse_id": 1},
+        json={"box_number": "001", "lot": "x", "pallet_number": "P1", "warehouse_id": 1},
     )
     assert create.status_code == 201
     box_id = create.json()["id"]
@@ -103,7 +103,7 @@ def test_default_new_user_sees_nothing(
     assert client.get("/api/dashboard/summary").json()["warehouses"] == []
     blocked = client.post(
         "/api/boxes",
-        json={"box_number": "002", "lot": "x", "warehouse_id": 1},
+        json={"box_number": "002", "lot": "x", "pallet_number": "P1", "warehouse_id": 1},
     )
     assert blocked.status_code == 403
 
@@ -117,9 +117,9 @@ def test_partial_grant_filters_lists_and_aggregates(
     client, operator_with_access_to_two, restore_user_override
 ):
     for payload in (
-        {"box_number": "001", "lot": "x", "warehouse_id": 1},
-        {"box_number": "002", "lot": "x", "warehouse_id": 2},
-        {"box_number": "003", "lot": "x", "warehouse_id": 3},
+        {"box_number": "001", "lot": "x", "pallet_number": "P1", "warehouse_id": 1},
+        {"box_number": "002", "lot": "x", "pallet_number": "P2", "warehouse_id": 2},
+        {"box_number": "003", "lot": "x", "pallet_number": "P3", "warehouse_id": 3},
     ):
         assert client.post("/api/boxes", json=payload).status_code == 201
 
@@ -148,13 +148,13 @@ def test_create_in_forbidden_warehouse_is_403(
 
     forbidden = client.post(
         "/api/boxes",
-        json={"box_number": "001", "lot": "x", "warehouse_id": 1},
+        json={"box_number": "001", "lot": "x", "pallet_number": "P1", "warehouse_id": 1},
     )
     assert forbidden.status_code == 403
 
     allowed = client.post(
         "/api/boxes",
-        json={"box_number": "002", "lot": "x", "warehouse_id": 2},
+        json={"box_number": "002", "lot": "x", "pallet_number": "P2", "warehouse_id": 2},
     )
     assert allowed.status_code == 201
 
@@ -164,7 +164,7 @@ def test_move_into_forbidden_warehouse_is_403(
 ):
     create = client.post(
         "/api/boxes",
-        json={"box_number": "001", "lot": "x", "warehouse_id": 2},
+        json={"box_number": "001", "lot": "x", "pallet_number": "P2", "warehouse_id": 2},
     )
     assert create.status_code == 201
     box_id = create.json()["id"]
@@ -485,7 +485,7 @@ def test_apply_warehouse_filter_empty_grant_returns_no_rows(
 
     client.post(
         "/api/boxes",
-        json={"box_number": "001", "lot": "x", "warehouse_id": 1},
+        json={"box_number": "001", "lot": "x", "pallet_number": "P1", "warehouse_id": 1},
     )
 
     stmt = apply_warehouse_filter(

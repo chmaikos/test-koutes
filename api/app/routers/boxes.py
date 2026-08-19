@@ -175,6 +175,8 @@ async def create_new_box(
                     InboundBoxItem(
                         box_number=payload.box_number,
                         lot=lot_record.name,
+                        pallet_number=payload.pallet_number,
+                        pallet_id=payload.pallet_id,
                         contents=payload.contents,
                     )
                 ],
@@ -199,6 +201,8 @@ async def create_new_box(
             box_number=payload.box_number,
             lot=payload.lot,
             lot_id=payload.lot_id,
+            pallet_number=payload.pallet_number,
+            pallet_id=payload.pallet_id,
             contents=payload.contents,
             warehouse_id=payload.warehouse_id,
             note=payload.note,
@@ -450,6 +454,8 @@ async def reassign_lot(
             lot_id=payload.lot_id,
             reason=payload.reason,
             expected_version=payload.expected_lot_version,
+            target_pallet_id=payload.pallet_id,
+            detach_pallet=payload.detach_pallet,
         )
     except BoxRuleError as exc:
         db.rollback()
@@ -485,6 +491,7 @@ async def patch_box(
     if box is None or not can_access(user, box.current_warehouse_id):
         raise HTTPException(status_code=404, detail="not found")
     source_warehouse_id = box.current_warehouse_id
+    source_pallet_id = box.pallet_id
     _check_force(payload.force, user, payload.note)
     cancelled_request_ids: set[int] = set()
     try:
@@ -498,6 +505,8 @@ async def patch_box(
             note=payload.note,
             force=payload.force,
             cancelled_request_ids=cancelled_request_ids,
+            target_pallet_id=payload.pallet_id,
+            detach_pallet=payload.detach_pallet,
         )
     except BoxRuleError as exc:
         db.rollback()
@@ -511,7 +520,14 @@ async def patch_box(
         await _publish_request_update(db, request_id)
     background.add_task(evaluate_safe, db)
     return BoxUpdateResult.model_validate(box).model_copy(
-        update={"cancelled_request_ids": sorted(cancelled_request_ids)}
+        update={
+            "cancelled_request_ids": sorted(cancelled_request_ids),
+            "detached_pallet_id": (
+                source_pallet_id
+                if source_pallet_id is not None and box.pallet_id is None
+                else None
+            ),
+        }
     )
 
 

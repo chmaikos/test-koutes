@@ -191,14 +191,19 @@ def build_reconciliation(
             BoxRequestException.request_id.in_(request_ids)
         )
     ).all()
-    box_event_rows = db.execute(
-        select(BoxEvent, BoxRequestItem.request_id)
-        .join(
-            BoxRequestItem,
-            BoxRequestItem.box_id == BoxEvent.box_id,
+    request_item_event_rows = db.execute(
+        select(BoxRequestItem, BoxEvent)
+        .outerjoin(
+            BoxEvent,
+            BoxEvent.box_id == BoxRequestItem.box_id,
         )
-        .where(BoxRequestItem.request_id.in_(request_ids))
+        .where(
+            BoxRequestItem.request_id.in_(request_ids),
+            BoxRequestItem.box_id.is_not(None),
+        )
     ).all()
+    item_snapshots: dict[tuple[int, int | None], BoxRequestItem] = {}
+    item_snapshots_by_id: dict[int, BoxRequestItem] = {}
 
     discrepancies_by_request: dict[int, list[BoxRequestDiscrepancy]] = defaultdict(list)
     for discrepancy in discrepancies:
@@ -213,8 +218,11 @@ def build_reconciliation(
     for exception in operational_exceptions:
         exceptions_by_request[exception.request_id].append(exception)
     box_events_by_request: dict[int, list[BoxEvent]] = defaultdict(list)
-    for event, request_id in box_event_rows:
-        box_events_by_request[request_id].append(event)
+    for item, event in request_item_event_rows:
+        item_snapshots[(item.request_id, item.box_id)] = item
+        item_snapshots_by_id[item.id] = item
+        if event is not None:
+            box_events_by_request[item.request_id].append(event)
 
     issues: list[RequestReconciliationIssue] = []
 
@@ -229,12 +237,18 @@ def build_reconciliation(
         occurred_at: datetime,
         due_at: datetime | None = None,
         box_id: int | None = None,
+        request_item_id: int | None = None,
     ) -> None:
         issue_time = _aware(occurred_at)
         if filters.from_at is not None and issue_time < _aware(filters.from_at):
             return
         if filters.to_at is not None and issue_time >= _aware(filters.to_at):
             return
+        snapshot = (
+            item_snapshots_by_id.get(request_item_id)
+            if request_item_id is not None
+            else item_snapshots.get((request.id, box_id))
+        )
         issues.append(
             RequestReconciliationIssue(
                 issue_key=f"{request.id}:{key}",
@@ -242,6 +256,8 @@ def build_reconciliation(
                 severity=level,
                 request_id=request.id,
                 box_id=box_id,
+                pallet_id=snapshot.pallet_id if snapshot is not None else None,
+                pallet_number=snapshot.pallet if snapshot is not None else None,
                 warehouse_id=request.warehouse_id,
                 warehouse_name=warehouse_names[request.id],
                 target_warehouse_id=request.target_warehouse_id,
@@ -304,6 +320,14 @@ def build_reconciliation(
                 for item in request_discrepancies
                 if item.discrepancy_type == discrepancy_type
             ]
+            representative = next(
+                (
+                    item
+                    for item in matching
+                    if item.request_item_id is not None or item.box_id is not None
+                ),
+                None,
+            )
             add(
                 request,
                 key=f"discrepancy:{discrepancy_type.value}",
@@ -320,7 +344,12 @@ def build_reconciliation(
                 title=f"{discrepancy_type.value.replace('_', ' ').title()} discrepancy",
                 detail=f"{count} affected box(es).",
                 occurred_at=max(item.created_at for item in matching),
-                box_id=next((item.box_id for item in matching if item.box_id), None),
+                box_id=representative.box_id if representative is not None else None,
+                request_item_id=(
+                    representative.request_item_id
+                    if representative is not None
+                    else None
+                ),
             )
 
         if request.origin in (

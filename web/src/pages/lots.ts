@@ -406,6 +406,15 @@ export function lotPurgeRemovalItems(preview: LotPurgePreview): string[] {
     `${preview.archived_box_count} archived ${
       preview.archived_box_count === 1 ? "box" : "boxes"
     } and their box history`,
+    `${preview.active_pallet_count + preview.archived_pallet_count} ${
+      preview.active_pallet_count + preview.archived_pallet_count === 1
+        ? "pallet"
+        : "pallets"
+    } and ${
+      preview.active_pallet_count + preview.archived_pallet_count === 1
+        ? "its"
+        : "their"
+    } pallet history`,
     `${preview.linked_request_count} exclusive self-${
       preview.linked_request_count === 1 ? "receipt" : "receipts"
     } and all owned request records`,
@@ -466,6 +475,8 @@ export function lotPurgeEntityPath(
       return `/boxes/${entity.entity_id}`;
     case "request":
       return `/requests/${entity.entity_id}`;
+    case "pallet":
+      return `/pallets/${entity.entity_id}`;
     case "lot":
       return `/lots/${entity.entity_id}`;
     case "event":

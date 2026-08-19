@@ -8,7 +8,7 @@ import {
   Search,
   Trash2,
 } from "lucide-react";
-import { useLot, useLotBoxes, useLotEvents, useWarehouses } from "@/api/hooks";
+import { useLot, useLotBoxes, useLotEvents, usePallets, useWarehouses } from "@/api/hooks";
 import {
   ALL_BOX_STATUSES,
   type BoxFilters,
@@ -51,6 +51,11 @@ export function LotDetailPage() {
     return next;
   }, [params]);
   const boxes = useLotBoxes(lotId, filters, page, pageSize);
+  const pallets = usePallets(
+    { lot_id: lotId, sort_by: "pallet_number", sort_dir: "asc" },
+    1,
+    200,
+  );
   const totalPages = Math.max(
     1,
     Math.ceil((boxes.data?.total ?? 0) / pageSize),
@@ -169,6 +174,36 @@ export function LotDetailPage() {
       </header>
 
       <section className="card overflow-hidden">
+        <header className="border-b border-slate-100 p-4">
+          <h2 className="font-semibold">Pallets</h2>
+          <p className="text-xs text-slate-500">
+            Pallets are shown before individual boxes. Boxes without a pallet
+            remain visible in the explicit Unassigned group below.
+          </p>
+        </header>
+        <div className="grid gap-3 p-4 sm:grid-cols-2 lg:grid-cols-3">
+          {pallets.data?.items.map((pallet) => (
+            <Link key={pallet.id} to={`/pallets/${pallet.id}`} className="rounded-lg border border-slate-200 p-3 hover:border-brand-300 hover:bg-brand-50">
+              <div className="flex items-center justify-between gap-2">
+                <strong className="text-brand-700">{pallet.pallet_number}</strong>
+                <span className="text-xs text-slate-500">{pallet.box_count} boxes</span>
+              </div>
+              <p className="mt-1 text-xs text-slate-600">{pallet.warehouse_name} · {pallet.completion_percent === null ? "N/A" : `${Math.round(pallet.completion_percent)}%`} complete</p>
+            </Link>
+          ))}
+          <Link to={`/boxes?lot_id=${summary.id}&lot_name=${encodeURIComponent(summary.name)}&unassigned_pallet=true`} className="rounded-lg border border-dashed border-slate-300 p-3 hover:bg-slate-50">
+            <div className="flex items-center justify-between gap-2">
+              <strong>Unassigned boxes</strong>
+              <span className="text-xs text-slate-500">
+                {Math.max(0, summary.box_count - (pallets.data?.items.reduce((total, pallet) => total + pallet.box_count, 0) ?? 0))}
+              </span>
+            </div>
+            <p className="mt-1 text-xs text-slate-500">View all lot boxes; unassigned rows are labelled below.</p>
+          </Link>
+        </div>
+      </section>
+
+      <section className="card overflow-hidden">
         <div className="border-b border-slate-100 p-4">
           <h2 className="font-semibold">Contained boxes</h2>
           <div className="mt-3 grid gap-3 md:grid-cols-3">
@@ -178,7 +213,7 @@ export function LotDetailPage() {
                 <Search className="pointer-events-none absolute left-2 top-2.5 h-4 w-4 text-slate-400" />
                 <input
                   className="input pl-8"
-                  placeholder="Box number or contents"
+                  placeholder="Box number, pallet, or item descriptions"
                   value={filters.search ?? ""}
                   onChange={(event) => setParam("q", event.target.value)}
                 />
@@ -231,7 +266,8 @@ export function LotDetailPage() {
                   <th className="px-4 py-2.5">Box</th>
                   <th className="px-4 py-2.5">Status</th>
                   <th className="px-4 py-2.5">Warehouse</th>
-                  <th className="px-4 py-2.5">Contents</th>
+                  <th className="px-4 py-2.5">Pallet</th>
+                  <th className="px-4 py-2.5">Item descriptions</th>
                   <th className="px-4 py-2.5">Updated</th>
                 </tr>
               </thead>
@@ -246,6 +282,9 @@ export function LotDetailPage() {
                     <td className="px-4 py-3"><StatusBadge status={box.status} /></td>
                     <td className="px-4 py-3">
                       {warehouses.data?.find((warehouse) => warehouse.id === box.current_warehouse_id)?.name ?? `#${box.current_warehouse_id}`}
+                    </td>
+                    <td className="px-4 py-3">
+                      {box.pallet_id ? <Link className="text-brand-700 hover:underline" to={`/pallets/${box.pallet_id}`}>{box.pallet_number ?? `#${box.pallet_id}`}</Link> : <span className="font-medium text-amber-700">Unassigned</span>}
                     </td>
                     <td className="max-w-80 truncate px-4 py-3 text-slate-600">
                       {box.contents || "—"}

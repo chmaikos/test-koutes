@@ -148,7 +148,9 @@ class RequestCommentCreate(RequestAction):
 class InboundBoxItem(BaseModel):
     lot: str = Field(min_length=1, max_length=64)
     box_number: str = Field(min_length=1, max_length=64)
-    contents: str | None = Field(default=None, max_length=200)
+    pallet_number: str = Field(min_length=1, max_length=64)
+    pallet_id: int | None = Field(default=None, ge=1)
+    contents: str | None = Field(default=None, max_length=2000)
 
     @field_validator("box_number")
     @classmethod
@@ -202,6 +204,9 @@ class BoxRequestItemOut(BaseModel):
     box_id: int | None
     lot_id: int | None
     lot: str | None
+    pallet_id: int | None
+    pallet: str | None
+    pallet_number: str | None
     box_number: str | None
     contents: str | None
 
@@ -400,6 +405,8 @@ class RequestReconciliationIssue(BaseModel):
     severity: RequestIssueSeverity
     request_id: int
     box_id: int | None = None
+    pallet_id: int | None = None
+    pallet_number: str | None = None
     warehouse_id: int
     warehouse_name: str
     target_warehouse_id: int | None = None
@@ -528,6 +535,11 @@ class BoxRequestSuggestion(BaseModel):
     explanation: str
 
 
+class ReturnPalletContextOut(BaseModel):
+    pallet_id: int | None
+    pallet_number: str | None
+
+
 class ReturnSourceOut(BaseModel):
     id: int
     warehouse_id: int
@@ -535,6 +547,8 @@ class ReturnSourceOut(BaseModel):
     origin: BoxRequestOrigin
     delivered_quantity: int
     eligible_quantity: int
+    pallets: list[ReturnPalletContextOut] = Field(default_factory=list)
+    has_unassigned_boxes: bool = False
 
 
 class ReturnCandidateOut(BaseModel):
@@ -542,6 +556,8 @@ class ReturnCandidateOut(BaseModel):
     box_number: str
     lot: str
     lot_id: int
+    pallet_id: int | None
+    pallet_number: str | None
     contents: str | None
     status: BoxStatus
 

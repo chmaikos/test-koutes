@@ -69,10 +69,43 @@ function handleEvent(
   qc: ReturnType<typeof useQueryClient>,
 ) {
   switch (event.type) {
+    case "pallet.created":
+    case "pallet.updated":
+    case "pallet.renamed":
+    case "pallet.archived":
+    case "pallet.restored": {
+      qc.invalidateQueries({ queryKey: ["pallets"] });
+      qc.invalidateQueries({ queryKey: ["pallet-options"] });
+      qc.invalidateQueries({ queryKey: ["pallet"] });
+      qc.invalidateQueries({ queryKey: ["pallet-events"] });
+      qc.invalidateQueries({ queryKey: ["pallet-integrity"] });
+      qc.invalidateQueries({ queryKey: ["pallet-integrity"] });
+      qc.invalidateQueries({ queryKey: ["boxes"] });
+      qc.invalidateQueries({ queryKey: ["lots"] });
+      qc.invalidateQueries({ queryKey: ["lot"] });
+      qc.invalidateQueries({ queryKey: ["lot-boxes"] });
+      qc.invalidateQueries({ queryKey: ["requests"] });
+      qc.invalidateQueries({ queryKey: ["request"] });
+      qc.invalidateQueries({ queryKey: ["return-sources"] });
+      qc.invalidateQueries({ queryKey: ["return-candidates"] });
+      qc.invalidateQueries({ queryKey: queryKeys.dashboard });
+      if (typeof event.data.id === "number") {
+        qc.invalidateQueries({ queryKey: ["pallet", event.data.id] });
+        qc.invalidateQueries({ queryKey: ["pallet-events", event.data.id] });
+      }
+      break;
+    }
     case "box.updated":
     case "box.deleted":
       qc.invalidateQueries({ queryKey: ["boxes"] });
+      qc.invalidateQueries({ queryKey: ["pallets"] });
+      qc.invalidateQueries({ queryKey: ["pallet-options"] });
+      qc.invalidateQueries({ queryKey: ["pallet"] });
+      qc.invalidateQueries({ queryKey: ["pallet-events"] });
+      qc.invalidateQueries({ queryKey: ["pallet-integrity"] });
       qc.invalidateQueries({ queryKey: ["lots"] });
+      qc.invalidateQueries({ queryKey: ["pallets"] });
+      qc.invalidateQueries({ queryKey: ["pallet-options"] });
       qc.invalidateQueries({ queryKey: ["lot-options"] });
       qc.invalidateQueries({ queryKey: ["lot"] });
       qc.invalidateQueries({ queryKey: ["lot-events"] });
@@ -110,6 +143,11 @@ function handleEvent(
     case "lot.reassigned":
     case "lot.merged": {
       qc.invalidateQueries({ queryKey: ["lots"] });
+      qc.invalidateQueries({ queryKey: ["pallets"] });
+      qc.invalidateQueries({ queryKey: ["pallet-options"] });
+      qc.invalidateQueries({ queryKey: ["pallet"] });
+      qc.invalidateQueries({ queryKey: ["pallet-events"] });
+      qc.invalidateQueries({ queryKey: ["pallet-integrity"] });
       qc.invalidateQueries({ queryKey: ["lot-options"] });
       qc.invalidateQueries({ queryKey: ["boxes"] });
       qc.invalidateQueries({ queryKey: ["requests"] });
@@ -146,6 +184,9 @@ function handleEvent(
       qc.invalidateQueries({ queryKey: ["lots"] });
       qc.invalidateQueries({ queryKey: ["lot-options"] });
       qc.invalidateQueries({ queryKey: ["boxes"] });
+      qc.invalidateQueries({ queryKey: ["pallets"] });
+      qc.invalidateQueries({ queryKey: ["pallet-options"] });
+      qc.invalidateQueries({ queryKey: ["pallet-integrity"] });
       qc.invalidateQueries({ queryKey: ["requests"] });
       qc.invalidateQueries({ queryKey: ["request-reconciliation"] });
       qc.invalidateQueries({ queryKey: ["request-analytics"] });
@@ -158,6 +199,8 @@ function handleEvent(
       qc.invalidateQueries({ queryKey: queryKeys.dashboard });
       qc.removeQueries({ queryKey: ["box"] });
       qc.removeQueries({ queryKey: ["box-events"] });
+      qc.removeQueries({ queryKey: ["pallet"] });
+      qc.removeQueries({ queryKey: ["pallet-events"] });
       qc.removeQueries({ queryKey: ["request"] });
       qc.removeQueries({ queryKey: ["request-events"] });
       qc.removeQueries({ queryKey: ["request-documents"] });

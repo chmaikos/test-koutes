@@ -52,6 +52,8 @@ def _action(client, request_id: int, action: str, **payload):
     payload["expected_version"] = _version(client, request_id)
     if action == "complete":
         payload.setdefault("idempotency_key", f"test-completion-{request_id}")
+        for item in payload.get("inbound_items") or []:
+            item.setdefault("pallet_number", "TEST-PALLET")
     return client.post(f"/api/requests/{request_id}/{action}", json=payload)
 
 
@@ -88,6 +90,7 @@ def _box(session: Session, user, number: str, status: BoxStatus = BoxStatus.rece
         box_number=number,
         lot="LOT-A",
         warehouse_id=1,
+        legacy_allow_unassigned=True,
     )
     if status != BoxStatus.received:
         box.status = status
@@ -1240,8 +1243,8 @@ def test_import_receipt_owner_can_upload_erp_document(
     _as_user(app, owner)
     workbook = Workbook()
     sheet = workbook.active
-    sheet.append(["box_number", "lot", "warehouse_id"])
-    sheet.append(["1", "SELF-RECEIPT", 1])
+    sheet.append(["box_number", "lot", "pallet_number", "warehouse_id"])
+    sheet.append(["1", "SELF-RECEIPT", "PALLET-SELF", 1])
     payload = BytesIO()
     workbook.save(payload)
     imported = client.post(

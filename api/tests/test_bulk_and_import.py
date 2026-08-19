@@ -12,7 +12,12 @@ from app.models.boxes import Box
 def _create_box(client, *, box_number: str, warehouse_id: int = 1, lot: str = "x") -> int:
     resp = client.post(
         "/api/boxes",
-        json={"box_number": box_number, "lot": lot, "warehouse_id": warehouse_id},
+        json={
+            "box_number": box_number,
+            "lot": lot,
+            "pallet_number": f"PALLET-{lot}",
+            "warehouse_id": warehouse_id,
+        },
     )
     assert resp.status_code == 201, resp.text
     return resp.json()["id"]
@@ -143,6 +148,11 @@ def test_bulk_skips_missing_ids(client):
 
 
 def _build_xlsx(rows: list[list[object]]) -> bytes:
+    if rows and "box_number" in rows[0] and "pallet_number" not in rows[0]:
+        rows = [list(row) for row in rows]
+        rows[0].append("pallet_number")
+        for row in rows[1:]:
+            row.append("TEST-PALLET")
     wb = Workbook()
     ws = wb.active
     for row in rows:
@@ -225,11 +235,13 @@ def test_box_import_mapper_previews_arbitrary_layout_and_imports_selection(clien
                 {
                     "box_number": "7",
                     "lot": "LOT-MAPPED",
+                    "pallet_number": "PALLET-MAPPED",
                     "contents": "Invoices",
                 },
                 {
                     "box_number": "8",
                     "lot": "LOT-MAPPED",
+                    "pallet_number": "PALLET-MAPPED",
                     "contents": "Contracts",
                 },
             ],
@@ -253,6 +265,7 @@ def test_mapped_import_can_explicitly_restore_archived_box(client):
         json={
             "box_number": "9",
             "lot": "RESTORE-ME",
+            "pallet_number": "PALLET-OLD",
             "contents": "Wrong contents",
             "warehouse_id": 1,
         },
@@ -271,6 +284,7 @@ def test_mapped_import_can_explicitly_restore_archived_box(client):
             {
                 "box_number": "9",
                 "lot": "RESTORE-ME",
+                "pallet_number": "PALLET-NEW",
                 "contents": "Correct contents",
             }
         ],
@@ -304,8 +318,10 @@ def test_mapped_import_can_explicitly_restore_archived_box(client):
     assert new_receipt["items"][0]["box_id"] == original["id"]
     assert old_receipt["items"][0]["box_id"] == original["id"]
     events = client.get(f"/api/boxes/{original['id']}/events").json()
-    assert events[0]["event_type"] == "restored"
-    assert "Imported by mistake" in events[0]["note"]
+    restored_event = next(
+        event for event in events if event["event_type"] == "restored"
+    )
+    assert "Imported by mistake" in restored_event["note"]
 
     active_duplicate = client.post(
         "/api/boxes/import-mapped",
@@ -318,7 +334,12 @@ def test_mapped_import_can_explicitly_restore_archived_box(client):
 def test_legacy_xlsx_import_can_restore_archived_box(client):
     original = client.post(
         "/api/boxes",
-        json={"box_number": "15", "lot": "LEGACY-RESTORE", "warehouse_id": 1},
+        json={
+            "box_number": "15",
+            "lot": "LEGACY-RESTORE",
+            "pallet_number": "PALLET-15",
+            "warehouse_id": 1,
+        },
     ).json()
     client.post(
         f"/api/boxes/{original['id']}/delete",
@@ -350,7 +371,12 @@ def test_archived_restore_rolls_back_when_receipt_creation_fails(
 ):
     original = client.post(
         "/api/boxes",
-        json={"box_number": "20", "lot": "ROLLBACK", "warehouse_id": 1},
+        json={
+            "box_number": "20",
+            "lot": "ROLLBACK",
+            "pallet_number": "PALLET-20",
+            "warehouse_id": 1,
+        },
     ).json()
     client.post(
         f"/api/boxes/{original['id']}/delete",
@@ -370,7 +396,13 @@ def test_archived_restore_rolls_back_when_receipt_creation_fails(
             json={
                 "warehouse_id": 2,
                 "restore_archived": True,
-                "items": [{"box_number": "20", "lot": "ROLLBACK"}],
+                "items": [
+                    {
+                        "box_number": "20",
+                        "lot": "ROLLBACK",
+                        "pallet_number": "PALLET-RESTORE",
+                    }
+                ],
             },
         )
     session.rollback()
@@ -383,7 +415,12 @@ def test_archived_restore_rolls_back_when_receipt_creation_fails(
 def test_manual_box_creates_completed_receipt(client):
     response = client.post(
         "/api/boxes",
-        json={"box_number": "1", "lot": "MANUAL", "warehouse_id": 1},
+        json={
+            "box_number": "1",
+            "lot": "MANUAL",
+            "pallet_number": "PALLET-MANUAL",
+            "warehouse_id": 1,
+        },
     )
     assert response.status_code == 201
     receipt_id = response.json()["receipt_request_id"]
@@ -483,7 +520,7 @@ def test_import_duplicate_existing_box_is_skipped(client):
     assert "exists" in skip["reason"].lower()
 
 
-def test_import_duplicate_within_file_is_skipped(client):
+def test_import_duplicate_within_file_is_merged(client):
     payload = _build_xlsx(
         [
             ["box_number", "lot", "warehouse_id"],
@@ -495,11 +532,7 @@ def test_import_duplicate_within_file_is_skipped(client):
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert len(body["created"]) == 1
-    assert len(body["skipped"]) == 1
-    # The dedupe key is the ``(lot, box_number)`` pair now.
-    reason = body["skipped"][0]["reason"].lower()
-    assert "duplicate" in reason
-    assert "lot" in reason
+    assert body["skipped"] == []
 
 
 def test_import_missing_box_number_cell(client):
@@ -611,21 +644,36 @@ def test_create_pads_box_number_to_three_digits(client):
     operator typed in the form."""
     resp = client.post(
         "/api/boxes",
-        json={"box_number": "1", "lot": "Acme", "warehouse_id": 1},
+        json={
+            "box_number": "1",
+            "lot": "Acme",
+            "pallet_number": "PALLET-A",
+            "warehouse_id": 1,
+        },
     )
     assert resp.status_code == 201, resp.text
     assert resp.json()["box_number"] == "001"
 
     bigger = client.post(
         "/api/boxes",
-        json={"box_number": "42", "lot": "Acme", "warehouse_id": 1},
+        json={
+            "box_number": "42",
+            "lot": "Acme",
+            "pallet_number": "PALLET-A",
+            "warehouse_id": 1,
+        },
     )
     assert bigger.json()["box_number"] == "042"
 
     # Already wider than 3 chars: passes through unchanged.
     wide = client.post(
         "/api/boxes",
-        json={"box_number": "1234", "lot": "Acme", "warehouse_id": 1},
+        json={
+            "box_number": "1234",
+            "lot": "Acme",
+            "pallet_number": "PALLET-A",
+            "warehouse_id": 1,
+        },
     )
     assert wide.json()["box_number"] == "1234"
 
@@ -634,13 +682,23 @@ def test_create_rejects_non_numeric_box_number(client):
     """Non-digit characters in ``box_number`` are a 422 at the schema."""
     resp = client.post(
         "/api/boxes",
-        json={"box_number": "abc", "lot": "Acme", "warehouse_id": 1},
+        json={
+            "box_number": "abc",
+            "lot": "Acme",
+            "pallet_number": "PALLET-A",
+            "warehouse_id": 1,
+        },
     )
     assert resp.status_code == 422
 
     mixed = client.post(
         "/api/boxes",
-        json={"box_number": "12X", "lot": "Acme", "warehouse_id": 1},
+        json={
+            "box_number": "12X",
+            "lot": "Acme",
+            "pallet_number": "PALLET-A",
+            "warehouse_id": 1,
+        },
     )
     assert mixed.status_code == 422
 
@@ -650,13 +708,23 @@ def test_same_box_number_allowed_across_lots(client):
     a different lot is a brand-new box, not a conflict."""
     first = client.post(
         "/api/boxes",
-        json={"box_number": "001", "lot": "Acme", "warehouse_id": 1},
+        json={
+            "box_number": "001",
+            "lot": "Acme",
+            "pallet_number": "PALLET-A",
+            "warehouse_id": 1,
+        },
     )
     assert first.status_code == 201, first.text
 
     second = client.post(
         "/api/boxes",
-        json={"box_number": "001", "lot": "Globex", "warehouse_id": 1},
+        json={
+            "box_number": "001",
+            "lot": "Globex",
+            "pallet_number": "PALLET-G",
+            "warehouse_id": 1,
+        },
     )
     assert second.status_code == 201, second.text
     assert second.json()["id"] != first.json()["id"]
@@ -666,13 +734,23 @@ def test_duplicate_within_same_lot_is_a_conflict(client):
     """Same ``(lot, box_number)`` pair still 409s."""
     first = client.post(
         "/api/boxes",
-        json={"box_number": "001", "lot": "Acme", "warehouse_id": 1},
+        json={
+            "box_number": "001",
+            "lot": "Acme",
+            "pallet_number": "PALLET-A",
+            "warehouse_id": 1,
+        },
     )
     assert first.status_code == 201, first.text
 
     dup = client.post(
         "/api/boxes",
-        json={"box_number": "001", "lot": "Acme", "warehouse_id": 1},
+        json={
+            "box_number": "001",
+            "lot": "Acme",
+            "pallet_number": "PALLET-A",
+            "warehouse_id": 1,
+        },
     )
     assert dup.status_code == 409
     assert "Acme" in dup.json()["detail"]

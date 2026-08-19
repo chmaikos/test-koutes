@@ -41,6 +41,7 @@ from app.models.lots import (
     normalize_lot_name,
 )
 from app.models.notifications import InAppNotification, RequestEmailOutbox
+from app.models.pallets import Pallet, PalletEvent, PalletEventType
 from app.models.requests import (
     BoxRequest,
     BoxRequestAttachment,
@@ -112,6 +113,31 @@ class LotHardBoxOverlap:
 
 
 @dataclass(frozen=True)
+class LotPalletCollision:
+    normalized_pallet_number: str
+    source_pallet_id: int
+    source_pallet_number: str
+    source_warehouse_id: int
+    source_is_active: bool
+    target_pallet_id: int
+    target_pallet_number: str
+    target_warehouse_id: int
+    target_is_active: bool
+    reason: Literal["warehouse_mismatch", "inactive_target"]
+
+
+@dataclass(frozen=True)
+class LotPalletMergeAction:
+    source_pallet_id: int
+    source_pallet_number: str
+    source_warehouse_id: int
+    source_is_active: bool
+    action: Literal["combine", "transfer"]
+    target_pallet_id: int | None = None
+    box_count: int = 0
+
+
+@dataclass(frozen=True)
 class LotMergeCandidate:
     source_id: int
     source_name: str
@@ -132,6 +158,12 @@ class LotMergeCandidate:
     merge_allowed_with_archived_overwrite: bool
     requires_explicit_overwrite: bool
     collision_signature: str
+    pallet_collisions: list[LotPalletCollision]
+    pallet_collision_count: int
+    pallet_collisions_truncated: bool
+    pallet_actions: list[LotPalletMergeAction]
+    pallet_action_count: int
+    pallet_actions_truncated: bool
     all_resolvable_archived_collisions: list[LotArchivedBoxCollision] = field(
         default_factory=list,
         repr=False,
@@ -176,6 +208,10 @@ class LotMergeResult:
     relinked_request_item_count: int = 0
     relinked_discrepancy_count: int = 0
     deleted_box_event_count: int = 0
+    combined_pallet_count: int = 0
+    moved_pallet_count: int = 0
+    absorbed_pallet_ids: list[int] = field(default_factory=list)
+    moved_pallet_ids: list[int] = field(default_factory=list)
     survivor_box_ids: list[int] = field(default_factory=list)
     removed_box_ids: list[int] = field(default_factory=list)
 
@@ -276,6 +312,12 @@ class LotPurgeEligibility:
     archived_box_count: int
     archived_box_ids: list[int]
     archived_box_ids_truncated: bool
+    active_pallet_count: int
+    active_pallet_ids: list[int]
+    active_pallet_ids_truncated: bool
+    archived_pallet_count: int
+    archived_pallet_ids: list[int]
+    archived_pallet_ids_truncated: bool
     linked_request_count: int
     linked_request_ids: list[int]
     linked_request_ids_truncated: bool
@@ -301,6 +343,7 @@ class LotPurgeResult:
     lot_name: str
     lot_version: int
     archived_box_count: int
+    pallet_count: int
     receipt_count: int
     object_key_count: int
     object_cleanup_status: LotPurgeCleanupStatus
@@ -316,6 +359,7 @@ class LotForcePurgeResult:
     lot_version: int
     active_box_count: int
     archived_box_count: int
+    pallet_count: int
     touched_request_count: int
     rewritten_request_count: int
     deleted_request_count: int
@@ -407,6 +451,12 @@ class LotForcePurgeImpactPlan:
     archived_box_ids: list[int]
     archived_box_count: int
     archived_box_ids_truncated: bool
+    active_pallet_ids: list[int]
+    active_pallet_count: int
+    active_pallet_ids_truncated: bool
+    archived_pallet_ids: list[int]
+    archived_pallet_count: int
+    archived_pallet_ids_truncated: bool
     touched_request_ids: list[int]
     touched_request_count: int
     touched_request_ids_truncated: bool
@@ -687,6 +737,15 @@ def _purge_box_lock_statement(lot_id: int):
     )
 
 
+def _purge_pallet_lock_statement(lot_id: int):
+    return (
+        select(Pallet)
+        .where(Pallet.lot_id == lot_id)
+        .order_by(Pallet.id)
+        .with_for_update(of=Pallet)
+    )
+
+
 def _purge_request_lock_statement(request_ids: list[int]):
     return (
         select(BoxRequest.id)
@@ -711,6 +770,7 @@ def _purge_owned_lock_statements(
     box_ids: list[int],
     request_ids: list[int],
     discrepancy_ids: list[int],
+    pallet_ids: list[int] | None = None,
 ) -> list:
     """Build explicit PostgreSQL lock targets for every purge-owned table."""
     statements = []
@@ -752,6 +812,13 @@ def _purge_owned_lock_statements(
             .order_by(BoxEvent.id)
             .with_for_update(of=BoxEvent)
         )
+    if pallet_ids:
+        statements.append(
+            select(PalletEvent.id)
+            .where(PalletEvent.pallet_id.in_(pallet_ids))
+            .order_by(PalletEvent.id)
+            .with_for_update(of=PalletEvent)
+        )
     statements.append(
         select(LotEvent.id)
         .where(LotEvent.lot_id == lot_id)
@@ -767,6 +834,7 @@ def _lock_purge_owned_rows(
     lot_id: int,
     box_ids: list[int],
     request_ids: list[int],
+    pallet_ids: list[int] | None = None,
 ) -> None:
     """Lock every row whose mutable state or object key is purge-owned."""
     discrepancy_ids = (
@@ -785,6 +853,7 @@ def _lock_purge_owned_rows(
         box_ids=box_ids,
         request_ids=request_ids,
         discrepancy_ids=discrepancy_ids,
+        pallet_ids=pallet_ids,
     ):
         db.execute(statement).all()
 
@@ -826,6 +895,10 @@ def _force_purge_box_lock_statement(lot_id: int):
         .order_by(Box.id)
         .with_for_update(of=Box)
     )
+
+
+def _force_purge_pallet_lock_statement(lot_id: int):
+    return _purge_pallet_lock_statement(lot_id)
 
 
 def _force_purge_request_lock_statement(request_ids: list[int]):
@@ -930,6 +1003,14 @@ def analyze_lot_force_purge_impact(
     if lot is None:
         raise LotPurgeNotFoundError(f"lot {lot_id} not found")
 
+    pallets = list(
+        db.scalars(
+            _force_purge_pallet_lock_statement(lot_id)
+            if lock_for_update
+            else select(Pallet).where(Pallet.lot_id == lot_id).order_by(Pallet.id)
+        ).all()
+    )
+    pallet_ids = [pallet.id for pallet in pallets]
     boxes = list(
         db.scalars(
             _force_purge_box_lock_statement(lot_id)
@@ -939,9 +1020,18 @@ def analyze_lot_force_purge_impact(
     )
     box_ids = [box.id for box in boxes]
     box_id_set = set(box_ids)
-    selected_item = BoxRequestItem.lot_id == lot_id
+    removed_item_filter = BoxRequestItem.lot_id == lot_id
     if box_ids:
-        selected_item = or_(selected_item, BoxRequestItem.box_id.in_(box_ids))
+        removed_item_filter = or_(
+            removed_item_filter,
+            BoxRequestItem.box_id.in_(box_ids),
+        )
+    selected_item = removed_item_filter
+    if pallet_ids:
+        selected_item = or_(
+            selected_item,
+            BoxRequestItem.pallet_id.in_(pallet_ids),
+        )
     touched_request_ids_query = select(BoxRequestItem.request_id).where(selected_item)
     if box_ids:
         touched_request_ids_query = union_all(
@@ -967,7 +1057,7 @@ def analyze_lot_force_purge_impact(
             select(
                 BoxRequestItem.request_id,
                 func.count(BoxRequestItem.id).label("item_count"),
-                func.sum(case((selected_item, 1), else_=0)).label(
+                func.sum(case((removed_item_filter, 1), else_=0)).label(
                     "selected_item_count"
                 ),
             )
@@ -1016,11 +1106,13 @@ def analyze_lot_force_purge_impact(
         db.execute(
             _force_purge_discrepancy_lock_statement(touched_request_ids_all)
         ).all()
+    if lock_for_update:
         _lock_purge_owned_rows(
             db,
             lot_id=lot_id,
             box_ids=box_ids,
             request_ids=touched_request_ids_all,
+            pallet_ids=pallet_ids,
         )
 
     requests = (
@@ -1142,14 +1234,15 @@ def analyze_lot_force_purge_impact(
                     and discrepancy.box_id in box_id_set
                 )
             ]
-            rewrite_rows.append(
-                (
-                    request,
-                    removed_items,
-                    remaining_items,
-                    removed_discrepancies,
+            if removed_items or removed_discrepancies:
+                rewrite_rows.append(
+                    (
+                        request,
+                        removed_items,
+                        remaining_items,
+                        removed_discrepancies,
+                    )
                 )
-            )
     deleted_request_id_set = set(fully_deleted_request_ids_all)
     incoming_requests = (
         list(
@@ -1487,6 +1580,7 @@ def analyze_lot_force_purge_impact(
             [
                 box.id,
                 box.lot_id,
+                box.pallet_id,
                 box.current_warehouse_id,
                 box.status,
                 box.archived_at,
@@ -1494,6 +1588,25 @@ def analyze_lot_force_purge_impact(
             ]
             for box in boxes
         ],
+        "pallets": [_pallet_signature_value(pallet) for pallet in pallets],
+        "pallet_events": (
+            graph_rows(
+                select(
+                    PalletEvent.id,
+                    PalletEvent.pallet_id,
+                    PalletEvent.event_type,
+                    PalletEvent.old_pallet_number,
+                    PalletEvent.new_pallet_number,
+                    PalletEvent.from_warehouse_id,
+                    PalletEvent.to_warehouse_id,
+                    PalletEvent.event_metadata,
+                )
+                .where(PalletEvent.pallet_id.in_(pallet_ids))
+                .order_by(PalletEvent.id)
+            )
+            if pallet_ids
+            else []
+        ),
         "requests": [
             [
                 request.id,
@@ -1517,7 +1630,9 @@ def analyze_lot_force_purge_impact(
                 item.position,
                 item.box_id,
                 item.lot_id,
+                item.pallet_id,
                 item.lot,
+                item.pallet,
                 item.box_number,
             ]
             for item in items
@@ -1670,11 +1785,23 @@ def analyze_lot_force_purge_impact(
     archived_box_ids_all = [
         box.id for box in boxes if box.archived_at is not None
     ]
+    active_pallet_ids_all = [
+        pallet.id for pallet in pallets if pallet.is_active
+    ]
+    archived_pallet_ids_all = [
+        pallet.id for pallet in pallets if not pallet.is_active
+    ]
     _active_box_ids, active_box_ids_truncated = _bounded_ids(
         active_box_ids_all
     )
     _archived_box_ids, archived_box_ids_truncated = _bounded_ids(
         archived_box_ids_all
+    )
+    _active_pallet_ids, active_pallet_ids_truncated = _bounded_ids(
+        active_pallet_ids_all
+    )
+    _archived_pallet_ids, archived_pallet_ids_truncated = _bounded_ids(
+        archived_pallet_ids_all
     )
     _touched_request_ids, touched_request_ids_truncated = _bounded_ids(
         touched_request_ids_all
@@ -1693,6 +1820,12 @@ def analyze_lot_force_purge_impact(
         archived_box_ids=sorted(archived_box_ids_all),
         archived_box_count=len(archived_box_ids_all),
         archived_box_ids_truncated=archived_box_ids_truncated,
+        active_pallet_ids=sorted(active_pallet_ids_all),
+        active_pallet_count=len(active_pallet_ids_all),
+        active_pallet_ids_truncated=active_pallet_ids_truncated,
+        archived_pallet_ids=sorted(archived_pallet_ids_all),
+        archived_pallet_count=len(archived_pallet_ids_all),
+        archived_pallet_ids_truncated=archived_pallet_ids_truncated,
         touched_request_ids=sorted(touched_request_ids_all),
         touched_request_count=len(touched_request_ids_all),
         touched_request_ids_truncated=touched_request_ids_truncated,
@@ -1782,6 +1915,7 @@ def _purge_graph_signature(
     db: Session,
     *,
     lot: Lot,
+    pallets: list[Pallet],
     boxes: list[Box],
     request_ids: list[int],
     blockers: list[LotPurgeBlocker],
@@ -1815,12 +1949,32 @@ def _purge_graph_signature(
             [
                 box.id,
                 box.lot_id,
+                box.pallet_id,
                 box.current_warehouse_id,
                 _enum_text(box.status),
                 box.archived_at,
             ]
             for box in boxes
         ],
+        "pallets": [_pallet_signature_value(pallet) for pallet in pallets],
+        "pallet_events": (
+            rows(
+                select(
+                    PalletEvent.id,
+                    PalletEvent.pallet_id,
+                    PalletEvent.event_type,
+                    PalletEvent.old_pallet_number,
+                    PalletEvent.new_pallet_number,
+                    PalletEvent.from_warehouse_id,
+                    PalletEvent.to_warehouse_id,
+                    PalletEvent.event_metadata,
+                )
+                .where(PalletEvent.pallet_id.in_([pallet.id for pallet in pallets]))
+                .order_by(PalletEvent.id)
+            )
+            if pallets
+            else []
+        ),
         "requests": (
             rows(
                 select(
@@ -1847,6 +2001,8 @@ def _purge_graph_signature(
                     BoxRequestItem.request_id,
                     BoxRequestItem.box_id,
                     BoxRequestItem.lot_id,
+                    BoxRequestItem.pallet_id,
+                    BoxRequestItem.pallet,
                 )
                 .where(BoxRequestItem.request_id.in_(request_ids))
                 .order_by(BoxRequestItem.id)
@@ -1987,6 +2143,41 @@ def _purge_graph_signature(
     return hashlib.sha256(encoded.encode()).hexdigest()
 
 
+def _pallet_purge_snapshots(
+    pallets: list[Pallet],
+    boxes: list[Box],
+) -> list[dict[str, object]]:
+    """Snapshot pallet identity and topology for the durable purge ledger."""
+    counts: dict[int, dict[str, int]] = {
+        pallet.id: {"assigned": 0, "active": 0, "archived": 0}
+        for pallet in pallets
+    }
+    for box in boxes:
+        if box.pallet_id not in counts:
+            continue
+        bucket = counts[box.pallet_id]
+        bucket["assigned"] += 1
+        bucket["archived" if box.archived_at is not None else "active"] += 1
+    return [
+        {
+            "id": pallet.id,
+            "pallet_number": pallet.pallet_number,
+            "normalized_pallet_number": pallet.normalized_pallet_number,
+            "warehouse_id": pallet.current_warehouse_id,
+            "version": pallet.version,
+            "is_active": pallet.is_active,
+            "archived_at": _collision_timestamp(pallet.archived_at),
+            "archive_reason": pallet.archive_reason,
+            "absorbed_into_pallet_id": pallet.absorbed_into_pallet_id,
+            "absorbed_at": _collision_timestamp(pallet.absorbed_at),
+            "assigned_box_count": counts[pallet.id]["assigned"],
+            "active_box_count": counts[pallet.id]["active"],
+            "archived_box_count": counts[pallet.id]["archived"],
+        }
+        for pallet in pallets
+    ]
+
+
 def analyze_lot_purge_eligibility(
     db: Session,
     *,
@@ -2008,6 +2199,14 @@ def analyze_lot_purge_eligibility(
     if lot is None:
         raise LotPurgeNotFoundError(f"lot {lot_id} not found")
 
+    pallets = list(
+        db.scalars(
+            _purge_pallet_lock_statement(lot_id)
+            if lock_for_update
+            else select(Pallet).where(Pallet.lot_id == lot_id).order_by(Pallet.id)
+        ).all()
+    )
+    pallet_ids = [pallet.id for pallet in pallets]
     boxes = list(
         db.scalars(
             _purge_box_lock_statement(lot_id)
@@ -2024,6 +2223,11 @@ def analyze_lot_purge_eligibility(
     linked_item = BoxRequestItem.lot_id == lot_id
     if box_ids:
         linked_item = or_(linked_item, BoxRequestItem.box_id.in_(box_ids))
+    if pallet_ids:
+        linked_item = or_(
+            linked_item,
+            BoxRequestItem.pallet_id.in_(pallet_ids),
+        )
     request_ids = list(
         db.scalars(
             select(BoxRequestItem.request_id)
@@ -2040,6 +2244,7 @@ def analyze_lot_purge_eligibility(
             lot_id=lot_id,
             box_ids=box_ids,
             request_ids=request_ids,
+            pallet_ids=pallet_ids,
         )
 
     lot_item = BoxRequestItem.lot_id == lot_id
@@ -2440,6 +2645,7 @@ def analyze_lot_purge_eligibility(
                             BoxEventType.created,
                             BoxEventType.archived,
                             BoxEventType.lot_reassigned,
+                            BoxEventType.pallet_assigned,
                         )
                     ),
                 )
@@ -2482,6 +2688,7 @@ def analyze_lot_purge_eligibility(
     graph_signature = _purge_graph_signature(
         db,
         lot=lot,
+        pallets=pallets,
         boxes=boxes,
         request_ids=request_ids,
         blockers=blockers,
@@ -2496,6 +2703,20 @@ def analyze_lot_purge_eligibility(
         archived_box_count=len(archived_box_ids_all),
         archived_box_ids=archived_box_ids,
         archived_box_ids_truncated=archived_truncated,
+        active_pallet_count=sum(pallet.is_active for pallet in pallets),
+        active_pallet_ids=[
+            pallet.id for pallet in pallets if pallet.is_active
+        ],
+        active_pallet_ids_truncated=(
+            sum(pallet.is_active for pallet in pallets) > _PURGE_LIST_LIMIT
+        ),
+        archived_pallet_count=sum(not pallet.is_active for pallet in pallets),
+        archived_pallet_ids=[
+            pallet.id for pallet in pallets if not pallet.is_active
+        ],
+        archived_pallet_ids_truncated=(
+            sum(not pallet.is_active for pallet in pallets) > _PURGE_LIST_LIMIT
+        ),
         linked_request_count=len(request_ids),
         linked_request_ids=linked_request_ids,
         linked_request_ids_truncated=request_ids_truncated,
@@ -2518,6 +2739,7 @@ def _delete_purge_graph(
     *,
     lot_id: int,
     box_ids: list[int],
+    pallet_ids: list[int],
     request_ids: list[int],
     expected_version: int,
     locked: LotPurgeEligibility,
@@ -2586,6 +2808,18 @@ def _delete_purge_graph(
         deleted_counts["boxes"] = _delete_count(
             db,
             delete(Box).where(Box.id.in_(box_ids)),
+        )
+    if pallet_ids:
+        deleted_counts["pallet_events"] = _delete_count(
+            db,
+            delete(PalletEvent).where(PalletEvent.pallet_id.in_(pallet_ids)),
+        )
+        deleted_counts["pallets"] = _delete_count(
+            db,
+            delete(Pallet).where(
+                Pallet.id.in_(pallet_ids),
+                Pallet.lot_id == lot_id,
+            ),
         )
     deleted_counts["lot_events"] = _delete_count(
         db,
@@ -2727,6 +2961,24 @@ def _force_deleted_entity_ids(
     return {
         "lots": [plan.lot_id],
         "boxes": sorted(box_ids),
+        "pallets": sorted(
+            plan.active_pallet_ids + plan.archived_pallet_ids
+        ),
+        "pallet_events": (
+            list(
+                db.scalars(
+                    select(PalletEvent.id)
+                    .where(
+                        PalletEvent.pallet_id.in_(
+                            plan.active_pallet_ids + plan.archived_pallet_ids
+                        )
+                    )
+                    .order_by(PalletEvent.id)
+                ).all()
+            )
+            if plan.active_pallet_ids or plan.archived_pallet_ids
+            else []
+        ),
         "box_events": (
             list(
                 db.scalars(
@@ -3030,9 +3282,16 @@ def force_purge_lot(
 
     lot = db.get(Lot, lot_id)
     assert lot is not None
+    pallets = list(
+        db.scalars(
+            select(Pallet).where(Pallet.lot_id == lot_id).order_by(Pallet.id)
+        ).all()
+    )
+    pallet_ids = [pallet.id for pallet in pallets]
     boxes = list(
         db.scalars(select(Box).where(Box.lot_id == lot_id).order_by(Box.id)).all()
     )
+    pallet_snapshots = _pallet_purge_snapshots(pallets, boxes)
     all_box_ids = [box.id for box in boxes]
     request_rows = list(
         db.scalars(
@@ -3066,6 +3325,9 @@ def force_purge_lot(
         receipt_count=locked.touched_request_count,
         archived_box_ids=all_box_ids,
         archived_box_count=len(all_box_ids),
+        pallet_ids=pallet_ids,
+        pallet_count=len(pallet_ids),
+        pallet_snapshots=pallet_snapshots,
         object_keys=object_keys,
         object_key_count=len(object_keys),
         object_cleanup_status=cleanup_status,
@@ -3085,6 +3347,15 @@ def force_purge_lot(
             "warehouse_ids": warehouse_ids,
             "active_box_ids": locked.active_box_ids,
             "archived_box_ids": locked.archived_box_ids,
+            "pallet_ids": pallet_ids,
+            "pallet_count": len(pallet_ids),
+            "pallet_snapshots": pallet_snapshots,
+            "pallet_cleanup_plan": {
+                "null_preserved_request_item_pallet_ids": True,
+                "delete_pallet_event_rows_first": True,
+                "hard_delete_pallet_ids": pallet_ids,
+                "scope_lot_id": lot_id,
+            },
             "rewritten_request_ids": [
                 rewrite.request_id for rewrite in locked.request_rewrites
             ],
@@ -3204,6 +3475,15 @@ def force_purge_lot(
                 code="graph_changed",
                 preview=locked,
             )
+        if pallet_ids:
+            # Preserve the immutable pallet text snapshot on mixed request
+            # survivors while clearing the live FK to the purged identity.
+            db.execute(
+                update(BoxRequestItem)
+                .where(BoxRequestItem.pallet_id.in_(pallet_ids))
+                .values(pallet_id=None)
+                .execution_options(synchronize_session=False)
+            )
         if all_box_ids:
             deleted_counts["box_events"] = _delete_count(
                 db,
@@ -3212,6 +3492,18 @@ def force_purge_lot(
             deleted_counts["boxes"] = _delete_count(
                 db,
                 delete(Box).where(Box.id.in_(all_box_ids)),
+            )
+        if pallet_ids:
+            deleted_counts["pallet_events"] = _delete_count(
+                db,
+                delete(PalletEvent).where(PalletEvent.pallet_id.in_(pallet_ids)),
+            )
+            deleted_counts["pallets"] = _delete_count(
+                db,
+                delete(Pallet).where(
+                    Pallet.id.in_(pallet_ids),
+                    Pallet.lot_id == lot_id,
+                ),
             )
         deleted_counts["lot_events"] = _delete_count(
             db,
@@ -3236,6 +3528,8 @@ def force_purge_lot(
             "impact_counts": {
                 "active_boxes": locked.active_box_count,
                 "archived_boxes": locked.archived_box_count,
+                "active_pallets": locked.active_pallet_count,
+                "archived_pallets": locked.archived_pallet_count,
                 "touched_requests": locked.touched_request_count,
                 "rewritten_requests": locked.request_rewrite_count,
                 "deleted_requests": locked.fully_deleted_request_count,
@@ -3261,6 +3555,7 @@ def force_purge_lot(
         lot_version=locked.lot_version,
         active_box_count=locked.active_box_count,
         archived_box_count=locked.archived_box_count,
+        pallet_count=len(pallet_ids),
         touched_request_count=locked.touched_request_count,
         rewritten_request_count=locked.request_rewrite_count,
         deleted_request_count=locked.fully_deleted_request_count,
@@ -3340,6 +3635,12 @@ def purge_lot(
 
     lot = db.get(Lot, lot_id)
     assert lot is not None
+    pallets = list(
+        db.scalars(
+            select(Pallet).where(Pallet.lot_id == lot_id).order_by(Pallet.id)
+        ).all()
+    )
+    pallet_ids = [pallet.id for pallet in pallets]
     boxes = list(
         db.scalars(select(Box).where(Box.lot_id == lot_id).order_by(Box.id)).all()
     )
@@ -3408,6 +3709,7 @@ def purge_lot(
         }
         for box in boxes
     ]
+    pallet_snapshots = _pallet_purge_snapshots(pallets, boxes)
 
     cleanup_status = (
         LotPurgeCleanupStatus.pending
@@ -3424,6 +3726,9 @@ def purge_lot(
         receipt_count=len(request_ids),
         archived_box_ids=box_ids,
         archived_box_count=len(box_ids),
+        pallet_ids=pallet_ids,
+        pallet_count=len(pallet_ids),
+        pallet_snapshots=pallet_snapshots,
         object_keys=object_keys,
         object_key_count=len(object_keys),
         object_cleanup_status=cleanup_status,
@@ -3439,6 +3744,14 @@ def purge_lot(
             "warehouse_ids": warehouse_ids,
             "lot_snapshot": lot_snapshot,
             "box_snapshots": box_snapshots,
+            "pallet_ids": pallet_ids,
+            "pallet_count": len(pallet_ids),
+            "pallet_snapshots": pallet_snapshots,
+            "pallet_cleanup_plan": {
+                "delete_pallet_event_rows_first": True,
+                "hard_delete_pallet_ids": pallet_ids,
+                "scope_lot_id": lot_id,
+            },
             "receipt_snapshots": receipt_snapshots,
         },
     )
@@ -3449,6 +3762,7 @@ def purge_lot(
             db,
             lot_id=lot_id,
             box_ids=box_ids,
+            pallet_ids=pallet_ids,
             request_ids=request_ids,
             expected_version=expected_version,
             locked=locked,
@@ -3469,6 +3783,7 @@ def purge_lot(
         lot_name=locked.lot_name,
         lot_version=locked.lot_version,
         archived_box_count=len(box_ids),
+        pallet_count=len(pallet_ids),
         receipt_count=len(request_ids),
         object_key_count=len(object_keys),
         object_cleanup_status=cleanup_status,
@@ -3596,9 +3911,26 @@ def _box_signature_value(box: Box) -> dict[str, object]:
     return {
         "id": box.id,
         "lot_id": box.lot_id,
+        "pallet_id": box.pallet_id,
         "box_number": box.box_number,
+        "warehouse_id": box.current_warehouse_id,
         "status": box.status.value,
         "archived_at": _collision_timestamp(box.archived_at),
+    }
+
+
+def _pallet_signature_value(pallet: Pallet) -> dict[str, object]:
+    return {
+        "id": pallet.id,
+        "lot_id": pallet.lot_id,
+        "pallet_number": pallet.pallet_number,
+        "normalized_pallet_number": pallet.normalized_pallet_number,
+        "warehouse_id": pallet.current_warehouse_id,
+        "version": pallet.version,
+        "is_active": pallet.is_active,
+        "archived_at": _collision_timestamp(pallet.archived_at),
+        "absorbed_into_pallet_id": pallet.absorbed_into_pallet_id,
+        "absorbed_at": _collision_timestamp(pallet.absorbed_at),
     }
 
 
@@ -3648,13 +3980,40 @@ def _merge_box_lock_statement(lot_ids: list[int]):
     )
 
 
+def _merge_pallet_lock_statement(lot_ids: list[int]):
+    """Lock both lots' complete pallet topology before physical boxes."""
+    return (
+        select(Pallet)
+        .where(Pallet.lot_id.in_(sorted(set(lot_ids))))
+        .order_by(Pallet.id)
+        .with_for_update(of=Pallet)
+        .execution_options(populate_existing=True)
+    )
+
+
+def _merge_pallet_event_lock_statement(pallet_ids: list[int]):
+    return (
+        select(PalletEvent)
+        .where(PalletEvent.pallet_id.in_(sorted(set(pallet_ids))))
+        .order_by(PalletEvent.id)
+        .with_for_update(of=PalletEvent)
+        .execution_options(populate_existing=True)
+    )
+
+
 def _merge_request_item_lock_statement(
     source_lot_id: int,
     removed_box_ids: list[int],
+    source_pallet_ids: list[int] | None = None,
 ):
     affected = BoxRequestItem.lot_id == source_lot_id
     if removed_box_ids:
         affected = or_(affected, BoxRequestItem.box_id.in_(removed_box_ids))
+    if source_pallet_ids:
+        affected = or_(
+            affected,
+            BoxRequestItem.pallet_id.in_(source_pallet_ids),
+        )
     return (
         select(BoxRequestItem)
         .where(affected)
@@ -3708,13 +4067,15 @@ def _merge_signature_links(
             "request_id": int(request_id),
             "box_id": int(box_id) if box_id is not None else None,
             "lot_id": int(lot_id) if lot_id is not None else None,
+            "pallet_id": int(pallet_id) if pallet_id is not None else None,
         }
-        for item_id, request_id, box_id, lot_id in db.execute(
+        for item_id, request_id, box_id, lot_id, pallet_id in db.execute(
             select(
                 BoxRequestItem.id,
                 BoxRequestItem.request_id,
                 BoxRequestItem.box_id,
                 BoxRequestItem.lot_id,
+                BoxRequestItem.pallet_id,
             )
             .where(item_filter)
             .order_by(BoxRequestItem.id)
@@ -3760,6 +4121,74 @@ def _merge_candidate(
             .order_by(Box.box_number, Box.lot_id, Box.id)
         ).all()
     )
+    pallets = list(
+        db.scalars(
+            select(Pallet)
+            .where(Pallet.lot_id.in_((source.id, target.id)))
+            .order_by(
+                Pallet.normalized_pallet_number,
+                Pallet.lot_id,
+                Pallet.id,
+            )
+        ).all()
+    )
+    target_pallets = {
+        pallet.normalized_pallet_number: pallet
+        for pallet in pallets
+        if pallet.lot_id == target.id
+    }
+    pallet_box_counts: dict[int, int] = {}
+    for box in boxes:
+        if box.pallet_id is not None:
+            pallet_box_counts[box.pallet_id] = pallet_box_counts.get(box.pallet_id, 0) + 1
+    pallet_collisions: list[LotPalletCollision] = []
+    pallet_actions: list[LotPalletMergeAction] = []
+    for source_pallet in (pallet for pallet in pallets if pallet.lot_id == source.id):
+        target_pallet = target_pallets.get(source_pallet.normalized_pallet_number)
+        if target_pallet is None:
+            pallet_actions.append(
+                LotPalletMergeAction(
+                    source_pallet_id=source_pallet.id,
+                    source_pallet_number=source_pallet.pallet_number,
+                    source_warehouse_id=source_pallet.current_warehouse_id,
+                    source_is_active=source_pallet.is_active,
+                    action="transfer",
+                    box_count=pallet_box_counts.get(source_pallet.id, 0),
+                )
+            )
+            continue
+        collision_reason: Literal["warehouse_mismatch", "inactive_target"] | None = None
+        if target_pallet.current_warehouse_id != source_pallet.current_warehouse_id:
+            collision_reason = "warehouse_mismatch"
+        elif not target_pallet.is_active:
+            collision_reason = "inactive_target"
+        if collision_reason is not None:
+            pallet_collisions.append(
+                LotPalletCollision(
+                    normalized_pallet_number=source_pallet.normalized_pallet_number,
+                    source_pallet_id=source_pallet.id,
+                    source_pallet_number=source_pallet.pallet_number,
+                    source_warehouse_id=source_pallet.current_warehouse_id,
+                    source_is_active=source_pallet.is_active,
+                    target_pallet_id=target_pallet.id,
+                    target_pallet_number=target_pallet.pallet_number,
+                    target_warehouse_id=target_pallet.current_warehouse_id,
+                    target_is_active=target_pallet.is_active,
+                    reason=collision_reason,
+                )
+            )
+            continue
+        pallet_actions.append(
+            LotPalletMergeAction(
+                source_pallet_id=source_pallet.id,
+                source_pallet_number=source_pallet.pallet_number,
+                source_warehouse_id=source_pallet.current_warehouse_id,
+                source_is_active=source_pallet.is_active,
+                action="combine",
+                target_pallet_id=target_pallet.id,
+                box_count=pallet_box_counts.get(source_pallet.id, 0),
+            )
+        )
     boxes_by_number: dict[str, dict[LotMergeSide, list[Box]]] = {}
     for box in boxes:
         side: LotMergeSide = "source" if box.lot_id == source.id else "target"
@@ -3954,9 +4383,70 @@ def _merge_candidate(
         if affected_request_ids
         else []
     )
+    pallet_event_context = (
+        [
+            {
+                "id": int(event_id),
+                "pallet_id": int(pallet_id),
+                "event_type": event_type.value,
+                "old_pallet_number": old_number,
+                "new_pallet_number": new_number,
+                "from_warehouse_id": from_warehouse_id,
+                "to_warehouse_id": to_warehouse_id,
+                "occurred_at": _collision_timestamp(occurred_at),
+                "metadata": event_metadata,
+            }
+            for (
+                event_id,
+                pallet_id,
+                event_type,
+                old_number,
+                new_number,
+                from_warehouse_id,
+                to_warehouse_id,
+                occurred_at,
+                event_metadata,
+            ) in db.execute(
+                select(
+                    PalletEvent.id,
+                    PalletEvent.pallet_id,
+                    PalletEvent.event_type,
+                    PalletEvent.old_pallet_number,
+                    PalletEvent.new_pallet_number,
+                    PalletEvent.from_warehouse_id,
+                    PalletEvent.to_warehouse_id,
+                    PalletEvent.occurred_at,
+                    PalletEvent.event_metadata,
+                )
+                .where(PalletEvent.pallet_id.in_([pallet.id for pallet in pallets]))
+                .order_by(PalletEvent.id)
+            ).all()
+        ]
+        if pallets
+        else []
+    )
     signature_payload = {
         "source": {"id": source.id, "version": source.version},
         "target": {"id": target.id, "version": target.version},
+        "pallets": [_pallet_signature_value(pallet) for pallet in pallets],
+        "pallet_actions": [
+            {
+                "source_pallet_id": action.source_pallet_id,
+                "action": action.action,
+                "target_pallet_id": action.target_pallet_id,
+                "box_count": action.box_count,
+            }
+            for action in pallet_actions
+        ],
+        "pallet_collisions": [
+            {
+                "source_pallet_id": collision.source_pallet_id,
+                "target_pallet_id": collision.target_pallet_id,
+                "reason": collision.reason,
+            }
+            for collision in pallet_collisions
+        ],
+        "pallet_events": pallet_event_context,
         "inventory": [_box_signature_value(box) for box in boxes],
         "request_item_links": item_links,
         "discrepancy_links": discrepancy_links,
@@ -3974,6 +4464,8 @@ def _merge_candidate(
     overlap_count = len(overlap_numbers)
     resolvable_count = len(resolvable)
     hard_count = len(hard)
+    pallet_collision_count = len(pallet_collisions)
+    pallet_action_count = len(pallet_actions)
     return LotMergeCandidate(
         source_id=source.id,
         source_name=source.name,
@@ -3981,7 +4473,7 @@ def _merge_candidate(
         target_id=target.id,
         target_name=target.name,
         target_version=target.version,
-        merge_allowed=overlap_count == 0,
+        merge_allowed=overlap_count == 0 and pallet_collision_count == 0,
         overlapping_box_numbers=overlap_numbers[:_OVERLAP_LIST_LIMIT],
         overlapping_box_count=overlap_count,
         overlap_list_truncated=overlap_count > _OVERLAP_LIST_LIMIT,
@@ -3994,10 +4486,18 @@ def _merge_candidate(
         hard_overlap_count=hard_count,
         hard_overlaps_truncated=hard_count > _OVERLAP_LIST_LIMIT,
         merge_allowed_with_archived_overwrite=(
-            resolvable_count > 0 and hard_count == 0
+            resolvable_count > 0
+            and hard_count == 0
+            and pallet_collision_count == 0
         ),
         requires_explicit_overwrite=resolvable_count > 0,
         collision_signature=collision_signature,
+        pallet_collisions=pallet_collisions[:_OVERLAP_LIST_LIMIT],
+        pallet_collision_count=pallet_collision_count,
+        pallet_collisions_truncated=pallet_collision_count > _OVERLAP_LIST_LIMIT,
+        pallet_actions=pallet_actions[:_OVERLAP_LIST_LIMIT],
+        pallet_action_count=pallet_action_count,
+        pallet_actions_truncated=pallet_action_count > _OVERLAP_LIST_LIMIT,
         all_resolvable_archived_collisions=resolvable,
     )
 
@@ -4143,6 +4643,15 @@ def merge_lots(
             target=target,
         )
 
+    pallets = list(db.scalars(_merge_pallet_lock_statement(ordered_ids)).all())
+    if pallets:
+        list(
+            db.scalars(
+                _merge_pallet_event_lock_statement(
+                    [pallet.id for pallet in pallets]
+                )
+            ).all()
+        )
     boxes = list(db.scalars(_merge_box_lock_statement(ordered_ids)).all())
     preliminary_candidate = _merge_candidate(db, source, target)
     removed_box_ids = sorted(
@@ -4151,7 +4660,15 @@ def merge_lots(
     )
     request_items = list(
         db.scalars(
-            _merge_request_item_lock_statement(source.id, removed_box_ids)
+            _merge_request_item_lock_statement(
+                source.id,
+                removed_box_ids,
+                [
+                    pallet.id
+                    for pallet in pallets
+                    if pallet.lot_id == source.id
+                ],
+            )
         ).all()
     )
     discrepancies = (
@@ -4214,6 +4731,14 @@ def merge_lots(
             target=target,
             candidate=candidate,
         )
+    if candidate.pallet_collisions:
+        raise LotMergeConflictError(
+            "lots have conflicting pallet identities",
+            code="pallet_collision",
+            source=source,
+            target=target,
+            candidate=candidate,
+        )
     if not candidate.merge_allowed and (
         not overwrite_archived_collisions
         or not candidate.merge_allowed_with_archived_overwrite
@@ -4250,6 +4775,25 @@ def merge_lots(
                 target=target,
                 candidate=candidate,
             )
+
+    pallets_by_id = {pallet.id: pallet for pallet in pallets}
+    target_pallets_by_number = {
+        pallet.normalized_pallet_number: pallet
+        for pallet in pallets
+        if pallet.lot_id == target.id
+    }
+    combined_pallet_targets: dict[int, Pallet] = {}
+    transferred_pallets: list[Pallet] = []
+    for pallet in pallets:
+        if pallet.lot_id != source.id:
+            continue
+        matching_target = target_pallets_by_number.get(
+            pallet.normalized_pallet_number
+        )
+        if matching_target is None:
+            transferred_pallets.append(pallet)
+        else:
+            combined_pallet_targets[pallet.id] = matching_target
 
     removed_to_survivor = {
         collision.removed_box_id: collision.survivor_box_id
@@ -4330,6 +4874,36 @@ def merge_lots(
         for box in boxes
         if box.lot_id == source.id and box.id not in removed_id_set
     ]
+    final_pallet_id_by_box_id: dict[int, int | None] = {}
+    for box in boxes:
+        if box.id in removed_id_set:
+            continue
+        combined_target = (
+            combined_pallet_targets.get(box.pallet_id)
+            if box.pallet_id is not None
+            else None
+        )
+        final_pallet_id_by_box_id[box.id] = (
+            combined_target.id if combined_target is not None else box.pallet_id
+        )
+    for removed_box_id, survivor_box_id in removed_to_survivor.items():
+        final_pallet_id_by_box_id[removed_box_id] = final_pallet_id_by_box_id.get(
+            survivor_box_id
+        )
+    combined_box_ids: dict[int, list[int]] = {
+        source_pallet_id: sorted(
+            box.id
+            for box in boxes
+            if box.pallet_id == source_pallet_id and box.id not in removed_id_set
+        )
+        for source_pallet_id in combined_pallet_targets
+    }
+    original_pallet_box_ids: dict[int, list[int]] = {
+        source_pallet_id: sorted(
+            box.id for box in boxes if box.pallet_id == source_pallet_id
+        )
+        for source_pallet_id in combined_pallet_targets
+    }
     relinked_item_ids = sorted(
         item.id
         for item in request_items
@@ -4367,6 +4941,31 @@ def merge_lots(
     source_version = source.version
     target_version = target.version
     now = datetime.now(UTC)
+    pallet_actions_metadata = [
+        {
+            "action": "combine",
+            "source_pallet": _pallet_signature_value(
+                pallets_by_id[source_pallet_id]
+            ),
+            "target_pallet": _pallet_signature_value(target_pallet),
+            "box_ids": original_pallet_box_ids[source_pallet_id],
+            "surviving_reassigned_box_ids": combined_box_ids[source_pallet_id],
+        }
+        for source_pallet_id, target_pallet in sorted(
+            combined_pallet_targets.items()
+        )
+    ] + [
+        {
+            "action": "transfer",
+            "source_pallet": _pallet_signature_value(pallet),
+            "from_lot_id": source.id,
+            "to_lot_id": target.id,
+            "box_ids": sorted(
+                box.id for box in boxes if box.pallet_id == pallet.id
+            ),
+        }
+        for pallet in sorted(transferred_pallets, key=lambda item: item.id)
+    ]
 
     metadata = {
         "operation": "merge",
@@ -4400,6 +4999,17 @@ def merge_lots(
             relinked_discrepancy_ids
         ),
         "deleted_box_events": _bounded_merge_ids(box_event_ids),
+        "pallet_actions": pallet_actions_metadata[:_OVERLAP_LIST_LIMIT],
+        "pallet_action_count": len(pallet_actions_metadata),
+        "pallet_actions_truncated": (
+            len(pallet_actions_metadata) > _OVERLAP_LIST_LIMIT
+        ),
+        "absorbed_pallets": _bounded_merge_ids(
+            list(combined_pallet_targets)
+        ),
+        "transferred_pallets": _bounded_merge_ids(
+            [pallet.id for pallet in transferred_pallets]
+        ),
         "totals": {
             "overwritten_archived_box_count": len(removed_box_ids),
             "relinked_request_item_count": len(relinked_item_ids),
@@ -4407,15 +5017,21 @@ def merge_lots(
             "deleted_box_event_count": len(box_event_ids),
             "moved_box_count": len(moved_boxes),
             "moved_request_item_count": len(source_request_items),
+            "combined_pallet_count": len(combined_pallet_targets),
+            "moved_pallet_count": len(transferred_pallets),
         },
     }
 
     try:
         with db.begin_nested():
             for item in request_items:
-                survivor_id = removed_to_survivor.get(item.box_id)
+                original_box_id = item.box_id
+                survivor_id = removed_to_survivor.get(original_box_id)
                 if survivor_id is not None:
                     item.box_id = survivor_id
+                    item.pallet_id = final_pallet_id_by_box_id.get(original_box_id)
+                elif item.pallet_id in combined_pallet_targets:
+                    item.pallet_id = combined_pallet_targets[item.pallet_id].id
             for discrepancy in discrepancies:
                 survivor_id = removed_to_survivor.get(discrepancy.box_id)
                 if survivor_id is not None:
@@ -4433,9 +5049,159 @@ def merge_lots(
 
             for box in moved_boxes:
                 box.lot_id = target.id
+                combined_target = (
+                    combined_pallet_targets.get(box.pallet_id)
+                    if box.pallet_id is not None
+                    else None
+                )
+                if combined_target is not None:
+                    source_pallet_id = box.pallet_id
+                    box.pallet_id = combined_target.id
+                    db.add_all(
+                        [
+                            BoxEvent(
+                                box_id=box.id,
+                                warehouse_id=box.current_warehouse_id,
+                                event_type=BoxEventType.pallet_unassigned,
+                                from_status=box.status,
+                                to_status=box.status,
+                                from_warehouse_id=box.current_warehouse_id,
+                                to_warehouse_id=box.current_warehouse_id,
+                                occurred_at=now,
+                                user_id=user.id,
+                                note=cleaned_reason,
+                                event_metadata={
+                                    "operation": "lot_merge_pallet_combine",
+                                    "from_pallet_id": source_pallet_id,
+                                    "to_pallet_id": combined_target.id,
+                                    "source_lot_id": source.id,
+                                    "target_lot_id": target.id,
+                                },
+                            ),
+                            BoxEvent(
+                                box_id=box.id,
+                                warehouse_id=box.current_warehouse_id,
+                                event_type=BoxEventType.pallet_assigned,
+                                from_status=box.status,
+                                to_status=box.status,
+                                from_warehouse_id=box.current_warehouse_id,
+                                to_warehouse_id=box.current_warehouse_id,
+                                occurred_at=now,
+                                user_id=user.id,
+                                note=cleaned_reason,
+                                event_metadata={
+                                    "operation": "lot_merge_pallet_combine",
+                                    "from_pallet_id": source_pallet_id,
+                                    "to_pallet_id": combined_target.id,
+                                    "source_lot_id": source.id,
+                                    "target_lot_id": target.id,
+                                },
+                            ),
+                        ]
+                    )
             for item in source_request_items:
                 # ``item.lot`` is an immutable historical text snapshot.
                 item.lot_id = target.id
+
+            for pallet in transferred_pallets:
+                pallet.lot_id = target.id
+                pallet.updated_by_user_id = user.id
+                pallet.updated_at = now
+                db.add(
+                    PalletEvent(
+                        pallet_id=pallet.id,
+                        event_type=PalletEventType.lot_reassigned,
+                        actor_user_id=user.id,
+                        reason=cleaned_reason,
+                        occurred_at=now,
+                        event_metadata={
+                            "operation": "lot_merge_pallet_transfer",
+                            "from_lot_id": source.id,
+                            "from_lot_name": source_name,
+                            "to_lot_id": target.id,
+                            "to_lot_name": target_name,
+                            "box_ids": sorted(
+                                box.id
+                                for box in boxes
+                                if box.pallet_id == pallet.id
+                            ),
+                        },
+                    )
+                )
+
+            for source_pallet_id, target_pallet in sorted(
+                combined_pallet_targets.items()
+            ):
+                source_pallet = pallets_by_id[source_pallet_id]
+                reassigned_box_ids = combined_box_ids[source_pallet_id]
+                target_pallet.updated_by_user_id = user.id
+                target_pallet.updated_at = now
+                source_pallet.is_active = False
+                source_pallet.archived_at = now
+                source_pallet.archived_by_user_id = user.id
+                source_pallet.archive_reason = (
+                    f"Absorbed into pallet {target_pallet.pallet_number!r} "
+                    f"during lot merge: {cleaned_reason}"
+                )
+                source_pallet.absorbed_into_pallet_id = target_pallet.id
+                source_pallet.absorbed_at = now
+                source_pallet.absorbed_by_user_id = user.id
+                source_pallet.updated_by_user_id = user.id
+                source_pallet.updated_at = now
+                if reassigned_box_ids:
+                    db.add_all(
+                        [
+                            PalletEvent(
+                                pallet_id=source_pallet.id,
+                                event_type=PalletEventType.boxes_unassigned,
+                                actor_user_id=user.id,
+                                reason=cleaned_reason,
+                                occurred_at=now,
+                                event_metadata={
+                                    "operation": "lot_merge_pallet_combine",
+                                    "box_ids": reassigned_box_ids,
+                                    "box_count": len(reassigned_box_ids),
+                                    "to_pallet_id": target_pallet.id,
+                                },
+                            ),
+                            PalletEvent(
+                                pallet_id=target_pallet.id,
+                                event_type=PalletEventType.boxes_assigned,
+                                actor_user_id=user.id,
+                                reason=cleaned_reason,
+                                occurred_at=now,
+                                event_metadata={
+                                    "operation": "lot_merge_pallet_combine",
+                                    "box_ids": reassigned_box_ids,
+                                    "box_count": len(reassigned_box_ids),
+                                    "from_pallet_id": source_pallet.id,
+                                },
+                            ),
+                        ]
+                    )
+                db.add(
+                    PalletEvent(
+                        pallet_id=source_pallet.id,
+                        event_type=PalletEventType.merged_absorbed,
+                        old_pallet_number=source_pallet.pallet_number,
+                        new_pallet_number=target_pallet.pallet_number,
+                        from_warehouse_id=source_pallet.current_warehouse_id,
+                        to_warehouse_id=target_pallet.current_warehouse_id,
+                        actor_user_id=user.id,
+                        reason=cleaned_reason,
+                        occurred_at=now,
+                        event_metadata={
+                            "operation": "lot_merge_pallet_absorbed",
+                            "source_lot_id": source.id,
+                            "target_lot_id": target.id,
+                            "target_pallet_id": target_pallet.id,
+                            "all_source_box_ids": (
+                                original_pallet_box_ids[source_pallet.id]
+                            ),
+                            "reassigned_box_ids": reassigned_box_ids,
+                        },
+                    )
+                )
 
             source.normalized_name = None
             source.merged_into_lot_id = target.id
@@ -4526,6 +5292,10 @@ def merge_lots(
         relinked_request_item_count=len(relinked_item_ids),
         relinked_discrepancy_count=len(relinked_discrepancy_ids),
         deleted_box_event_count=len(box_event_ids),
+        combined_pallet_count=len(combined_pallet_targets),
+        moved_pallet_count=len(transferred_pallets),
+        absorbed_pallet_ids=sorted(combined_pallet_targets),
+        moved_pallet_ids=sorted(pallet.id for pallet in transferred_pallets),
         survivor_box_ids=survivor_box_ids,
         removed_box_ids=removed_box_ids,
     )

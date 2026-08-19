@@ -40,7 +40,9 @@ export type BoxEventType =
   | "returned"
   | "archived"
   | "restored"
-  | "lot_reassigned";
+  | "lot_reassigned"
+  | "pallet_assigned"
+  | "pallet_unassigned";
 
 export interface User {
   id: number;
@@ -93,6 +95,8 @@ export interface Box {
   box_number: string;
   lot: string;
   lot_id: number;
+  pallet_id: number | null;
+  pallet_number: string | null;
   contents: string | null;
   current_warehouse_id: number;
   status: BoxStatus;
@@ -109,6 +113,7 @@ export interface Box {
 
 export interface BoxUpdateResult extends Box {
   cancelled_request_ids: number[];
+  detached_pallet_id: number | null;
 }
 
 export interface StagedReceiptResult {
@@ -339,6 +344,8 @@ export interface BoxFilters {
   status?: BoxStatus;
   lot?: string;
   lot_id?: number;
+  pallet_id?: number;
+  unassigned_pallet?: boolean;
   search?: string;
   received_from?: string;
   received_to?: string;
@@ -443,6 +450,9 @@ export interface BoxRequestItem {
   box_id: number | null;
   lot_id: number | null;
   lot: string | null;
+  pallet_id: number | null;
+  pallet: string | null;
+  pallet_number: string | null;
   box_number: string | null;
   contents: string | null;
 }
@@ -664,6 +674,8 @@ export interface RequestReconciliationIssue {
   severity: RequestIssueSeverity;
   request_id: number;
   box_id: number | null;
+  pallet_id: number | null;
+  pallet_number: string | null;
   warehouse_id: number;
   warehouse_name: string;
   target_warehouse_id: number | null;
@@ -799,6 +811,13 @@ export interface ReturnSource {
   origin: RequestOrigin;
   delivered_quantity: number;
   eligible_quantity: number;
+  pallets: ReturnPalletContext[];
+  has_unassigned_boxes: boolean;
+}
+
+export interface ReturnPalletContext {
+  pallet_id: number | null;
+  pallet_number: string | null;
 }
 
 export interface ReturnCandidate {
@@ -806,6 +825,8 @@ export interface ReturnCandidate {
   box_number: string;
   lot: string;
   lot_id: number;
+  pallet_id: number | null;
+  pallet_number: string | null;
   contents: string | null;
   status: "ready_to_return";
 }
@@ -822,6 +843,188 @@ export interface RequestFilters {
   sort_by?: RequestSortField;
   sort_dir?: "asc" | "desc";
 }
+
+export type PalletProgressState =
+  | "active"
+  | "in_progress"
+  | "complete"
+  | "no_eligible";
+export type PalletSortField =
+  | "pallet_number"
+  | "completion"
+  | "box_count"
+  | "latest_activity";
+export type PalletEventType =
+  | "created"
+  | "renumbered"
+  | "archived"
+  | "restored"
+  | "moved"
+  | "lot_reassigned"
+  | "merged_absorbed"
+  | "boxes_assigned"
+  | "boxes_unassigned";
+
+export interface PalletStatusCounts extends Record<BoxStatus, number> {
+  quarantined: number;
+  received: number;
+  processing: number;
+  incomplete: number;
+  ready_to_return: number;
+  returned: number;
+}
+
+export interface PalletSummary {
+  id: number;
+  lot_id: number;
+  lot_name: string;
+  current_warehouse_id: number;
+  warehouse_name: string;
+  pallet_number: string;
+  normalized_pallet_number: string;
+  version: number;
+  is_active: boolean;
+  archived_at: string | null;
+  archived_by_user_id: number | null;
+  archive_reason: string | null;
+  absorbed_into_pallet_id: number | null;
+  absorbed_at: string | null;
+  absorbed_by_user_id: number | null;
+  created_at: string;
+  updated_at: string;
+  created_by_user_id: number | null;
+  updated_by_user_id: number | null;
+  physical_box_count: number;
+  box_count: number;
+  status_counts: PalletStatusCounts;
+  eligible_box_count: number;
+  completed_box_count: number;
+  completion_percent: number | null;
+  progress_state: PalletProgressState;
+  latest_activity: string;
+}
+
+export type PalletDetail = PalletSummary;
+
+export interface PalletOption {
+  id: number;
+  pallet_number: string;
+  normalized_pallet_number: string;
+  lot_id: number;
+  lot_name: string;
+  current_warehouse_id: number;
+  warehouse_name: string;
+  is_active: boolean;
+  exact_normalized_match: boolean;
+}
+
+export interface PalletEvent {
+  id: number;
+  pallet_id: number;
+  event_type: PalletEventType;
+  old_pallet_number: string | null;
+  new_pallet_number: string | null;
+  from_warehouse_id: number | null;
+  to_warehouse_id: number | null;
+  actor_user_id: number | null;
+  reason: string | null;
+  occurred_at: string;
+  metadata: Record<string, unknown>;
+}
+
+export interface PalletFilters {
+  search?: string;
+  warehouse_id?: number;
+  lot_id?: number;
+  progress_state?: PalletProgressState;
+  include_inactive?: boolean;
+  sort_by?: PalletSortField;
+  sort_dir?: "asc" | "desc";
+}
+
+export interface PalletOptionFilters {
+  search?: string;
+  warehouse_id?: number;
+  lot_id?: number;
+  include_inactive?: boolean;
+}
+
+export interface PalletCreatePayload {
+  lot_id: number;
+  warehouse_id: number;
+  pallet_number: string;
+}
+
+export interface PalletRenamePayload {
+  new_pallet_number: string;
+  reason: string;
+  expected_version: number;
+}
+
+export interface PalletStateChangePayload {
+  reason: string;
+  expected_version: number;
+}
+
+export interface PalletBoxMutationPayload {
+  box_ids: number[];
+  reason: string;
+}
+
+export interface PalletBoxMutationResult {
+  pallet_id: number;
+  updated_box_ids: number[];
+  skipped: Record<string, unknown>[];
+  cancelled_request_ids: number[];
+}
+
+export interface PalletMovePayload {
+  warehouse_id: number;
+  reason?: string;
+  force?: boolean;
+  expected_version: number;
+}
+
+export interface PalletMoveResult {
+  pallet_id: number;
+  from_warehouse_id: number;
+  to_warehouse_id: number;
+  affected_box_count: number;
+  box_ids: number[];
+  cancelled_request_ids: number[];
+  version: number;
+}
+
+export interface PalletIntegrityGroup {
+  count: number;
+  box_ids: number[];
+}
+
+export interface PalletIntegrity {
+  orphaned_pallet_ids: PalletIntegrityGroup;
+  cross_lot: PalletIntegrityGroup;
+  cross_warehouse: PalletIntegrityGroup;
+  inactive_pallet_assignments: PalletIntegrityGroup;
+  unassigned_active_boxes: PalletIntegrityGroup;
+}
+
+export interface PalletConflictCurrent {
+  id: number;
+  pallet_number: string;
+  normalized_pallet_number: string;
+  version: number;
+  is_active: boolean;
+  updated_at: string;
+}
+
+export interface PalletConflict {
+  code: string;
+  message: string;
+  current: PalletConflictCurrent | null;
+  box_count: number | null;
+}
+
+export interface PalletExportFilters extends PalletFilters {}
 
 export type LotProgressState =
   | "active"
@@ -936,9 +1139,38 @@ export interface LotMergeCandidate {
   hard_overlaps: LotHardBoxOverlap[];
   hard_overlap_count: number;
   hard_overlaps_truncated: boolean;
+  pallet_collisions: LotPalletCollision[];
+  pallet_collision_count: number;
+  pallet_collisions_truncated: boolean;
+  pallet_actions: LotPalletMergeAction[];
+  pallet_action_count: number;
+  pallet_actions_truncated: boolean;
   merge_allowed_with_archived_overwrite: boolean;
   requires_explicit_overwrite: boolean;
   collision_signature: string;
+}
+
+export interface LotPalletCollision {
+  normalized_pallet_number: string;
+  source_pallet_id: number;
+  source_pallet_number: string;
+  source_warehouse_id: number;
+  source_is_active: boolean;
+  target_pallet_id: number;
+  target_pallet_number: string;
+  target_warehouse_id: number;
+  target_is_active: boolean;
+  reason: "warehouse_mismatch" | "inactive_target";
+}
+
+export interface LotPalletMergeAction {
+  source_pallet_id: number;
+  source_pallet_number: string;
+  source_warehouse_id: number;
+  source_is_active: boolean;
+  action: "combine" | "transfer";
+  target_pallet_id: number | null;
+  box_count: number;
 }
 
 interface LotMergePayloadBase {
@@ -967,6 +1199,10 @@ export interface LotMergeResult {
   relinked_request_item_count: number;
   relinked_discrepancy_count: number;
   deleted_box_event_count: number;
+  combined_pallet_count: number;
+  moved_pallet_count: number;
+  absorbed_pallet_ids: number[];
+  moved_pallet_ids: number[];
 }
 
 export interface LotOption {
@@ -995,7 +1231,12 @@ export interface LotRenamePayload {
   expected_version: number;
 }
 
-export type LotPurgeEntityType = "lot" | "box" | "request" | "event";
+export type LotPurgeEntityType =
+  | "lot"
+  | "box"
+  | "pallet"
+  | "request"
+  | "event";
 
 export type LotPurgeBlockerCode =
   | "merged_tombstone"
@@ -1052,6 +1293,12 @@ export interface LotPurgePreview {
   archived_box_count: number;
   archived_box_ids: number[];
   archived_box_ids_truncated: boolean;
+  active_pallet_count: number;
+  active_pallet_ids: number[];
+  active_pallet_ids_truncated: boolean;
+  archived_pallet_count: number;
+  archived_pallet_ids: number[];
+  archived_pallet_ids_truncated: boolean;
   linked_request_count: number;
   linked_request_ids: number[];
   linked_request_ids_truncated: boolean;
@@ -1088,6 +1335,7 @@ export interface LotPurgeResult {
   purge_audit_id: number;
   deleted_lot: LotIdentity;
   archived_box_count: number;
+  pallet_count: number;
   receipt_count: number;
   object_key_count: number;
   object_cleanup_status: LotPurgeCleanupStatus;
@@ -1180,6 +1428,12 @@ export interface LotForcePurgePreview {
   archived_box_ids: number[];
   archived_box_count: number;
   archived_box_ids_truncated: boolean;
+  active_pallet_ids: number[];
+  active_pallet_count: number;
+  active_pallet_ids_truncated: boolean;
+  archived_pallet_ids: number[];
+  archived_pallet_count: number;
+  archived_pallet_ids_truncated: boolean;
   touched_request_ids: number[];
   touched_request_count: number;
   touched_request_ids_truncated: boolean;
@@ -1215,6 +1469,7 @@ export interface LotForcePurgeResult {
   purge_mode: "force";
   active_box_count: number;
   archived_box_count: number;
+  pallet_count: number;
   touched_request_count: number;
   rewritten_request_count: number;
   deleted_request_count: number;
@@ -1235,6 +1490,8 @@ export interface BoxLotReassignmentPayload {
   lot_id: number;
   reason: string;
   expected_lot_version: number;
+  pallet_id?: number;
+  detach_pallet?: boolean;
 }
 
 export interface Notification {
@@ -1260,6 +1517,8 @@ export interface NotificationPage {
 export interface InboundRequestItemInput {
   lot: string;
   box_number: string;
+  pallet_number: string;
+  pallet_id?: number;
   contents?: string;
 }
 
@@ -1297,6 +1556,7 @@ export interface XlsxColumnRef {
 
 export interface XlsxColumnMappings {
   box_number: XlsxColumnRef;
+  pallet_number: XlsxColumnRef;
   lot?: XlsxColumnRef;
   contents?: XlsxColumnRef;
 }

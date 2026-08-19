@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from sqlalchemy import Select, or_
 
 from app.models.boxes import Box, BoxStatus
+from app.models.pallets import Pallet
 from app.models.warehouses import Warehouse
 
 
@@ -17,6 +18,8 @@ class BoxFilters(BaseModel):
     status: BoxStatus | None = None
     lot_id: int | None = None
     lot: str | None = None
+    pallet_id: int | None = None
+    unassigned_pallet: bool = False
     search: str | None = None
     received_from: datetime | None = None
     received_to: datetime | None = None
@@ -43,9 +46,11 @@ def parse_box_filters(
     status: Annotated[BoxStatus | None, Query()] = None,
     lot_id: Annotated[int | None, Query(ge=1)] = None,
     lot: Annotated[str | None, Query()] = None,
+    pallet_id: Annotated[int | None, Query(ge=1)] = None,
+    unassigned_pallet: Annotated[bool, Query()] = False,
     search: Annotated[
         str | None,
-        Query(description="matches box_number, lot, or contents"),
+        Query(description="matches box_number, lot, pallet number, or contents"),
     ] = None,
     received_from: Annotated[datetime | None, Query()] = None,
     received_to: Annotated[datetime | None, Query()] = None,
@@ -57,6 +62,8 @@ def parse_box_filters(
         status=status,
         lot_id=lot_id,
         lot=lot,
+        pallet_id=pallet_id,
+        unassigned_pallet=unassigned_pallet,
         search=search,
         received_from=received_from,
         received_to=received_to,
@@ -103,12 +110,17 @@ def apply_box_filters(
         stmt = stmt.where(Box.lot_id == filters.lot_id)
     if filters.lot:
         stmt = stmt.where(Box.lot.ilike(f"%{filters.lot}%"))
+    if filters.pallet_id is not None:
+        stmt = stmt.where(Box.pallet_id == filters.pallet_id)
+    elif filters.unassigned_pallet:
+        stmt = stmt.where(Box.pallet_id.is_(None))
     if filters.search:
         like = f"%{filters.search}%"
         stmt = stmt.where(
             or_(
                 Box.box_number.ilike(like),
                 Box.lot.ilike(like),
+                Box.pallet.has(Pallet.pallet_number.ilike(like)),
                 Box.contents.ilike(like),
             )
         )

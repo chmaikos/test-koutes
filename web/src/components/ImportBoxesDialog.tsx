@@ -26,8 +26,8 @@ export function ImportBoxesDialog({
         <p className="mt-1 text-sm text-slate-500">
           Choose the destination warehouse, then map any workbook layout just
           like an inbound delivery. All rows start included; exclude headers or
-          unrelated data. Repeated rows for the same lot and box number are
-          merged into one box.
+          unrelated data. Pallet number is required. Repeated rows for the same
+          lot, box, and pallet are merged into one box.
         </p>
 
         <form
@@ -125,6 +125,7 @@ export function ImportBoxesDialog({
                 {mappedRows.map((row) => (
                   <div key={`${row.lot}-${row.box_number}`}>
                     {row.lot} · {row.box_number}
+                    {" · Pallet "}{row.pallet_number}
                     {row.contents ? ` · ${row.contents}` : ""}
                   </div>
                 ))}

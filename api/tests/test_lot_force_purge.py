@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from functools import partial
 
 import pytest
 from sqlalchemy import select
@@ -34,12 +35,13 @@ from app.models import (
     UserRole,
 )
 from app.services import lots as lots_service
-from app.services.boxes import create_box
+from app.services.boxes import create_box as _create_box
 from app.services.lots import (
     _force_purge_box_lock_statement,
     _force_purge_discrepancy_lock_statement,
     _force_purge_item_lock_statement,
     _force_purge_lot_lock_statement,
+    _force_purge_pallet_lock_statement,
     _force_purge_request_lock_statement,
     analyze_lot_force_purge_impact,
     cleanup_lot_purge_objects,
@@ -47,6 +49,8 @@ from app.services.lots import (
     get_or_create_lot,
 )
 from app.services.requests import create_completed_receipt
+
+create_box = partial(_create_box, legacy_allow_unassigned=True)
 
 
 def _request(
@@ -409,6 +413,7 @@ def test_force_impact_keeps_merge_relations_as_hard_blocks(session, make_user):
 def test_force_impact_lock_statements_have_explicit_ordered_targets():
     statements = (
         _force_purge_lot_lock_statement(9),
+        _force_purge_pallet_lock_statement(9),
         _force_purge_box_lock_statement(9),
         _force_purge_request_lock_statement([9, 3]),
         _force_purge_item_lock_statement([9, 3]),
@@ -434,13 +439,14 @@ def test_force_impact_lock_statements_have_explicit_ordered_targets():
     ]
 
     assert postgres_sql[0].endswith("FOR UPDATE OF lots")
-    assert postgres_sql[1].endswith("FOR UPDATE OF boxes")
-    assert "ORDER BY box_requests.id" in postgres_sql[2]
-    assert postgres_sql[2].endswith("FOR UPDATE OF box_requests")
-    assert "ORDER BY box_request_items.id" in postgres_sql[3]
-    assert postgres_sql[3].endswith("FOR UPDATE OF box_request_items")
-    assert "ORDER BY box_request_discrepancies.id" in postgres_sql[4]
-    assert postgres_sql[4].endswith(
+    assert postgres_sql[1].endswith("FOR UPDATE OF pallets")
+    assert postgres_sql[2].endswith("FOR UPDATE OF boxes")
+    assert "ORDER BY box_requests.id" in postgres_sql[3]
+    assert postgres_sql[3].endswith("FOR UPDATE OF box_requests")
+    assert "ORDER BY box_request_items.id" in postgres_sql[4]
+    assert postgres_sql[4].endswith("FOR UPDATE OF box_request_items")
+    assert "ORDER BY box_request_discrepancies.id" in postgres_sql[5]
+    assert postgres_sql[5].endswith(
         "FOR UPDATE OF box_request_discrepancies"
     )
     assert all("FOR UPDATE" not in sql for sql in sqlite_sql)

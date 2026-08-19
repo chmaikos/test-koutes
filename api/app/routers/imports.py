@@ -83,7 +83,13 @@ async def import_mapped_box_rows(
             user=user,
             warehouse_id=payload.warehouse_id,
             items=[
-                (item.box_number, item.lot, item.contents)
+                (
+                    item.box_number,
+                    item.lot,
+                    item.pallet_number,
+                    item.pallet_id,
+                    item.contents,
+                )
                 for item in payload.items
             ],
             restore_archived=payload.restore_archived,

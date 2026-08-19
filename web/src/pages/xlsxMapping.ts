@@ -10,6 +10,7 @@ import type {
 
 export interface ResolvedXlsxMapping {
   boxColumn: number | undefined;
+  palletColumn: number | undefined;
   lotSource: XlsxLotSource;
   lotColumn: number | undefined;
   fixedLot: string;
@@ -89,6 +90,13 @@ export function resolveXlsxTemplate(
     "Box number",
     warnings,
   );
+  const palletColumn = resolveColumn(
+    template.column_mappings.pallet_number,
+    headers,
+    sheet.max_columns,
+    "Pallet number",
+    warnings,
+  );
   const lotColumn =
     template.lot_source === "column"
       ? resolveColumn(
@@ -103,7 +111,7 @@ export function resolveXlsxTemplate(
     template.column_mappings.contents,
     headers,
     sheet.max_columns,
-    "Contents",
+    "Item descriptions",
     warnings,
   );
   const selectedRows = new Set(
@@ -118,6 +126,7 @@ export function resolveXlsxTemplate(
   }
   return {
     boxColumn,
+    palletColumn,
     lotSource: template.lot_source,
     lotColumn,
     fixedLot: template.fixed_lot ?? "",
@@ -137,6 +146,7 @@ export function xlsxTemplateInput(input: {
   filename: string;
   sheet: XlsxPreviewSheet;
   boxColumn: number;
+  palletColumn: number;
   lotSource: XlsxLotSource;
   lotColumn?: number;
   fixedLot: string;
@@ -154,6 +164,7 @@ export function xlsxTemplateInput(input: {
     headers,
     column_mappings: {
       box_number: xlsxColumnRef(input.boxColumn, headers),
+      pallet_number: xlsxColumnRef(input.palletColumn, headers),
       ...(input.lotSource === "column" && input.lotColumn !== undefined
         ? { lot: xlsxColumnRef(input.lotColumn, headers) }
         : {}),
@@ -178,17 +189,34 @@ export function groupInboundItems(
 ): InboundRequestItemInput[] {
   const grouped = new Map<
     string,
-    { lot: string; box_number: string; contents: string[] }
+    {
+      lot: string;
+      box_number: string;
+      pallet_number: string;
+      pallet_id?: number;
+      contents: string[];
+    }
   >();
 
   for (const row of rows) {
     const lot = row.lot.trim();
     const boxNumber = canonicalBoxNumber(row.box_number);
     const key = `${lot}\u0000${boxNumber}`;
+    const palletNumber = normalizePalletNumber(row.pallet_number);
     let group = grouped.get(key);
     if (!group) {
-      group = { lot, box_number: boxNumber, contents: [] };
+      group = {
+        lot,
+        box_number: boxNumber,
+        pallet_number: palletNumber,
+        pallet_id: row.pallet_id,
+        contents: [],
+      };
       grouped.set(key, group);
+    } else if (normalizePalletNumber(group.pallet_number) !== palletNumber) {
+      throw new Error(
+        `Box ${boxNumber} in lot ${lot} is mapped to different pallets (${group.pallet_number} and ${palletNumber}).`,
+      );
     }
     const contents = row.contents?.trim();
     if (contents && !group.contents.includes(contents)) {
@@ -199,8 +227,28 @@ export function groupInboundItems(
   return Array.from(grouped.values(), (group) => ({
     lot: group.lot,
     box_number: group.box_number,
+    pallet_number: group.pallet_number,
+    ...(group.pallet_id ? { pallet_id: group.pallet_id } : {}),
     contents: group.contents.join(" | ") || undefined,
   }));
+}
+
+function normalizePalletNumber(value: string): string {
+  return value.trim().replace(/\s+/g, " ").toLocaleUpperCase();
+}
+
+export function tryGroupInboundItems(rows: InboundRequestItemInput[]): {
+  items: InboundRequestItemInput[];
+  error: string | null;
+} {
+  try {
+    return { items: groupInboundItems(rows), error: null };
+  } catch (caught) {
+    return {
+      items: [],
+      error: caught instanceof Error ? caught.message : "Pallet grouping failed.",
+    };
+  }
 }
 
 export function deliveryVariance(ordered: number, actual: number): number {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from functools import partial
 
 import pytest
 from pydantic import ValidationError
@@ -34,7 +35,8 @@ from app.models import (
     UserRole,
 )
 from app.schemas.lots import LotMerge
-from app.services.boxes import BoxRuleError, create_box
+from app.services.boxes import BoxRuleError
+from app.services.boxes import create_box as _create_box
 from app.services.lots import (
     _active_lot_use_statement,
     _exclusive_lot_statement,
@@ -48,11 +50,18 @@ from app.services.lots import (
 )
 from app.services.requests import create_completed_receipt
 
+create_box = partial(_create_box, legacy_allow_unassigned=True)
+
 
 def _box(client, number: str, lot: str) -> dict:
     response = client.post(
         "/api/boxes",
-        json={"box_number": number, "lot": lot, "warehouse_id": 1},
+        json={
+            "box_number": number,
+            "lot": lot,
+            "pallet_number": f"PALLET-{lot}",
+            "warehouse_id": 1,
+        },
     )
     assert response.status_code == 201, response.text
     return response.json()

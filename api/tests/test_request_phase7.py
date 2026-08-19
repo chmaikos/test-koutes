@@ -31,6 +31,9 @@ def _version(client, request_id: int) -> int:
 
 
 def _action(client, request_id: int, action: str, **payload):
+    if action == "complete":
+        for item in payload.get("inbound_items") or []:
+            item.setdefault("pallet_number", "PALLET-PHASE7")
     return client.post(
         f"/api/requests/{request_id}/{action}",
         json={"expected_version": _version(client, request_id), **payload},

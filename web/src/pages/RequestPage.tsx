@@ -37,7 +37,9 @@ import {
   canSubmitReturnSelection,
   returnCandidateIds,
   returnSourceLabel,
+  palletCandidateIds,
   toggleReturnBox,
+  toggleReturnPallet,
 } from "@/pages/returnSelection";
 import { requestLots } from "@/pages/requestLots";
 import {
@@ -933,6 +935,9 @@ function CreateRequestDialog({ onClose }: { onClose: () => void }) {
                         {returnSourceLabel(source.origin)} #{source.id} ·{" "}
                         {source.eligible_quantity} of{" "}
                         {source.delivered_quantity} boxes ready ·{" "}
+                        {source.pallets.length} pallet
+                        {source.pallets.length === 1 ? "" : "s"}
+                        {source.has_unassigned_boxes ? " + unassigned" : ""} ·{" "}
                         {new Date(source.completed_at).toLocaleDateString()}
                       </option>
                     ))}
@@ -983,6 +988,33 @@ function CreateRequestDialog({ onClose }: { onClose: () => void }) {
                       </p>
                     ) : returnCandidates.data?.length ? (
                       <div className="max-h-72 overflow-auto">
+                        <div className="flex flex-wrap gap-2 border-b bg-slate-50 p-3">
+                          {[
+                            ...new Map(
+                              returnCandidates.data.map((candidate) => [
+                                candidate.pallet_id,
+                                {
+                                  id: candidate.pallet_id,
+                                  number: candidate.pallet_number,
+                                },
+                              ]),
+                            ).values(),
+                          ].map((pallet) => {
+                            const ids = palletCandidateIds(
+                              returnCandidates.data,
+                              pallet.id,
+                            );
+                            const checked =
+                              ids.length > 0 &&
+                              ids.every((id) => selectedBoxIds.includes(id));
+                            return (
+                              <label key={pallet.id ?? "unassigned"} className="flex items-center gap-2 rounded border border-slate-200 bg-white px-2 py-1 text-xs">
+                                <input type="checkbox" checked={checked} onChange={() => setSelectedBoxIds((current) => toggleReturnPallet(current, returnCandidates.data ?? [], pallet.id))} />
+                                {pallet.number ?? "Unassigned"} ({ids.length})
+                              </label>
+                            );
+                          })}
+                        </div>
                         <table className="w-full text-sm">
                           <thead className="sticky top-0 bg-white text-left text-xs uppercase tracking-wider text-slate-500">
                             <tr>
@@ -991,7 +1023,8 @@ function CreateRequestDialog({ onClose }: { onClose: () => void }) {
                               </th>
                               <th className="px-3 py-2">Box</th>
                               <th className="px-3 py-2">Lot</th>
-                              <th className="px-3 py-2">Contents</th>
+                              <th className="px-3 py-2">Pallet</th>
+                              <th className="px-3 py-2">Item descriptions</th>
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-slate-100">
@@ -1013,6 +1046,9 @@ function CreateRequestDialog({ onClose }: { onClose: () => void }) {
                                   {box.box_number}
                                 </td>
                                 <td className="px-3 py-2">{box.lot}</td>
+                                <td className="px-3 py-2">
+                                  {box.pallet_id ? <Link className="text-brand-700 hover:underline" to={`/pallets/${box.pallet_id}`}>{box.pallet_number ?? `#${box.pallet_id}`}</Link> : <span className="text-amber-700">Unassigned</span>}
+                                </td>
                                 <td className="px-3 py-2 text-slate-500">
                                   {box.contents || "—"}
                                 </td>

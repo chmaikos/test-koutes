@@ -24,11 +24,12 @@ def _payload(
         "warehouse_id": warehouse_id,
         "sheet_pattern": "Boxes*",
         "filename": filename,
-        "headers": headers or ["Box Number", "Lot", "Contents"],
+        "headers": headers or ["Box Number", "Lot", "Contents", "Pallet"],
         "column_mappings": {
             "box_number": {"index": 0, "header": "Box Number"},
             "lot": {"index": 1, "header": "Lot"},
             "contents": {"index": 2, "header": "Contents"},
+            "pallet_number": {"index": 3, "header": "Pallet"},
         },
         "lot_source": "column",
         "row_start": 2,
@@ -180,6 +181,10 @@ def test_template_config_validation_and_use_case_filtering(client, make_user):
     invalid = _payload("Invalid")
     invalid["column_mappings"].pop("lot")
     response = client.post("/api/xlsx-mapping-templates", json=invalid)
+    assert response.status_code == 422
+    missing_pallet = _payload("Missing pallet")
+    missing_pallet["column_mappings"].pop("pallet_number")
+    response = client.post("/api/xlsx-mapping-templates", json=missing_pallet)
     assert response.status_code == 422
 
     inbound = client.post(

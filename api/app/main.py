@@ -20,6 +20,7 @@ from app.routers import (
     imports,
     lots,
     notifications,
+    pallets,
     productivity,
     requests,
     stream,
@@ -95,6 +96,7 @@ api_router.include_router(users.router, dependencies=gated)
 api_router.include_router(warehouses.router, dependencies=gated)
 api_router.include_router(boxes.router, dependencies=gated)
 api_router.include_router(lots.router, dependencies=gated)
+api_router.include_router(pallets.router, dependencies=gated)
 api_router.include_router(imports.router, dependencies=gated)
 api_router.include_router(alerts.router, dependencies=gated)
 api_router.include_router(dashboard.router, dependencies=gated)

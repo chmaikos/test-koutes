@@ -38,6 +38,7 @@ const NAV_ITEMS: NavItem[] = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard },
   { to: "/boxes", label: "Boxes", icon: BoxesIcon },
   { to: "/lots", label: "Lots", icon: Layers3 },
+  { to: "/pallets", label: "Pallets", icon: Layers3 },
   { to: "/requests", label: "Requests", icon: ClipboardList },
   { to: "/productivity", label: "Productivity", icon: Activity },
   { to: "/alerts", label: "Alerts", icon: AlertTriangle, badgeKey: "alerts" },
@@ -57,6 +58,7 @@ function titleForPath(pathname: string): string {
   if (pathname === "/" || pathname === "") return "Dashboard";
   if (pathname.startsWith("/boxes")) return "Boxes";
   if (pathname.startsWith("/lots")) return "Lots";
+  if (pathname.startsWith("/pallets")) return "Pallets";
   if (pathname.startsWith("/requests")) return "Requests";
   if (pathname.startsWith("/productivity")) return "Productivity";
   if (pathname.startsWith("/alerts")) return "Alerts";

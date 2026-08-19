@@ -161,6 +161,10 @@ export function ForcePurgeEscalationPanel({
           value={String(snapshot.active_box_count + snapshot.archived_box_count)}
         />
         <ImpactMetric
+          label="Pallets deleted"
+          value={String(snapshot.active_pallet_count + snapshot.archived_pallet_count)}
+        />
+        <ImpactMetric
           label="Selected items removed"
           value={String(removedItemCount)}
         />
@@ -208,6 +212,18 @@ export function ForcePurgeEscalationPanel({
           ids={snapshot.archived_box_ids}
           total={snapshot.archived_box_count}
           truncated={snapshot.archived_box_ids_truncated}
+        />
+        <IdList
+          label="Active pallet IDs"
+          ids={snapshot.active_pallet_ids}
+          total={snapshot.active_pallet_count}
+          truncated={snapshot.active_pallet_ids_truncated}
+        />
+        <IdList
+          label="Archived pallet IDs"
+          ids={snapshot.archived_pallet_ids}
+          total={snapshot.archived_pallet_count}
+          truncated={snapshot.archived_pallet_ids_truncated}
         />
       </section>
 

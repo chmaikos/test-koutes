@@ -12,6 +12,9 @@ function item(
     box_id: null,
     lot_id: lotId,
     lot,
+    pallet_id: null,
+    pallet: null,
+    pallet_number: null,
     box_number: null,
     contents: null,
   };

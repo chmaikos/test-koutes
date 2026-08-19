@@ -5,6 +5,7 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from app.deps import CurrentUser, DbSession
 from app.models.boxes import Box
@@ -12,6 +13,7 @@ from app.models.employees import Employee, ProductivityEntry
 from app.models.warehouses import Warehouse
 from app.routers._filters import BoxFilters, apply_box_filters, parse_box_filters
 from app.schemas.lots import LotProgressState, LotSortField
+from app.schemas.pallets import PalletProgressState, PalletSortField
 from app.services.acl import apply_warehouse_filter
 from app.services.exports import (
     ProductivityDetailExportRow,
@@ -20,6 +22,8 @@ from app.services.exports import (
     boxes_to_xlsx,
     lot_summaries_to_csv,
     lot_summaries_to_xlsx,
+    pallet_summaries_to_csv,
+    pallet_summaries_to_xlsx,
     productivity_to_csv,
     productivity_to_xlsx,
     request_analytics_to_csv,
@@ -28,6 +32,7 @@ from app.services.exports import (
     request_reconciliation_to_xlsx,
 )
 from app.services.lots import list_lot_summaries
+from app.services.pallets import list_pallet_summaries
 from app.services.productivity import employee_averages
 from app.services.request_reporting import (
     RequestReportFilters,
@@ -137,7 +142,7 @@ def export_csv(
     user: CurrentUser,
     filters: Annotated[BoxFilters, Depends(parse_box_filters)],
 ) -> Response:
-    stmt = apply_box_filters(select(Box), filters)
+    stmt = apply_box_filters(select(Box).options(selectinload(Box.pallet)), filters)
     stmt = apply_warehouse_filter(stmt, user, Box.current_warehouse_id).order_by(
         Box.updated_at.desc()
     )
@@ -158,7 +163,7 @@ def export_xlsx(
     user: CurrentUser,
     filters: Annotated[BoxFilters, Depends(parse_box_filters)],
 ) -> Response:
-    stmt = apply_box_filters(select(Box), filters)
+    stmt = apply_box_filters(select(Box).options(selectinload(Box.pallet)), filters)
     stmt = apply_warehouse_filter(stmt, user, Box.current_warehouse_id).order_by(
         Box.updated_at.desc()
     )
@@ -249,6 +254,102 @@ def export_lots_xlsx(
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={
             "Content-Disposition": f'attachment; filename="{_filename("lots", "xlsx")}"'
+        },
+    )
+
+
+def _pallet_export_rows(
+    db,
+    user,
+    *,
+    search: str | None,
+    warehouse_id: int | None,
+    lot_id: int | None,
+    progress_state: PalletProgressState | None,
+    include_inactive: bool,
+    sort_by: PalletSortField,
+    sort_dir: Literal["asc", "desc"],
+):
+    rows, _total = list_pallet_summaries(
+        db,
+        user=user,
+        search=search,
+        warehouse_id=warehouse_id,
+        lot_id=lot_id,
+        progress_state=progress_state,
+        include_inactive=include_inactive,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+        page=1,
+        page_size=1_000_000,
+    )
+    return rows
+
+
+@router.get("/pallets.csv")
+def export_pallets_csv(
+    db: DbSession,
+    user: CurrentUser,
+    search: str | None = None,
+    warehouse_id: int | None = Query(default=None, ge=1),
+    lot_id: int | None = Query(default=None, ge=1),
+    progress_state: PalletProgressState | None = None,
+    include_inactive: bool = False,
+    sort_by: PalletSortField = "latest_activity",
+    sort_dir: Literal["asc", "desc"] = "desc",
+) -> Response:
+    rows = _pallet_export_rows(
+        db,
+        user,
+        search=search,
+        warehouse_id=warehouse_id,
+        lot_id=lot_id,
+        progress_state=progress_state,
+        include_inactive=include_inactive,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+    )
+    return Response(
+        content=pallet_summaries_to_csv(rows),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{_filename("pallets", "csv")}"'
+            )
+        },
+    )
+
+
+@router.get("/pallets.xlsx")
+def export_pallets_xlsx(
+    db: DbSession,
+    user: CurrentUser,
+    search: str | None = None,
+    warehouse_id: int | None = Query(default=None, ge=1),
+    lot_id: int | None = Query(default=None, ge=1),
+    progress_state: PalletProgressState | None = None,
+    include_inactive: bool = False,
+    sort_by: PalletSortField = "latest_activity",
+    sort_dir: Literal["asc", "desc"] = "desc",
+) -> Response:
+    rows = _pallet_export_rows(
+        db,
+        user,
+        search=search,
+        warehouse_id=warehouse_id,
+        lot_id=lot_id,
+        progress_state=progress_state,
+        include_inactive=include_inactive,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+    )
+    return Response(
+        content=pallet_summaries_to_xlsx(rows),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{_filename("pallets", "xlsx")}"'
+            )
         },
     )
 

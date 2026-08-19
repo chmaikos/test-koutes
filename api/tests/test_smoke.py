@@ -28,7 +28,12 @@ def test_full_box_lifecycle_and_dashboard(client):
 
     create = client.post(
         "/api/boxes",
-        json={"box_number": "001", "lot": "Acme", "warehouse_id": 1},
+        json={
+            "box_number": "001",
+            "lot": "Acme",
+            "pallet_number": "PALLET-ACME",
+            "warehouse_id": 1,
+        },
     )
     assert create.status_code == 201, create.text
     box_id = create.json()["id"]
@@ -36,7 +41,12 @@ def test_full_box_lifecycle_and_dashboard(client):
 
     dup = client.post(
         "/api/boxes",
-        json={"box_number": "001", "lot": "Acme", "warehouse_id": 1},
+        json={
+            "box_number": "001",
+            "lot": "Acme",
+            "pallet_number": "PALLET-ACME",
+            "warehouse_id": 1,
+        },
     )
     assert dup.status_code == 409
 
@@ -82,11 +92,22 @@ def test_filters_search_and_exports(client):
         {
             "box_number": "100",
             "lot": "Acme",
+            "pallet_number": "PALLET-ACME",
             "contents": "Customer invoices",
             "warehouse_id": 1,
         },
-        {"box_number": "200", "lot": "Globex", "warehouse_id": 2},
-        {"box_number": "201", "lot": "Globex", "warehouse_id": 2},
+        {
+            "box_number": "200",
+            "lot": "Globex",
+            "pallet_number": "PALLET-GLOBEX",
+            "warehouse_id": 2,
+        },
+        {
+            "box_number": "201",
+            "lot": "Globex",
+            "pallet_number": "PALLET-GLOBEX",
+            "warehouse_id": 2,
+        },
     ]
     for p in payloads:
         assert client.post("/api/boxes", json=p).status_code == 201
@@ -152,9 +173,24 @@ def test_box_list_sorting(client):
     # order so a default-ordered fetch (by ``updated_at desc``) gives
     # us a different order than ``box_number asc`` would.
     creates = [
-        {"box_number": "300", "lot": "Acme", "warehouse_id": 3},
-        {"box_number": "100", "lot": "Acme", "warehouse_id": 1},
-        {"box_number": "200", "lot": "Acme", "warehouse_id": 2},
+        {
+            "box_number": "300",
+            "lot": "Acme",
+            "pallet_number": "PALLET-3",
+            "warehouse_id": 3,
+        },
+        {
+            "box_number": "100",
+            "lot": "Acme",
+            "pallet_number": "PALLET-1",
+            "warehouse_id": 1,
+        },
+        {
+            "box_number": "200",
+            "lot": "Acme",
+            "pallet_number": "PALLET-2",
+            "warehouse_id": 2,
+        },
     ]
     for payload in creates:
         assert (
@@ -209,6 +245,7 @@ def test_box_lot_contents_round_trip_and_required(client):
         json={
             "box_number": "001",
             "lot": "LOT-42",
+            "pallet_number": "PALLET-42",
             "contents": "10x calibration kits",
             "warehouse_id": 1,
         },
@@ -232,14 +269,19 @@ def test_box_lot_contents_round_trip_and_required(client):
     # Lot is required: empty string is rejected by Pydantic with 422.
     bad_create = client.post(
         "/api/boxes",
-        json={"box_number": "002", "lot": "", "warehouse_id": 1},
+        json={
+            "box_number": "002",
+            "lot": "",
+            "pallet_number": "PALLET",
+            "warehouse_id": 1,
+        },
     )
     assert bad_create.status_code == 422
 
     # Missing entirely is also a 422 (lot has no default).
     missing = client.post(
         "/api/boxes",
-        json={"box_number": "003", "warehouse_id": 1},
+        json={"box_number": "003", "pallet_number": "PALLET", "warehouse_id": 1},
     )
     assert missing.status_code == 422
 
@@ -291,7 +333,12 @@ def test_alerts_max_capacity(client, session):
         assert (
             client.post(
                 "/api/boxes",
-                json={"box_number": f"{i + 1:03d}", "lot": "x", "warehouse_id": 3},
+                json={
+                    "box_number": f"{i + 1:03d}",
+                    "lot": "x",
+                    "pallet_number": "PALLET-X",
+                    "warehouse_id": 3,
+                },
             ).status_code
             == 201
         )
@@ -344,7 +391,12 @@ def test_alerts_low_inventory_resolves(client, session):
     assert (
         client.post(
             "/api/boxes",
-            json={"box_number": "001", "lot": "x", "warehouse_id": 2},
+            json={
+                "box_number": "001",
+                "lot": "x",
+                "pallet_number": "PALLET-X",
+                "warehouse_id": 2,
+            },
         ).status_code
         == 201
     )
@@ -446,7 +498,12 @@ def test_linear_box_status_chain_rejects_skip_ahead(client):
 
     resp = client.post(
         "/api/boxes",
-        json={"box_number": "001", "lot": "Acme", "warehouse_id": 1},
+        json={
+            "box_number": "001",
+            "lot": "Acme",
+            "pallet_number": "PALLET-ACME",
+            "warehouse_id": 1,
+        },
     )
     assert resp.status_code == 201, resp.text
     box_id = resp.json()["id"]

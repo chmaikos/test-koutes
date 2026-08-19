@@ -6,7 +6,15 @@ Implementation must not begin until the following are agreed with the ERP owner:
 
 - API or webhook contract, environments, availability guarantees, and rate limits.
 - Authentication, credential rotation, network allow-listing, and service-account ownership.
-- Canonical identifiers for delivery notes, return notes, requests, warehouses, lots, and boxes.
+- Canonical identifiers for delivery notes, return notes, requests, warehouses,
+  lots, pallets, and boxes. Define whether ERP Pallet identity is the app's
+  numeric `pallet_id`, the case-insensitive number scoped by canonical Lot, or
+  an explicit cross-system mapping; never use display text alone as a global
+  key.
+- Snapshot semantics for request lines: immutable Lot/Pallet display values
+  preserve what was received even after a later rename, move, merge absorption,
+  archival, or purge. Agree which canonical IDs remain resolvable and how an
+  absorbed Pallet points to its surviving target.
 - Reference uniqueness, document versioning, cancellation, correction, and late-arrival rules.
 - Direction of authority for quantities, line discrepancies, completion, and reconciliation.
 - Idempotency keys, retry policy, replay handling, ordering guarantees, and dead-letter recovery.

@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.models.alerts import Alert
 from app.models.boxes import ACTIVE_STATUSES, Box
 from app.models.employees import Employee
+from app.models.pallets import Pallet
 from app.models.requests import BLOCKING_REQUEST_STATUSES, BoxRequest
 from app.models.users import User
 from app.models.warehouses import Warehouse
@@ -22,12 +23,14 @@ class WarehouseArchiveConflict(WarehouseRuleError):
         self,
         *,
         active_boxes: int = 0,
+        active_pallets: int = 0,
         active_requests: int = 0,
         active_source_requests: int = 0,
         active_target_requests: int = 0,
         last_active_warehouse: bool = False,
     ) -> None:
         self.active_boxes = active_boxes
+        self.active_pallets = active_pallets
         self.active_requests = active_requests
         self.active_source_requests = active_source_requests
         self.active_target_requests = active_target_requests
@@ -38,6 +41,7 @@ class WarehouseArchiveConflict(WarehouseRuleError):
         return {
             "message": str(self),
             "active_boxes": self.active_boxes,
+            "active_pallets": self.active_pallets,
             "active_requests": self.active_requests,
             "active_source_requests": self.active_source_requests,
             "active_target_requests": self.active_target_requests,
@@ -88,6 +92,15 @@ def archive_warehouse(
         )
         or 0
     )
+    active_pallets = int(
+        db.scalar(
+            select(func.count(Pallet.id)).where(
+                Pallet.current_warehouse_id == warehouse_id,
+                Pallet.is_active.is_(True),
+            )
+        )
+        or 0
+    )
     active_source_requests = int(
         db.scalar(
             select(func.count(BoxRequest.id)).where(
@@ -119,9 +132,10 @@ def archive_warehouse(
         or 0
     )
     last_active = active_count <= 1
-    if active_boxes or active_requests or last_active:
+    if active_boxes or active_pallets or active_requests or last_active:
         raise WarehouseArchiveConflict(
             active_boxes=active_boxes,
+            active_pallets=active_pallets,
             active_requests=active_requests,
             active_source_requests=active_source_requests,
             active_target_requests=active_target_requests,

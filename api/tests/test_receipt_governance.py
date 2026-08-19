@@ -48,6 +48,7 @@ def test_policy_defaults_preserve_legacy_manual_receipt(client, session: Session
         json={
             "box_number": "1",
             "lot": "LEGACY",
+            "pallet_number": "PALLET-LEGACY",
             "warehouse_id": 1,
         },
     )
@@ -82,6 +83,7 @@ def test_policy_update_is_audited_and_manual_entry_is_staged(
         json={
             "box_number": "2",
             "lot": "GOVERNED",
+            "pallet_number": "PALLET-GOVERNED",
             "warehouse_id": 1,
         },
     )
@@ -131,8 +133,8 @@ def test_two_person_threshold_boundary_and_atomic_capacity(
         warehouse_id=1,
         origin=BoxRequestOrigin.xlsx_import,
         items=[
-            InboundBoxItem(box_number="10", lot="CAP"),
-            InboundBoxItem(box_number="11", lot="CAP"),
+            InboundBoxItem(box_number="10", lot="CAP", pallet_number="PALLET-CAP"),
+            InboundBoxItem(box_number="11", lot="CAP", pallet_number="PALLET-CAP"),
         ],
     )
     with pytest.raises(RequestAccessError):
@@ -179,7 +181,13 @@ def test_archived_restore_is_revalidated_and_quarantine_release_is_audited(
         warehouse_id=1,
         origin=BoxRequestOrigin.xlsx_import,
         restore_archived=True,
-        items=[InboundBoxItem(box_number="20", lot="RESTORE")],
+        items=[
+            InboundBoxItem(
+                box_number="20",
+                lot="RESTORE",
+                pallet_number="PALLET-RESTORE",
+            )
+        ],
     )
     finalized = finalize_staged_receipt(
         session,
@@ -190,9 +198,12 @@ def test_archived_restore_is_revalidated_and_quarantine_release_is_audited(
     assert finalized.items[0].box_id == existing.id
     assert finalized.items[0].lot_id == existing.lot_id
     assert finalized.items[0].lot == "RESTORE"
+    assert finalized.items[0].pallet_id is not None
+    assert finalized.items[0].pallet == "PALLET-RESTORE"
     session.refresh(existing)
     assert existing.status == BoxStatus.quarantined
     assert existing.archived_at is None
+    assert existing.pallet_id == finalized.items[0].pallet_id
 
     released = client.post(
         "/api/boxes/quarantine/release",
@@ -215,7 +226,9 @@ def test_document_gate_ignores_non_current_delivery_note(session: Session, make_
         user=importer,
         warehouse_id=1,
         origin=BoxRequestOrigin.manual_entry,
-        items=[InboundBoxItem(box_number="30", lot="DOC")],
+        items=[
+            InboundBoxItem(box_number="30", lot="DOC", pallet_number="PALLET-DOC")
+        ],
     )
     document = _document(request.id, importer.id)
     document.is_current = False

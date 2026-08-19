@@ -20,8 +20,8 @@ import type {
 } from "@/api/types";
 import {
   deliveryVariance,
-  groupInboundItems,
   resolveXlsxTemplate,
+  tryGroupInboundItems,
   xlsxTemplateInput,
 } from "@/pages/xlsxMapping";
 import { LotPicker, type LotSelection } from "@/components/LotPicker";
@@ -52,6 +52,7 @@ export function ExcelRowMapper({
   const [file, setFile] = useState<File | null>(null);
   const [sheetName, setSheetName] = useState("");
   const [boxColumn, setBoxColumn] = useState<number | undefined>();
+  const [palletColumn, setPalletColumn] = useState<number | undefined>();
   const [lotSource, setLotSource] = useState<"fixed" | "column">("fixed");
   const [lotColumn, setLotColumn] = useState<number | undefined>();
   const [fixedLot, setFixedLot] = useState("");
@@ -91,6 +92,10 @@ export function ExcelRowMapper({
         .map((row) => ({
           box_number:
             boxColumn === undefined ? "" : (row.cells[boxColumn] ?? "").trim(),
+          pallet_number:
+            palletColumn === undefined
+              ? ""
+              : (row.cells[palletColumn] ?? "").trim(),
           lot:
             lotSource === "fixed"
               ? fixedLot.trim()
@@ -103,13 +108,17 @@ export function ExcelRowMapper({
               : (row.cells[contentsColumn] ?? "").trim() || undefined,
         }))
     : [];
-  const groupedSelectionCount = groupInboundItems(
-    selectedMappedRows.filter((row) => row.box_number && row.lot),
-  ).length;
+  const selectedGrouping = tryGroupInboundItems(
+    selectedMappedRows.filter(
+      (row) => row.box_number && row.lot && row.pallet_number,
+    ),
+  );
+  const groupedSelectionCount = selectedGrouping.items.length;
 
   function resetMapping(nextSheet: XlsxPreviewSheet | undefined) {
     setSheetName(nextSheet?.name ?? "");
     setBoxColumn(undefined);
+    setPalletColumn(undefined);
     setLotSource("fixed");
     setLotColumn(undefined);
     setFixedLot("");
@@ -180,6 +189,7 @@ export function ExcelRowMapper({
     if (!sheet || !selectedTemplate) return;
     const resolved = resolveXlsxTemplate(selectedTemplate, sheet);
     setBoxColumn(resolved.boxColumn);
+    setPalletColumn(resolved.palletColumn);
     setLotSource(resolved.lotSource);
     setLotColumn(resolved.lotColumn);
     setFixedLot(resolved.fixedLot);
@@ -199,8 +209,8 @@ export function ExcelRowMapper({
   }
 
   function currentTemplatePayload(name: string) {
-    if (!sheet || boxColumn === undefined) {
-      throw new Error("Choose the box number column before saving a template.");
+    if (!sheet || boxColumn === undefined || palletColumn === undefined) {
+      throw new Error("Choose the box and pallet number columns before saving a template.");
     }
     if (lotSource === "fixed" && !fixedLot.trim()) {
       throw new Error("Enter the fixed lot before saving a template.");
@@ -216,6 +226,7 @@ export function ExcelRowMapper({
       filename: preview.data?.filename ?? file?.name ?? "",
       sheet,
       boxColumn,
+      palletColumn,
       lotSource,
       lotColumn,
       fixedLot,
@@ -305,6 +316,10 @@ export function ExcelRowMapper({
       setError("Choose the column containing the box number.");
       return;
     }
+    if (palletColumn === undefined) {
+      setError("Choose the required column containing the pallet number.");
+      return;
+    }
     if (lotSource === "fixed" && !fixedLot.trim()) {
       setError("Enter the lot value to apply to the selected rows.");
       return;
@@ -319,8 +334,12 @@ export function ExcelRowMapper({
       setError("Choose the column containing the lot.");
       return;
     }
-    if (lotSource === "column" && lotColumn === boxColumn) {
-      setError("Box number and lot must use different columns.");
+    if (
+      palletColumn === boxColumn ||
+      (lotSource === "column" &&
+        (lotColumn === boxColumn || lotColumn === palletColumn))
+    ) {
+      setError("Box number, pallet number, and lot must use different columns.");
       return;
     }
     if (selectedRows.size === 0) {
@@ -332,13 +351,14 @@ export function ExcelRowMapper({
     for (const row of sheet.rows) {
       if (!selectedRows.has(row.row_number)) continue;
       const boxNumber = (row.cells[boxColumn] ?? "").trim();
+      const palletNumber = (row.cells[palletColumn] ?? "").trim();
       const lot =
         lotSource === "fixed"
           ? fixedLot.trim()
           : (row.cells[lotColumn!] ?? "").trim();
-      if (!boxNumber || !lot) {
+      if (!boxNumber || !lot || !palletNumber) {
         setError(
-          `Excel row ${row.row_number} is missing a mapped box number or lot.`,
+          `Excel row ${row.row_number} is missing a mapped box number, pallet number, or lot.`,
         );
         return;
       }
@@ -355,14 +375,20 @@ export function ExcelRowMapper({
       mapped.push({
         box_number: boxNumber,
         lot,
+        pallet_number: palletNumber,
         contents: contents || undefined,
       });
     }
-    const grouped = groupInboundItems(mapped);
-    const oversized = grouped.find((item) => (item.contents?.length ?? 0) > 200);
+    const groupedResult = tryGroupInboundItems(mapped);
+    if (groupedResult.error) {
+      setError(groupedResult.error);
+      return;
+    }
+    const grouped = groupedResult.items;
+    const oversized = grouped.find((item) => (item.contents?.length ?? 0) > 2000);
     if (oversized) {
       setError(
-        `Combined contents for box ${oversized.box_number} exceed 200 characters.`,
+        `Combined item descriptions for box ${oversized.box_number} exceed 2,000 characters.`,
       );
       return;
     }
@@ -584,6 +610,13 @@ export function ExcelRowMapper({
               required
               onChange={setBoxColumn}
             />
+            <ColumnSelect
+              label="Pallet number column"
+              sheet={sheet}
+              value={palletColumn}
+              required
+              onChange={setPalletColumn}
+            />
             <label className="block">
               <span className="text-xs text-slate-500">Lot source</span>
               <select
@@ -617,7 +650,7 @@ export function ExcelRowMapper({
               />
             )}
             <ColumnSelect
-              label="Contents column (optional)"
+              label="Item descriptions column (optional)"
               sheet={sheet}
               value={contentsColumn}
               onChange={setContentsColumn}
@@ -689,6 +722,11 @@ export function ExcelRowMapper({
               </span>
             </div>
           </div>
+          {selectedGrouping.error && (
+            <p role="alert" className="rounded-lg bg-rose-50 p-3 text-sm text-rose-700">
+              {selectedGrouping.error}
+            </p>
+          )}
           {quantity !== undefined && (
             <DeliveryVarianceSummary
               ordered={quantity}
@@ -739,6 +777,7 @@ export function ExcelRowMapper({
                             className={`max-w-64 truncate border-b border-l px-2 py-1.5 ${
                               columnIndex === boxColumn ||
                               columnIndex === lotColumn ||
+                              columnIndex === palletColumn ||
                               columnIndex === contentsColumn
                                 ? "bg-amber-50"
                                 : ""
@@ -761,7 +800,9 @@ export function ExcelRowMapper({
               type="button"
               className="btn-primary"
               disabled={
-                selectedRows.size === 0 || groupedSelectionCount === 0
+                selectedRows.size === 0 ||
+                groupedSelectionCount === 0 ||
+                !!selectedGrouping.error
               }
               onClick={applyMapping}
             >

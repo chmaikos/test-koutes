@@ -7,7 +7,9 @@ import {
 
 describe("archived box import options", () => {
   it("sends restoration only when the user opts in", () => {
-    const items = [{ box_number: "001", lot: "LOT-1" }];
+    const items = [
+      { box_number: "001", lot: "LOT-1", pallet_number: "PALLET-1" },
+    ];
     expect(mappedImportPayload(2, items, false)).toEqual({
       warehouse_id: 2,
       items,

@@ -112,6 +112,8 @@ def validate_mapping_config(
 ) -> None:
     if "box_number" not in column_mappings:
         raise XlsxTemplateRuleError("box number mapping is required")
+    if "pallet_number" not in column_mappings:
+        raise XlsxTemplateRuleError("pallet number mapping is required")
     if lot_source == "fixed":
         if not (fixed_lot or "").strip():
             raise XlsxTemplateRuleError("fixed lot is required")

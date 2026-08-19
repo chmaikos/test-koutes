@@ -22,6 +22,7 @@ from app.models.boxes import (
 )
 from app.models.lots import normalize_lot_name
 from app.models.notifications import RequestNotificationKind
+from app.models.pallets import Pallet, clean_pallet_number, normalize_pallet_number
 from app.models.requests import (
     ACTIVE_REQUEST_STATUSES,
     BoxRequest,
@@ -57,6 +58,7 @@ from app.services.lots import (
     resolve_lot_names_for_use,
     validate_lot_name,
 )
+from app.services.pallets import PalletRuleError, resolve_or_create_active_pallet
 from app.services.request_notifications import enqueue_request_event
 from app.services.warehouses import WarehouseRuleError, ensure_active_warehouse
 
@@ -71,6 +73,13 @@ class RequestAccessError(RequestRuleError):
 
 class RequestConflictError(RequestRuleError):
     pass
+
+
+def _pallet_number_for_box(db: Session, box: Box) -> str | None:
+    if box.pallet_id is None:
+        return None
+    pallet = db.get(Pallet, box.pallet_id)
+    return pallet.pallet_number if pallet is not None else None
 
 
 def _lock_lots_for_current_links(db: Session, lot_ids: list[int | None]) -> None:
@@ -163,6 +172,8 @@ class ReturnSource:
     origin: BoxRequestOrigin
     delivered_quantity: int
     eligible_quantity: int
+    pallets: list[dict[str, object]]
+    has_unassigned_boxes: bool
 
 
 def _warehouse(db: Session, warehouse_id: int, user: User) -> Warehouse:
@@ -648,6 +659,11 @@ def list_return_sources(
         )
         if source.completed_at is None:
             continue
+        pallet_contexts = {
+            (item.pallet_id, item.pallet)
+            for item in source.items
+            if item.pallet_id is not None or item.pallet is not None
+        }
         results.append(
             ReturnSource(
                 id=source.id,
@@ -656,6 +672,20 @@ def list_return_sources(
                 origin=source.origin,
                 delivered_quantity=delivered_quantity,
                 eligible_quantity=eligible_quantity,
+                pallets=[
+                    {"pallet_id": pallet_id, "pallet_number": pallet_number}
+                    for pallet_id, pallet_number in sorted(
+                        pallet_contexts,
+                        key=lambda value: (
+                            (value[1] or "").casefold(),
+                            value[0] or 0,
+                        ),
+                    )
+                ],
+                has_unassigned_boxes=any(
+                    item.box_id is not None and item.pallet_id is None
+                    for item in source.items
+                ),
             )
         )
     return results
@@ -749,6 +779,8 @@ def create_completed_receipt(
                 box_id=box.id,
                 lot_id=box.lot_id,
                 lot=box.lot,
+                pallet_id=box.pallet_id,
+                pallet=_pallet_number_for_box(db, box),
                 box_number=box.box_number,
                 contents=box.contents,
             )
@@ -863,12 +895,25 @@ def create_staged_receipt(
         raise RequestRuleError(str(exc)) from exc
     for position, item in enumerate(rows, start=1):
         lot_record = lots_by_name[normalize_lot_name(item.lot)]
+        try:
+            pallet = resolve_or_create_active_pallet(
+                db,
+                user=user,
+                lot_id=lot_record.id,
+                warehouse_id=warehouse_id,
+                pallet_number=item.pallet_number,
+                pallet_id=item.pallet_id,
+            )
+        except PalletRuleError as exc:
+            raise RequestRuleError(str(exc)) from exc
         db.add(
             BoxRequestItem(
                 request_id=request.id,
                 position=position,
                 lot_id=lot_record.id,
                 lot=lot_record.name,
+                pallet_id=pallet.id,
+                pallet=pallet.pallet_number,
                 box_number=item.box_number,
                 contents=item.contents,
             )
@@ -1000,16 +1045,37 @@ def finalize_staged_receipt(
     target_status = (
         BoxStatus.quarantined if request.receipt_quarantine else BoxStatus.received
     )
+    pallets_by_item_id: dict[int, Pallet] = {}
+    for item in staged_items:
+        if item.pallet is None:
+            raise RequestConflictError(
+                "staged receipt item has no pallet snapshot; restage the receipt"
+            )
+        try:
+            pallets_by_item_id[item.id] = resolve_or_create_active_pallet(
+                db,
+                user=user,
+                lot_id=item.lot_id or 0,
+                warehouse_id=request.warehouse_id,
+                pallet_number=item.pallet,
+                pallet_id=item.pallet_id,
+                allow_snapshot_number_mismatch=True,
+            )
+        except PalletRuleError as exc:
+            raise RequestConflictError(str(exc)) from exc
     now = datetime.now(UTC)
     try:
         for item in staged_items:
             key = (item.lot_id, item.box_number or "")
+            target_pallet = pallets_by_item_id[item.id]
             box = (
                 restore_archived_box(
                     db,
                     user=user,
                     box_number=item.box_number or "",
                     lot_id=item.lot_id,
+                    pallet_number=target_pallet.pallet_number,
+                    pallet_id=target_pallet.id,
                     contents=item.contents,
                     warehouse_id=request.warehouse_id,
                     note=f"Restored through staged receipt #{request.id}.",
@@ -1022,6 +1088,8 @@ def finalize_staged_receipt(
                     user=user,
                     box_number=item.box_number or "",
                     lot_id=item.lot_id,
+                    pallet_number=target_pallet.pallet_number,
+                    pallet_id=target_pallet.id,
                     contents=item.contents,
                     warehouse_id=request.warehouse_id,
                     note=f"Created through staged receipt #{request.id}.",
@@ -1250,6 +1318,8 @@ def create_request(
                     box_id=box.id,
                     lot_id=box.lot_id,
                     lot=box.lot,
+                    pallet_id=box.pallet_id,
+                    pallet=_pallet_number_for_box(db, box),
                     box_number=box.box_number,
                     contents=box.contents,
                 )
@@ -2213,7 +2283,10 @@ def merge_inbound_items(items: list[InboundBoxItem]) -> list[InboundBoxItem]:
     ``(lot, box_number)``. Distinct contents are retained in source order and
     joined into the box's single contents field.
     """
-    grouped: dict[tuple[str, str], tuple[str, list[str]]] = {}
+    grouped: dict[
+        tuple[str, str],
+        tuple[str, str, str, int | None, list[str]],
+    ] = {}
     for item in items:
         try:
             lot = validate_lot_name(item.lot)
@@ -2224,24 +2297,63 @@ def merge_inbound_items(items: list[InboundBoxItem]) -> list[InboundBoxItem]:
             box_number = normalize_box_number(item.box_number)
         except BoxRuleError as exc:
             raise RequestRuleError(str(exc)) from exc
+        try:
+            pallet_number = clean_pallet_number(item.pallet_number)
+            normalized_pallet = normalize_pallet_number(pallet_number)
+        except ValueError as exc:
+            raise RequestRuleError(str(exc)) from exc
         key = (normalized_lot, box_number)
-        contents = grouped.setdefault(key, (lot, []))[1]
+        existing = grouped.get(key)
+        if existing is None:
+            grouped[key] = (
+                lot,
+                pallet_number,
+                normalized_pallet,
+                item.pallet_id,
+                [],
+            )
+        elif (
+            existing[2] != normalized_pallet
+            or (
+                existing[3] is not None
+                and item.pallet_id is not None
+                and existing[3] != item.pallet_id
+            )
+        ):
+            raise RequestRuleError(
+                f"box {box_number!r} in lot {lot!r} is assigned to "
+                "different pallet values"
+            )
+        elif existing[3] is None and item.pallet_id is not None:
+            grouped[key] = (
+                existing[0],
+                existing[1],
+                existing[2],
+                item.pallet_id,
+                existing[4],
+            )
+        contents = grouped[key][4]
         value = (item.contents or "").strip()
         if value and value not in contents:
             contents.append(value)
 
     merged: list[InboundBoxItem] = []
-    for (_normalized_lot, box_number), (lot, contents) in grouped.items():
+    for (
+        _normalized_lot,
+        box_number,
+    ), (lot, pallet_number, _normalized_pallet, pallet_id, contents) in grouped.items():
         combined = " | ".join(contents)
-        if len(combined) > 200:
+        if len(combined) > 2000:
             raise RequestRuleError(
                 f"combined contents for box {box_number!r} in lot {lot!r} "
-                "exceed 200 characters"
+                "exceed 2000 characters"
             )
         merged.append(
             InboundBoxItem(
                 lot=lot,
                 box_number=box_number,
+                pallet_number=pallet_number,
+                pallet_id=pallet_id,
                 contents=combined or None,
             )
         )
@@ -2333,9 +2445,12 @@ def complete_request(
                     user=user,
                     box_number=item.box_number,
                     lot_id=lot_record.id,
+                    pallet_number=item.pallet_number,
+                    pallet_id=item.pallet_id,
                     contents=item.contents,
                     warehouse_id=request.warehouse_id,
                     note=f"Received through request #{request.id}",
+                    receipt_authorized_pallet_creation=True,
                     commit=False,
                 )
                 db.add(
@@ -2345,6 +2460,8 @@ def complete_request(
                         box_id=box.id,
                         lot_id=box.lot_id,
                         lot=box.lot,
+                        pallet_id=box.pallet_id,
+                        pallet=_pallet_number_for_box(db, box),
                         box_number=box.box_number,
                         contents=box.contents,
                     )
@@ -2654,6 +2771,8 @@ def submit_follow_up_draft(
                 box_id=box.id,
                 lot_id=box.lot_id,
                 lot=box.lot,
+                pallet_id=box.pallet_id,
+                pallet=_pallet_number_for_box(db, box),
                 box_number=box.box_number,
                 contents=box.contents,
             )
