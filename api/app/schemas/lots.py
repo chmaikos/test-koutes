@@ -147,13 +147,11 @@ class LotPalletCollisionOut(BaseModel):
     normalized_pallet_number: str
     source_pallet_id: int
     source_pallet_number: str
-    source_warehouse_id: int
     source_is_active: bool
     target_pallet_id: int
     target_pallet_number: str
-    target_warehouse_id: int
     target_is_active: bool
-    reason: Literal["warehouse_mismatch", "inactive_target"]
+    reason: Literal["inactive_target"]
 
 
 class LotPalletMergeActionOut(BaseModel):
@@ -161,7 +159,6 @@ class LotPalletMergeActionOut(BaseModel):
 
     source_pallet_id: int
     source_pallet_number: str
-    source_warehouse_id: int
     source_is_active: bool
     action: Literal["combine", "transfer"]
     target_pallet_id: int | None

@@ -8,6 +8,7 @@ from app.models.alerts import Alert, AlertType
 from app.models.boxes import Box, BoxStatus
 from app.models.employees import Employee
 from app.models.lots import Lot
+from app.models.pallets import Pallet
 from app.models.requests import BoxRequest, BoxRequestDirection, BoxRequestStatus
 from app.models.users import UserRole
 from app.models.warehouses import Warehouse
@@ -40,6 +41,7 @@ def test_archive_reports_box_and_request_blockers(client, session):
 
     box = session.get(Box, created_box.json()["id"])
     assert box is not None
+    session.add(Pallet(lot_id=box.lot_id, pallet_number="EMPTY-ORGANIZATIONAL"))
     box.status = BoxStatus.returned
     session.commit()
     request = client.post(
@@ -66,16 +68,10 @@ def test_archive_reports_box_and_request_blockers(client, session):
     )
     assert detached.status_code == 200
     pallet_id = created_box.json()["pallet_id"]
-    pallet = client.get(f"/api/pallets/{pallet_id}").json()
-    archived_pallet = client.post(
-        f"/api/pallets/{pallet_id}/archive",
-        json={
-            "reason": "Preparing warehouse archive",
-            "expected_version": pallet["version"],
-        },
-    )
-    assert archived_pallet.status_code == 200
-    assert client.delete("/api/warehouses/1").status_code == 200
+    session.expire_all()
+    assert session.get(Pallet, pallet_id).is_active is False
+    archived = client.delete("/api/warehouses/1")
+    assert archived.status_code == 200
 
 
 def test_archive_cleanup_listing_restore_and_mutation_guards(

@@ -136,7 +136,9 @@ def test_force_lets_admin_resurrect_returned_box_and_clears_timestamp(client):
 def test_force_lets_admin_move_returned_box(client, session, monkeypatch):
     box_id = _create_box(client, box_number="001", warehouse_id=1)
     _advance(client, box_id, "ready_to_return", "returned")
-    returned_at = client.get(f"/api/boxes/{box_id}").json()["returned_at"]
+    original = client.get(f"/api/boxes/{box_id}").json()
+    returned_at = original["returned_at"]
+    pallet_id = original["pallet_id"]
     reservation_id = _reserve_return(session, box_id)
 
     rejected = client.patch(f"/api/boxes/{box_id}", json={"warehouse_id": 2})
@@ -161,6 +163,7 @@ def test_force_lets_admin_move_returned_box(client, session, monkeypatch):
     assert body["current_warehouse_id"] == 2
     assert body["status"] == "returned"
     assert body["returned_at"] == returned_at
+    assert body["pallet_id"] == pallet_id
     assert body["cancelled_request_ids"] == [reservation_id]
     assert session.get(BoxRequest, reservation_id).status == BoxRequestStatus.cancelled
 
@@ -178,6 +181,11 @@ def test_force_lets_admin_move_returned_box(client, session, monkeypatch):
         for event_type, payload in published
         if event_type == "box.updated"
     } == {1, 2}
+    assert {
+        (payload["id"], payload["warehouse_id"])
+        for event_type, payload in published
+        if event_type == "pallet.updated"
+    } == {(pallet_id, 1), (pallet_id, 2)}
 
 
 def test_force_requires_admin(client, make_user):

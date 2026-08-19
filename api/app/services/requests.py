@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import enum
+import hashlib
+import json
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import ROUND_CEILING, Decimal
@@ -20,7 +22,7 @@ from app.models.boxes import (
     BoxEventType,
     BoxStatus,
 )
-from app.models.lots import normalize_lot_name
+from app.models.lots import Lot, normalize_lot_name
 from app.models.notifications import RequestNotificationKind
 from app.models.pallets import Pallet, clean_pallet_number, normalize_pallet_number
 from app.models.requests import (
@@ -43,10 +45,19 @@ from app.models.requests import (
 )
 from app.models.users import User, UserRole
 from app.models.warehouses import Warehouse
-from app.schemas.requests import InboundBoxItem, RequestDiscrepancyInput
+from app.schemas.requests import (
+    InboundBoxItem,
+    InboundCompletionPreviewOut,
+    InboundCompletionPreviewRow,
+    InboundCompletionPreviewSummary,
+    InboundCompletionSourceWarehouseCount,
+    InboundCompletionTargetPalletOut,
+    RequestDiscrepancyInput,
+)
 from app.services.acl import can_access
 from app.services.boxes import (
     BoxRuleError,
+    _move_received_box_for_inbound_request,
     create_box,
     move_return_box_for_request,
     normalize_box_number,
@@ -2280,8 +2291,8 @@ def merge_inbound_items(items: list[InboundBoxItem]) -> list[InboundBoxItem]:
     """Collapse spreadsheet rows that describe the same physical box.
 
     A box is unique within a lot, so rows are grouped by canonical
-    ``(lot, box_number)``. Distinct contents are retained in source order and
-    joined into the box's single contents field.
+    ``(lot, box_number)``. Distinct contents are sorted canonically before they
+    are joined so row order cannot change the accepted or persisted result.
     """
     grouped: dict[
         tuple[str, str],
@@ -2332,6 +2343,18 @@ def merge_inbound_items(items: list[InboundBoxItem]) -> list[InboundBoxItem]:
                 item.pallet_id,
                 existing[4],
             )
+        existing = grouped[key]
+        grouped[key] = (
+            min(existing[0], lot, key=lambda value: (value.casefold(), value)),
+            min(
+                existing[1],
+                pallet_number,
+                key=lambda value: (value.casefold(), value),
+            ),
+            existing[2],
+            existing[3],
+            existing[4],
+        )
         contents = grouped[key][4]
         value = (item.contents or "").strip()
         if value and value not in contents:
@@ -2342,7 +2365,7 @@ def merge_inbound_items(items: list[InboundBoxItem]) -> list[InboundBoxItem]:
         _normalized_lot,
         box_number,
     ), (lot, pallet_number, _normalized_pallet, pallet_id, contents) in grouped.items():
-        combined = " | ".join(contents)
+        combined = " | ".join(sorted(contents))
         if len(combined) > 2000:
             raise RequestRuleError(
                 f"combined contents for box {box_number!r} in lot {lot!r} "
@@ -2360,17 +2383,553 @@ def merge_inbound_items(items: list[InboundBoxItem]) -> list[InboundBoxItem]:
     return merged
 
 
+@dataclass(frozen=True)
+class _PreviewPalletResolution:
+    output: InboundCompletionTargetPalletOut
+    pallet: Pallet | None
+    blocked_code: str | None
+    blocked_message: str | None
+    signature: dict[str, object]
+
+
+def _preview_pallet_resolution(
+    *,
+    item: InboundBoxItem,
+    lot: Lot | None,
+    pallets_by_id: dict[int, Pallet],
+    pallets_by_identity: dict[tuple[int, str], Pallet],
+) -> _PreviewPalletResolution:
+    normalized_number = normalize_pallet_number(item.pallet_number)
+    pallet: Pallet | None = None
+    blocked_code: str | None = None
+    blocked_message: str | None = None
+
+    if item.pallet_id is not None:
+        pallet = pallets_by_id.get(item.pallet_id)
+        if pallet is None:
+            blocked_code = "target_pallet_not_found"
+            blocked_message = f"pallet {item.pallet_id} not found"
+        elif lot is None or pallet.lot_id != lot.id:
+            blocked_code = "target_pallet_lot_mismatch"
+            blocked_message = "pallet does not belong to the receipt lot"
+        elif not pallet.is_active:
+            blocked_code = "target_pallet_archived"
+            blocked_message = "archived pallets cannot receive boxes"
+        elif pallet.normalized_pallet_number != normalized_number:
+            blocked_code = "target_pallet_identity_mismatch"
+            blocked_message = "pallet_id and pallet_number identify different pallets"
+    elif lot is not None:
+        pallet = pallets_by_identity.get((lot.id, normalized_number))
+        if pallet is not None:
+            if not pallet.is_active:
+                blocked_code = "target_pallet_archived"
+                blocked_message = f"pallet {pallet.pallet_number!r} is archived in this lot"
+
+    if blocked_code is not None:
+        resolution = "blocked"
+    elif pallet is None:
+        resolution = "will_create"
+    else:
+        resolution = "existing"
+    output = InboundCompletionTargetPalletOut(
+        resolution=resolution,
+        pallet_id=pallet.id if pallet is not None else None,
+        pallet_number=pallet.pallet_number if pallet is not None else item.pallet_number,
+    )
+    return _PreviewPalletResolution(
+        output=output,
+        pallet=pallet,
+        blocked_code=blocked_code,
+        blocked_message=blocked_message,
+        signature={
+            "resolution": resolution,
+            "exists": pallet is not None,
+            "id": pallet.id if pallet is not None else None,
+            "lot_id": pallet.lot_id if pallet is not None else None,
+            "number": (
+                pallet.pallet_number if pallet is not None else normalized_number
+            ),
+            "normalized_number": (
+                pallet.normalized_pallet_number
+                if pallet is not None
+                else normalized_number
+            ),
+            "version": pallet.version if pallet is not None else None,
+            "is_active": pallet.is_active if pallet is not None else None,
+            "archived_at": (
+                pallet.archived_at.isoformat()
+                if pallet is not None and pallet.archived_at is not None
+                else None
+            ),
+        },
+    )
+
+
+@dataclass(frozen=True)
+class _InboundCompletionImpact:
+    preview: InboundCompletionPreviewOut
+    items: list[InboundBoxItem]
+
+
+def _classify_inbound_completion(
+    db: Session,
+    *,
+    request_id: int,
+    user: User,
+    inbound_items: list[InboundBoxItem] | None = None,
+    lock_for_update: bool,
+) -> _InboundCompletionImpact:
+    """Classify one canonical inbound mapping, optionally locking its impact."""
+    request = (
+        _locked_request(db, request_id)
+        if lock_for_update
+        else db.get(BoxRequest, request_id)
+    )
+    if request is None or not can_access(user, request.warehouse_id):
+        raise RequestAccessError("request not found")
+    if request.direction != BoxRequestDirection.inbound:
+        raise RequestConflictError("request is not an inbound order")
+    if request.status != BoxRequestStatus.awaiting_confirmation:
+        raise RequestConflictError(
+            "only requests awaiting confirmation can be previewed"
+        )
+    if user.role != UserRole.admin and request.requester_user_id != user.id:
+        raise RequestAccessError("only the original requester can accept delivery")
+    if db.scalar(
+        select(BoxRequestException.id).where(
+            BoxRequestException.request_id == request.id,
+            BoxRequestException.resolved_at.is_(None),
+        )
+    ) is not None:
+        raise RequestConflictError(
+            "resolve the active operational exception before changing lifecycle state"
+        )
+
+    target_warehouse_stmt = select(Warehouse).where(
+        Warehouse.id == request.warehouse_id
+    )
+    if lock_for_update:
+        target_warehouse_stmt = target_warehouse_stmt.with_for_update(of=Warehouse)
+    target_warehouse = db.scalar(target_warehouse_stmt)
+    if target_warehouse is None or not target_warehouse.is_active:
+        raise RequestConflictError("target warehouse is archived")
+
+    supplied_items = list(inbound_items or [])
+    merged_rows = sorted(
+        merge_inbound_items(supplied_items),
+        key=lambda item: (
+            normalize_lot_name(item.lot),
+            item.box_number,
+        ),
+    )
+    normalized_lot_names = {normalize_lot_name(item.lot) for item in merged_rows}
+    if lock_for_update and merged_rows:
+        try:
+            resolve_lot_names_for_use(
+                db,
+                user=user,
+                names=[item.lot for item in merged_rows],
+                warehouse_id=target_warehouse.id,
+            )
+        except LotRuleError as exc:
+            raise RequestConflictError(str(exc)) from exc
+    lots_by_name: dict[str, Lot] = {}
+    if normalized_lot_names:
+        lot_stmt = (
+            select(Lot)
+            .where(
+                Lot.normalized_name.in_(sorted(normalized_lot_names)),
+                Lot.merged_into_lot_id.is_(None),
+            )
+            .order_by(Lot.id)
+        )
+        if lock_for_update:
+            lot_stmt = lot_stmt.with_for_update(of=Lot)
+        lots_by_name = {
+            lot.normalized_name: lot
+            for lot in db.scalars(lot_stmt).all()
+            if lot.normalized_name is not None
+        }
+
+    lot_ids = {lot.id for lot in lots_by_name.values()}
+    box_numbers = {item.box_number for item in merged_rows}
+    existing_boxes: list[Box] = []
+    if lot_ids and box_numbers:
+        box_stmt = (
+            select(Box)
+            .where(
+                Box.lot_id.in_(sorted(lot_ids)),
+                Box.box_number.in_(sorted(box_numbers)),
+            )
+            .order_by(Box.id)
+        )
+        existing_boxes = list(db.scalars(box_stmt).all())
+    boxes_by_identity = {
+        (box.lot_id, box.box_number): box for box in existing_boxes
+    }
+
+    mapped_pallet_ids = {
+        item.pallet_id for item in merged_rows if item.pallet_id is not None
+    }
+    current_pallet_ids = {
+        box.pallet_id for box in existing_boxes if box.pallet_id is not None
+    }
+    pallets_by_id = (
+        {
+            pallet.id: pallet
+            for pallet in db.scalars(
+                select(Pallet).where(
+                    Pallet.id.in_(sorted(mapped_pallet_ids | current_pallet_ids))
+                )
+            ).all()
+        }
+        if mapped_pallet_ids or current_pallet_ids
+        else {}
+    )
+    normalized_pallet_numbers = {
+        normalize_pallet_number(item.pallet_number) for item in merged_rows
+    }
+    identity_pallets = (
+        db.scalars(
+            select(Pallet).where(
+                Pallet.lot_id.in_(sorted(lot_ids)),
+                Pallet.normalized_pallet_number.in_(
+                    sorted(normalized_pallet_numbers)
+                ),
+            )
+        ).all()
+        if lot_ids and normalized_pallet_numbers
+        else []
+    )
+    pallets_by_identity = {
+        (pallet.lot_id, pallet.normalized_pallet_number): pallet
+        for pallet in identity_pallets
+    }
+    for pallet in identity_pallets:
+        pallets_by_id.setdefault(pallet.id, pallet)
+    if lock_for_update and pallets_by_id:
+        locked_pallets = list(
+            db.scalars(
+                select(Pallet)
+                .where(Pallet.id.in_(sorted(pallets_by_id)))
+                .order_by(Pallet.id)
+                .with_for_update(of=Pallet)
+            ).all()
+        )
+        pallets_by_id = {pallet.id: pallet for pallet in locked_pallets}
+        pallets_by_identity = {
+            (pallet.lot_id, pallet.normalized_pallet_number): pallet
+            for pallet in locked_pallets
+        }
+    if lock_for_update and existing_boxes:
+        preliminary_pallet_ids = current_pallet_ids
+        existing_boxes = list(
+            db.scalars(
+                select(Box)
+                .where(Box.id.in_(sorted(box.id for box in existing_boxes)))
+                .order_by(Box.id)
+                .with_for_update(of=Box)
+            ).all()
+        )
+        if any(
+            box.pallet_id is not None
+            and box.pallet_id not in preliminary_pallet_ids
+            and box.pallet_id not in mapped_pallet_ids
+            for box in existing_boxes
+        ):
+            raise RequestConflictError(
+                "inbound inventory changed while locks were acquired; retry"
+            )
+        boxes_by_identity = {
+            (box.lot_id, box.box_number): box for box in existing_boxes
+        }
+
+    box_ids = {box.id for box in existing_boxes}
+    reservation_ids_by_box_id: dict[int, list[int]] = {
+        box_id: [] for box_id in box_ids
+    }
+    if box_ids:
+        return_reference_rows = db.execute(
+            select(BoxRequestItem.box_id, BoxRequest.id, BoxRequest.status)
+            .join(BoxRequest, BoxRequest.id == BoxRequestItem.request_id)
+            .where(
+                BoxRequestItem.box_id.in_(sorted(box_ids)),
+                BoxRequest.direction == BoxRequestDirection.return_,
+            )
+            .distinct()
+            .order_by(BoxRequestItem.box_id, BoxRequest.id)
+        ).all()
+        for box_id, active_request_id, request_status in return_reference_rows:
+            if request_status not in ACTIVE_REQUEST_STATUSES:
+                continue
+            if box_id is not None:
+                reservation_ids_by_box_id[box_id].append(active_request_id)
+
+    source_warehouse_ids = {
+        box.current_warehouse_id for box in existing_boxes
+    }
+    warehouses_by_id = {
+        warehouse.id: warehouse
+        for warehouse in db.scalars(
+            select(Warehouse).where(
+                Warehouse.id.in_(
+                    sorted(source_warehouse_ids | {target_warehouse.id})
+                )
+            )
+        ).all()
+    }
+
+    canonical_contents: dict[tuple[str, str], list[str]] = {}
+    for item in supplied_items:
+        identity = (normalize_lot_name(item.lot), item.box_number)
+        value = (item.contents or "").strip()
+        if value:
+            canonical_contents.setdefault(identity, []).append(value)
+
+    rows: list[InboundCompletionPreviewRow] = []
+    signature_rows: list[dict[str, object]] = []
+    source_counts: dict[int, int] = {}
+    for item in merged_rows:
+        normalized_lot = normalize_lot_name(item.lot)
+        lot = lots_by_name.get(normalized_lot)
+        box = (
+            boxes_by_identity.get((lot.id, item.box_number))
+            if lot is not None
+            else None
+        )
+        reservations = (
+            reservation_ids_by_box_id.get(box.id, []) if box is not None else []
+        )
+        target_pallet = _preview_pallet_resolution(
+            item=item,
+            lot=lot,
+            pallets_by_id=pallets_by_id,
+            pallets_by_identity=pallets_by_identity,
+        )
+
+        blocked_code: str | None = None
+        blocked_message: str | None = None
+        if box is None:
+            classification = "create"
+        elif box.archived_at is not None:
+            classification = "blocked"
+            blocked_code = "archived_identity"
+            blocked_message = (
+                f"box {box.box_number!r} in lot {item.lot!r} is archived"
+            )
+        elif box.current_warehouse_id == target_warehouse.id:
+            classification = "blocked"
+            blocked_code = "existing_at_target"
+            blocked_message = (
+                f"box {box.box_number!r} already exists in the target warehouse"
+            )
+        elif box.status != BoxStatus.received:
+            classification = "blocked"
+            blocked_code = "invalid_status"
+            blocked_message = (
+                f"box {box.box_number!r} has status {box.status.value!r}; "
+                "only received boxes can be relocated"
+            )
+        elif reservations:
+            classification = "blocked"
+            blocked_code = "active_return_reservation"
+            rendered = ", ".join(f"#{reservation_id}" for reservation_id in reservations)
+            blocked_message = (
+                f"box {box.box_number!r} is reserved by active return "
+                f"request(s) {rendered}"
+            )
+        else:
+            classification = "relocate"
+
+        if target_pallet.blocked_code is not None and classification != "blocked":
+            classification = "blocked"
+            blocked_code = target_pallet.blocked_code
+            blocked_message = target_pallet.blocked_message
+
+        source_warehouse = (
+            warehouses_by_id.get(box.current_warehouse_id)
+            if box is not None
+            else None
+        )
+        current_pallet = (
+            pallets_by_id.get(box.pallet_id)
+            if box is not None and box.pallet_id is not None
+            else None
+        )
+        row = InboundCompletionPreviewRow(
+            classification=classification,
+            lot=item.lot,
+            box_number=item.box_number,
+            normalized_lot=normalized_lot,
+            normalized_box_number=item.box_number,
+            mapped_pallet_number=item.pallet_number,
+            mapped_pallet_id=item.pallet_id,
+            existing_box_id=box.id if box is not None else None,
+            current_status=box.status if box is not None else None,
+            source_warehouse_id=(
+                box.current_warehouse_id if box is not None else None
+            ),
+            source_warehouse_name=(
+                source_warehouse.name if source_warehouse is not None else None
+            ),
+            current_pallet_id=box.pallet_id if box is not None else None,
+            current_pallet_number=(
+                current_pallet.pallet_number if current_pallet is not None else None
+            ),
+            target_warehouse_id=target_warehouse.id,
+            target_warehouse_name=target_warehouse.name,
+            target_pallet_resolution=target_pallet.output,
+            active_return_reservation_ids=reservations,
+            blocked_code=blocked_code,
+            blocked_message=blocked_message,
+        )
+        rows.append(row)
+        if classification == "relocate" and box is not None:
+            source_counts[box.current_warehouse_id] = (
+                source_counts.get(box.current_warehouse_id, 0) + 1
+            )
+        signature_rows.append(
+            {
+                "normalized_lot": normalized_lot,
+                "normalized_box_number": item.box_number,
+                "normalized_pallet_number": normalize_pallet_number(
+                    item.pallet_number
+                ),
+                "mapped_pallet_id": item.pallet_id,
+                "contents": sorted(
+                    set(
+                        canonical_contents.get(
+                            (normalized_lot, item.box_number),
+                            [],
+                        )
+                    )
+                ),
+                "existing_box": (
+                    {
+                        "id": box.id,
+                        "status": box.status.value,
+                        "archived_at": (
+                            box.archived_at.isoformat()
+                            if box.archived_at is not None
+                            else None
+                        ),
+                        "current_warehouse_id": box.current_warehouse_id,
+                        "current_pallet_id": box.pallet_id,
+                        "current_pallet_number": (
+                            current_pallet.pallet_number
+                            if current_pallet is not None
+                            else None
+                        ),
+                        "current_pallet": (
+                            {
+                                "id": current_pallet.id,
+                                "lot_id": current_pallet.lot_id,
+                                "number": current_pallet.pallet_number,
+                                "normalized_number": (
+                                    current_pallet.normalized_pallet_number
+                                ),
+                                "version": current_pallet.version,
+                                "is_active": current_pallet.is_active,
+                                "archived_at": (
+                                    current_pallet.archived_at.isoformat()
+                                    if current_pallet.archived_at is not None
+                                    else None
+                                ),
+                            }
+                            if current_pallet is not None
+                            else None
+                        ),
+                    }
+                    if box is not None
+                    else None
+                ),
+                "active_return_reservation_ids": reservations,
+                "target_pallet": target_pallet.signature,
+            }
+        )
+
+    created = sum(row.classification == "create" for row in rows)
+    relocated = sum(row.classification == "relocate" for row in rows)
+    blocked = sum(row.classification == "blocked" for row in rows)
+    source_warehouse_counts = [
+        InboundCompletionSourceWarehouseCount(
+            warehouse_id=warehouse_id,
+            warehouse_name=warehouses_by_id[warehouse_id].name,
+            count=count,
+        )
+        for warehouse_id, count in sorted(source_counts.items())
+    ]
+    signature_payload = {
+        "request_id": request.id,
+        "request_version": request.version,
+        "target_warehouse": {
+            "id": target_warehouse.id,
+            "name": target_warehouse.name,
+            "is_active": target_warehouse.is_active,
+        },
+        "rows": signature_rows,
+    }
+    impact_signature = hashlib.sha256(
+        json.dumps(
+            signature_payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
+    return _InboundCompletionImpact(
+        preview=InboundCompletionPreviewOut(
+            request_id=request.id,
+            request_version=request.version,
+            target_warehouse_id=target_warehouse.id,
+            target_warehouse_name=target_warehouse.name,
+            impact_signature=impact_signature,
+            can_complete=blocked == 0,
+            summary=InboundCompletionPreviewSummary(
+                created=created,
+                relocated=relocated,
+                blocked=blocked,
+                source_warehouse_counts=source_warehouse_counts,
+            ),
+            rows=rows,
+        ),
+        items=merged_rows,
+    )
+
+
+def preview_inbound_completion(
+    db: Session,
+    *,
+    request_id: int,
+    user: User,
+    inbound_items: list[InboundBoxItem] | None = None,
+) -> InboundCompletionPreviewOut:
+    """Classify an inbound mapping without changing persistent state."""
+    with db.no_autoflush:
+        return _classify_inbound_completion(
+            db,
+            request_id=request_id,
+            user=user,
+            inbound_items=inbound_items,
+            lock_for_update=False,
+        ).preview
+
+
 def complete_request(
     db: Session,
     *,
     request_id: int,
     user: User,
     inbound_items: list[InboundBoxItem] | None = None,
+    accept_existing_received_boxes: bool = False,
+    inbound_impact_signature: str | None = None,
     collected_box_ids: list[int] | None = None,
     discrepancies: list[RequestDiscrepancyInput] | None = None,
     discrepancy_reason: str | None = None,
     expected_version: int,
     idempotency_key: str,
+    affected_warehouse_ids: set[int] | None = None,
+    affected_pallet_warehouse_ids: dict[int, set[int]] | None = None,
 ) -> BoxRequest:
     request = _locked_request(db, request_id)
     if not can_access(user, request.warehouse_id):
@@ -2384,6 +2943,48 @@ def complete_request(
                 raise RequestAccessError("only the original requester can accept delivery")
         else:
             _require_mover(user)
+        if affected_warehouse_ids is not None:
+            affected_warehouse_ids.add(request.warehouse_id)
+            if request.target_warehouse_id is not None:
+                affected_warehouse_ids.add(request.target_warehouse_id)
+            completed_event = db.scalar(
+                select(BoxRequestEvent)
+                .where(
+                    BoxRequestEvent.request_id == request.id,
+                    BoxRequestEvent.event_type.in_(
+                        (
+                            BoxRequestEventType.completed,
+                            BoxRequestEventType.partial_completion,
+                        )
+                    ),
+                )
+                .order_by(BoxRequestEvent.id.desc())
+            )
+            metadata = completed_event.event_metadata if completed_event else {}
+            for source_id in (metadata or {}).get("source_warehouse_ids", []):
+                if isinstance(source_id, int):
+                    affected_warehouse_ids.add(source_id)
+            if affected_pallet_warehouse_ids is not None:
+                stored_pallet_warehouses = (metadata or {}).get(
+                    "affected_pallet_warehouse_ids", {}
+                )
+                if isinstance(stored_pallet_warehouses, dict):
+                    for raw_pallet_id, raw_warehouse_ids in (
+                        stored_pallet_warehouses.items()
+                    ):
+                        try:
+                            pallet_id = int(raw_pallet_id)
+                        except (TypeError, ValueError):
+                            continue
+                        if not isinstance(raw_warehouse_ids, list):
+                            continue
+                        affected_pallet_warehouse_ids.setdefault(
+                            pallet_id, set()
+                        ).update(
+                            warehouse_id
+                            for warehouse_id in raw_warehouse_ids
+                            if isinstance(warehouse_id, int)
+                        )
         return request
     _check_common(request, user=user, expected_version=expected_version)
     _require_no_open_exception(db, request)
@@ -2395,6 +2996,13 @@ def complete_request(
     supplied_discrepancies = list(discrepancies or [])
     cleaned_reason = (discrepancy_reason or "").strip()
     completion_event = BoxRequestEventType.completed
+    created_box_ids: list[int] = []
+    relocated_box_ids: list[int] = []
+    relocation_source_counts: dict[int, int] = {}
+    if affected_warehouse_ids is not None:
+        affected_warehouse_ids.add(request.warehouse_id)
+        if request.target_warehouse_id is not None:
+            affected_warehouse_ids.add(request.target_warehouse_id)
     if request.direction == BoxRequestDirection.inbound:
         if user.role != UserRole.admin and request.requester_user_id != user.id:
             raise RequestAccessError("only the original requester can accept delivery")
@@ -2432,27 +3040,127 @@ def complete_request(
         if request.items:
             raise RequestConflictError("inbound items have already been recorded")
         try:
+            impact = _classify_inbound_completion(
+                db,
+                request_id=request.id,
+                user=user,
+                inbound_items=inbound_items,
+                lock_for_update=True,
+            )
+        except RequestRuleError:
+            db.rollback()
+            raise
+        current_signature = impact.preview.impact_signature
+        if (
+            inbound_impact_signature is not None
+            and inbound_impact_signature != current_signature
+        ):
+            db.rollback()
+            raise RequestConflictError(
+                "inbound impact changed; refresh the preview and retry"
+            )
+        if impact.preview.summary.blocked:
+            first_blocked = next(
+                row for row in impact.preview.rows if row.classification == "blocked"
+            )
+            db.rollback()
+            raise RequestConflictError(
+                f"inbound completion is blocked ({first_blocked.blocked_code}): "
+                f"{first_blocked.blocked_message}"
+            )
+        if affected_warehouse_ids is not None:
+            affected_warehouse_ids.update(
+                entry.warehouse_id
+                for entry in impact.preview.summary.source_warehouse_counts
+            )
+        if impact.preview.summary.relocated:
+            if not accept_existing_received_boxes:
+                db.rollback()
+                raise RequestConflictError(
+                    "explicit acceptance is required to relocate existing received boxes"
+                )
+            if inbound_impact_signature is None:
+                db.rollback()
+                raise RequestConflictError(
+                    "inbound_impact_signature is required for existing box relocation"
+                )
+        rows = impact.items
+        try:
             lots_by_name = resolve_lot_names_for_use(
                 db,
                 user=user,
                 names=[item.lot for item in rows],
                 warehouse_id=request.warehouse_id,
             )
-            for position, item in enumerate(rows, start=1):
+            for position, (item, preview_row) in enumerate(
+                zip(rows, impact.preview.rows, strict=True),
+                start=1,
+            ):
                 lot_record = lots_by_name[normalize_lot_name(item.lot)]
-                box = create_box(
+                target_pallet = resolve_or_create_active_pallet(
                     db,
                     user=user,
-                    box_number=item.box_number,
                     lot_id=lot_record.id,
+                    warehouse_id=request.warehouse_id,
                     pallet_number=item.pallet_number,
                     pallet_id=item.pallet_id,
-                    contents=item.contents,
-                    warehouse_id=request.warehouse_id,
-                    note=f"Received through request #{request.id}",
-                    receipt_authorized_pallet_creation=True,
-                    commit=False,
+                    receipt_creation_authorized=True,
                 )
+                if preview_row.classification == "create":
+                    box = create_box(
+                        db,
+                        user=user,
+                        box_number=item.box_number,
+                        lot_id=lot_record.id,
+                        pallet_number=target_pallet.pallet_number,
+                        pallet_id=target_pallet.id,
+                        contents=item.contents,
+                        warehouse_id=request.warehouse_id,
+                        note=f"Received through request #{request.id}",
+                        receipt_authorized_pallet_creation=True,
+                        commit=False,
+                    )
+                    created_box_ids.append(box.id)
+                    if affected_pallet_warehouse_ids is not None:
+                        affected_pallet_warehouse_ids.setdefault(
+                            target_pallet.id, set()
+                        ).add(request.warehouse_id)
+                else:
+                    if preview_row.existing_box_id is None:
+                        raise RequestConflictError(
+                            "relocation preview lost its existing box identity"
+                        )
+                    box = db.get(Box, preview_row.existing_box_id)
+                    if box is None:
+                        raise RequestConflictError(
+                            "relocation preview box no longer exists"
+                        )
+                    source_warehouse_id = box.current_warehouse_id
+                    source_pallet_id = box.pallet_id
+                    _move_received_box_for_inbound_request(
+                        db,
+                        user=user,
+                        box=box,
+                        request_id=request.id,
+                        target_warehouse_id=request.warehouse_id,
+                        target_pallet=target_pallet,
+                        mapped_contents=item.contents,
+                        commit=False,
+                    )
+                    relocated_box_ids.append(box.id)
+                    relocation_source_counts[source_warehouse_id] = (
+                        relocation_source_counts.get(source_warehouse_id, 0) + 1
+                    )
+                    if affected_warehouse_ids is not None:
+                        affected_warehouse_ids.add(source_warehouse_id)
+                    if affected_pallet_warehouse_ids is not None:
+                        if source_pallet_id is not None:
+                            affected_pallet_warehouse_ids.setdefault(
+                                source_pallet_id, set()
+                            ).add(source_warehouse_id)
+                        affected_pallet_warehouse_ids.setdefault(
+                            target_pallet.id, set()
+                        ).add(request.warehouse_id)
                 db.add(
                     BoxRequestItem(
                         request_id=request.id,
@@ -2466,7 +3174,10 @@ def complete_request(
                         contents=box.contents,
                     )
                 )
-        except BoxRuleError as exc:
+        except RequestConflictError:
+            db.rollback()
+            raise
+        except (BoxRuleError, LotRuleError, PalletRuleError, IntegrityError) as exc:
             db.rollback()
             raise RequestConflictError(str(exc)) from exc
         db.flush()
@@ -2607,14 +3318,45 @@ def complete_request(
         now=now,
         metadata={
             "request_id": request.id,
-            "source_warehouse_id": request.warehouse_id,
-            "target_warehouse_id": request.target_warehouse_id,
+            "source_warehouse_id": (
+                next(iter(relocation_source_counts))
+                if request.direction == BoxRequestDirection.inbound
+                and len(relocation_source_counts) == 1
+                else (
+                    None
+                    if request.direction == BoxRequestDirection.inbound
+                    else request.warehouse_id
+                )
+            ),
+            "source_warehouse_ids": (
+                sorted(relocation_source_counts)
+                if request.direction == BoxRequestDirection.inbound
+                else [request.warehouse_id]
+            ),
+            "target_warehouse_id": (
+                request.warehouse_id
+                if request.direction == BoxRequestDirection.inbound
+                else request.target_warehouse_id
+            ),
             "requested_quantity": request.quantity,
             "actual_quantity": request.actual_received_quantity,
             "variance_quantity": request.variance_quantity,
             "discrepancy_types": sorted(
                 {entry.discrepancy_type.value for entry in supplied_discrepancies}
             ),
+            "created_box_ids": created_box_ids,
+            "relocated_box_ids": relocated_box_ids,
+            "relocation_source_warehouse_counts": {
+                str(warehouse_id): count
+                for warehouse_id, count in sorted(relocation_source_counts.items())
+            },
+            "affected_pallet_warehouse_ids": {
+                str(pallet_id): sorted(warehouse_ids)
+                for pallet_id, warehouse_ids in sorted(
+                    (affected_pallet_warehouse_ids or {}).items()
+                )
+            },
+            "accept_existing_received_boxes": accept_existing_received_boxes,
         },
     )
     enqueue_request_event(
@@ -2623,7 +3365,13 @@ def complete_request(
         kind=RequestNotificationKind.confirmation_received,
         event_token=f"completed:{request.version}",
     )
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise RequestConflictError(
+            "request completion conflicted with a concurrent inventory change"
+        ) from exc
     db.refresh(request)
     return request
 

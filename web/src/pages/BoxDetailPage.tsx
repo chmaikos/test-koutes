@@ -240,8 +240,8 @@ export function BoxDetailPage() {
         <section className="card card-pad">
           <h2 className="font-semibold">Pallet assignment</h2>
           <p className="mt-1 text-sm text-slate-600">
-            Assign or reassign this box within its current lot and warehouse,
-            or detach it from its pallet.
+            Assign or reassign this box to any pallet in its current lot, or
+            detach it. The box remains in its own warehouse.
           </p>
           <div className="mt-3 grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto_auto] md:items-end">
             <PalletPicker

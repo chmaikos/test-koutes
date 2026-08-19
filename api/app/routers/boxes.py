@@ -223,6 +223,11 @@ async def create_new_box(
         "box.updated",
         {"id": box.id, "warehouse_id": box.current_warehouse_id, "status": box.status.value},
     )
+    if box.pallet_id is not None:
+        await bus.publish(
+            "pallet.updated",
+            {"id": box.pallet_id, "warehouse_id": box.current_warehouse_id},
+        )
     background.add_task(evaluate_safe, db)
     return BoxOut.model_validate(box).model_copy(
         update={"receipt_request_id": receipt.id}
@@ -259,6 +264,14 @@ async def bulk_update(
     # spamming subscribers with hundreds of identical box.updated messages.
     for wid in outcome.affected_warehouse_ids:
         await bus.publish("box.updated", {"warehouse_id": wid, "bulk": True})
+    for pallet_id, warehouse_ids in sorted(
+        outcome.affected_pallet_warehouse_ids.items()
+    ):
+        for warehouse_id in sorted(warehouse_ids):
+            await bus.publish(
+                "pallet.updated",
+                {"id": pallet_id, "warehouse_id": warehouse_id},
+            )
     for request_id in outcome.cancelled_request_ids:
         await _publish_request_update(db, request_id)
     if outcome.updated:
@@ -516,6 +529,14 @@ async def patch_box(
             "box.updated",
             {"id": box.id, "warehouse_id": warehouse_id, "status": box.status.value},
         )
+    for pallet_id in {
+        value for value in (source_pallet_id, box.pallet_id) if value is not None
+    }:
+        for warehouse_id in {source_warehouse_id, box.current_warehouse_id}:
+            await bus.publish(
+                "pallet.updated",
+                {"id": pallet_id, "warehouse_id": warehouse_id},
+            )
     for request_id in cancelled_request_ids:
         await _publish_request_update(db, request_id)
     background.add_task(evaluate_safe, db)

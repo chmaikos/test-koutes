@@ -117,20 +117,17 @@ class LotPalletCollision:
     normalized_pallet_number: str
     source_pallet_id: int
     source_pallet_number: str
-    source_warehouse_id: int
     source_is_active: bool
     target_pallet_id: int
     target_pallet_number: str
-    target_warehouse_id: int
     target_is_active: bool
-    reason: Literal["warehouse_mismatch", "inactive_target"]
+    reason: Literal["inactive_target"]
 
 
 @dataclass(frozen=True)
 class LotPalletMergeAction:
     source_pallet_id: int
     source_pallet_number: str
-    source_warehouse_id: int
     source_is_active: bool
     action: Literal["combine", "transfer"]
     target_pallet_id: int | None = None
@@ -2152,18 +2149,19 @@ def _pallet_purge_snapshots(
         pallet.id: {"assigned": 0, "active": 0, "archived": 0}
         for pallet in pallets
     }
+    warehouse_ids: dict[int, set[int]] = {pallet.id: set() for pallet in pallets}
     for box in boxes:
         if box.pallet_id not in counts:
             continue
         bucket = counts[box.pallet_id]
         bucket["assigned"] += 1
         bucket["archived" if box.archived_at is not None else "active"] += 1
+        warehouse_ids[box.pallet_id].add(box.current_warehouse_id)
     return [
         {
             "id": pallet.id,
             "pallet_number": pallet.pallet_number,
             "normalized_pallet_number": pallet.normalized_pallet_number,
-            "warehouse_id": pallet.current_warehouse_id,
             "version": pallet.version,
             "is_active": pallet.is_active,
             "archived_at": _collision_timestamp(pallet.archived_at),
@@ -2173,6 +2171,7 @@ def _pallet_purge_snapshots(
             "assigned_box_count": counts[pallet.id]["assigned"],
             "active_box_count": counts[pallet.id]["active"],
             "archived_box_count": counts[pallet.id]["archived"],
+            "warehouse_ids": sorted(warehouse_ids[pallet.id]),
         }
         for pallet in pallets
     ]
@@ -3925,7 +3924,6 @@ def _pallet_signature_value(pallet: Pallet) -> dict[str, object]:
         "lot_id": pallet.lot_id,
         "pallet_number": pallet.pallet_number,
         "normalized_pallet_number": pallet.normalized_pallet_number,
-        "warehouse_id": pallet.current_warehouse_id,
         "version": pallet.version,
         "is_active": pallet.is_active,
         "archived_at": _collision_timestamp(pallet.archived_at),
@@ -4150,17 +4148,14 @@ def _merge_candidate(
                 LotPalletMergeAction(
                     source_pallet_id=source_pallet.id,
                     source_pallet_number=source_pallet.pallet_number,
-                    source_warehouse_id=source_pallet.current_warehouse_id,
                     source_is_active=source_pallet.is_active,
                     action="transfer",
                     box_count=pallet_box_counts.get(source_pallet.id, 0),
                 )
             )
             continue
-        collision_reason: Literal["warehouse_mismatch", "inactive_target"] | None = None
-        if target_pallet.current_warehouse_id != source_pallet.current_warehouse_id:
-            collision_reason = "warehouse_mismatch"
-        elif not target_pallet.is_active:
+        collision_reason: Literal["inactive_target"] | None = None
+        if not target_pallet.is_active:
             collision_reason = "inactive_target"
         if collision_reason is not None:
             pallet_collisions.append(
@@ -4168,11 +4163,9 @@ def _merge_candidate(
                     normalized_pallet_number=source_pallet.normalized_pallet_number,
                     source_pallet_id=source_pallet.id,
                     source_pallet_number=source_pallet.pallet_number,
-                    source_warehouse_id=source_pallet.current_warehouse_id,
                     source_is_active=source_pallet.is_active,
                     target_pallet_id=target_pallet.id,
                     target_pallet_number=target_pallet.pallet_number,
-                    target_warehouse_id=target_pallet.current_warehouse_id,
                     target_is_active=target_pallet.is_active,
                     reason=collision_reason,
                 )
@@ -4182,7 +4175,6 @@ def _merge_candidate(
             LotPalletMergeAction(
                 source_pallet_id=source_pallet.id,
                 source_pallet_number=source_pallet.pallet_number,
-                source_warehouse_id=source_pallet.current_warehouse_id,
                 source_is_active=source_pallet.is_active,
                 action="combine",
                 target_pallet_id=target_pallet.id,
@@ -5185,8 +5177,6 @@ def merge_lots(
                         event_type=PalletEventType.merged_absorbed,
                         old_pallet_number=source_pallet.pallet_number,
                         new_pallet_number=target_pallet.pallet_number,
-                        from_warehouse_id=source_pallet.current_warehouse_id,
-                        to_warehouse_id=target_pallet.current_warehouse_id,
                         actor_user_id=user.id,
                         reason=cleaned_reason,
                         occurred_at=now,

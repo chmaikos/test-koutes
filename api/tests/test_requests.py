@@ -940,6 +940,7 @@ def test_cross_warehouse_return_moves_boxes_with_audit_and_source_only_mover(
         lot="CROSS-TARGET",
     )
     boxes[0].status = BoxStatus.ready_to_return
+    original_pallet_id = boxes[0].pallet_id
     mover.warehouses = [session.get(Warehouse, 1)]
     session.commit()
     _as_user(app, requester)
@@ -955,6 +956,7 @@ def test_cross_warehouse_return_moves_boxes_with_audit_and_source_only_mover(
         },
     )
     assert created.status_code == 201
+    assert created.json()["items"][0]["pallet_id"] == original_pallet_id
     request_id = created.json()["id"]
     _prepare_return_for_completion(client, request_id, mover, monkeypatch)
 
@@ -973,6 +975,8 @@ def test_cross_warehouse_return_moves_boxes_with_audit_and_source_only_mover(
     assert moved_box.current_warehouse_id == 2
     assert moved_box.status == BoxStatus.returned
     assert moved_box.returned_at is not None
+    assert moved_box.pallet_id == original_pallet_id
+    assert session.get(BoxRequest, request_id).items[0].pallet_id == original_pallet_id
 
     box_events = session.scalars(
         select(BoxEvent)
@@ -1012,7 +1016,13 @@ def test_cross_warehouse_return_moves_boxes_with_audit_and_source_only_mover(
     box_sse = [
         data for event_type, data in published if event_type == "box.updated"
     ]
+    pallet_sse = [
+        data for event_type, data in published if event_type == "pallet.updated"
+    ]
     assert {payload["warehouse_id"] for payload in box_sse} == {1, 2}
+    assert {
+        (payload["id"], payload["warehouse_id"]) for payload in pallet_sse
+    } == {(original_pallet_id, 1), (original_pallet_id, 2)}
     for payload in (request_sse, *box_sse):
         assert payload["request_id"] == request_id
         assert payload["source_warehouse_id"] == 1

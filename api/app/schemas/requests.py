@@ -161,6 +161,68 @@ class InboundBoxItem(BaseModel):
             raise ValueError(str(exc)) from exc
 
 
+InboundCompletionClassification = Literal["create", "relocate", "blocked"]
+InboundTargetPalletResolution = Literal["existing", "will_create", "blocked"]
+
+
+class InboundCompletionPreviewRequest(BaseModel):
+    inbound_items: list[InboundBoxItem] | None = Field(default=None, max_length=5000)
+
+
+class InboundCompletionTargetPalletOut(BaseModel):
+    resolution: InboundTargetPalletResolution
+    pallet_id: int | None
+    pallet_number: str
+
+
+class InboundCompletionSourceWarehouseCount(BaseModel):
+    warehouse_id: int
+    warehouse_name: str
+    count: int
+
+
+class InboundCompletionPreviewRow(BaseModel):
+    classification: InboundCompletionClassification
+    lot: str
+    box_number: str
+    normalized_lot: str
+    normalized_box_number: str
+    mapped_pallet_number: str
+    mapped_pallet_id: int | None
+    existing_box_id: int | None
+    current_status: BoxStatus | None
+    source_warehouse_id: int | None
+    source_warehouse_name: str | None
+    current_pallet_id: int | None
+    current_pallet_number: str | None
+    target_warehouse_id: int
+    target_warehouse_name: str
+    target_pallet_resolution: InboundCompletionTargetPalletOut
+    active_return_reservation_ids: list[int] = Field(default_factory=list)
+    blocked_code: str | None = None
+    blocked_message: str | None = None
+
+
+class InboundCompletionPreviewSummary(BaseModel):
+    created: int
+    relocated: int
+    blocked: int
+    source_warehouse_counts: list[InboundCompletionSourceWarehouseCount] = Field(
+        default_factory=list
+    )
+
+
+class InboundCompletionPreviewOut(BaseModel):
+    request_id: int
+    request_version: int
+    target_warehouse_id: int
+    target_warehouse_name: str
+    impact_signature: str
+    can_complete: bool
+    summary: InboundCompletionPreviewSummary
+    rows: list[InboundCompletionPreviewRow]
+
+
 class RequestDiscrepancyInput(BaseModel):
     discrepancy_type: BoxRequestDiscrepancyType
     request_item_id: int | None = Field(default=None, ge=1)
@@ -172,6 +234,13 @@ class RequestDiscrepancyInput(BaseModel):
 class RequestComplete(RequestAction):
     idempotency_key: str = Field(min_length=8, max_length=120)
     inbound_items: list[InboundBoxItem] | None = Field(default=None, max_length=5000)
+    accept_existing_received_boxes: bool = False
+    inbound_impact_signature: str | None = Field(
+        default=None,
+        min_length=64,
+        max_length=64,
+        pattern=r"^[0-9a-f]{64}$",
+    )
     collected_box_ids: list[int] | None = Field(default=None, max_length=5000)
     discrepancies: list[RequestDiscrepancyInput] = Field(
         default_factory=list, max_length=5000

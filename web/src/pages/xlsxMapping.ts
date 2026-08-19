@@ -199,9 +199,9 @@ export function groupInboundItems(
   >();
 
   for (const row of rows) {
-    const lot = row.lot.trim();
+    const lot = row.lot.trim().replace(/\s+/g, " ");
     const boxNumber = canonicalBoxNumber(row.box_number);
-    const key = `${lot}\u0000${boxNumber}`;
+    const key = `${lot.toLocaleLowerCase()}\u0000${boxNumber}`;
     const palletNumber = normalizePalletNumber(row.pallet_number);
     let group = grouped.get(key);
     if (!group) {
@@ -213,10 +213,24 @@ export function groupInboundItems(
         contents: [],
       };
       grouped.set(key, group);
-    } else if (normalizePalletNumber(group.pallet_number) !== palletNumber) {
+    } else if (
+      normalizePalletNumber(group.pallet_number) !== palletNumber ||
+      (group.pallet_id !== undefined &&
+        row.pallet_id !== undefined &&
+        group.pallet_id !== row.pallet_id)
+    ) {
       throw new Error(
         `Box ${boxNumber} in lot ${lot} is mapped to different pallets (${group.pallet_number} and ${palletNumber}).`,
       );
+    } else if (group.pallet_id === undefined && row.pallet_id !== undefined) {
+      group.pallet_id = row.pallet_id;
+    }
+    if (lot < group.lot) {
+      group.lot = lot;
+    }
+    const cleanedPalletNumber = row.pallet_number.trim().replace(/\s+/g, " ");
+    if (cleanedPalletNumber < group.pallet_number) {
+      group.pallet_number = cleanedPalletNumber;
     }
     const contents = row.contents?.trim();
     if (contents && !group.contents.includes(contents)) {
@@ -224,13 +238,21 @@ export function groupInboundItems(
     }
   }
 
-  return Array.from(grouped.values(), (group) => ({
-    lot: group.lot,
-    box_number: group.box_number,
-    pallet_number: group.pallet_number,
-    ...(group.pallet_id ? { pallet_id: group.pallet_id } : {}),
-    contents: group.contents.join(" | ") || undefined,
-  }));
+  return Array.from(grouped.values(), (group) => {
+    const contents = [...group.contents].sort().join(" | ");
+    if (contents.length > 2000) {
+      throw new Error(
+        `Combined contents for box ${group.box_number} in lot ${group.lot} exceed 2000 characters.`,
+      );
+    }
+    return {
+      lot: group.lot,
+      box_number: group.box_number,
+      pallet_number: group.pallet_number,
+      ...(group.pallet_id ? { pallet_id: group.pallet_id } : {}),
+      contents: contents || undefined,
+    };
+  });
 }
 
 function normalizePalletNumber(value: string): string {

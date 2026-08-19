@@ -92,6 +92,26 @@ class BoxAccessError(BoxRuleError):
     """The caller does not have ACL access to the warehouse involved."""
 
 
+@dataclass(frozen=True)
+class _InboundRequestMove:
+    request_id: int
+    source_warehouse_id: int
+    target_warehouse_id: int
+    source_pallet_id: int | None
+    target_pallet_id: int
+
+    def metadata(self) -> dict[str, object]:
+        return {
+            "request_id": self.request_id,
+            "source_warehouse_id": self.source_warehouse_id,
+            "target_warehouse_id": self.target_warehouse_id,
+            "current_pallet_id": self.source_pallet_id,
+            "target_pallet_id": self.target_pallet_id,
+            "inbound_existing_box_relocation": True,
+            "request_workflow": True,
+        }
+
+
 def set_box_pallet_assignment(
     db: Session,
     *,
@@ -103,6 +123,7 @@ def set_box_pallet_assignment(
     expected_warehouse_id: int | None = None,
     metadata: dict[str, object] | None = None,
     record_pallet_event: bool = True,
+    _inbound_request_move: _InboundRequestMove | None = None,
 ) -> int | None:
     """Change one current pallet link and append immutable box audit events."""
     cleaned_reason = reason.strip()
@@ -114,7 +135,18 @@ def set_box_pallet_assignment(
         if expected_warehouse_id is not None
         else box.current_warehouse_id
     )
-    if not can_access(user, box.current_warehouse_id) or not can_access(
+    if _inbound_request_move is not None:
+        if (
+            box.current_warehouse_id != _inbound_request_move.source_warehouse_id
+            or warehouse_id != _inbound_request_move.target_warehouse_id
+            or target_pallet is None
+            or target_pallet.id != _inbound_request_move.target_pallet_id
+            or box.pallet_id != _inbound_request_move.source_pallet_id
+        ):
+            raise BoxRuleError("invalid internal inbound request pallet move")
+        if not can_access(user, warehouse_id):
+            raise BoxAccessError("warehouse access denied")
+    elif not can_access(user, box.current_warehouse_id) or not can_access(
         user, warehouse_id
     ):
         raise BoxAccessError("warehouse access denied")
@@ -123,10 +155,6 @@ def set_box_pallet_assignment(
             raise BoxConflictError("archived pallets cannot receive boxes")
         if target_pallet.lot_id != lot_id:
             raise BoxConflictError("box and pallet must belong to the same lot")
-        if target_pallet.current_warehouse_id != warehouse_id:
-            raise BoxConflictError("box and pallet must be in the same warehouse")
-        if not can_access(user, target_pallet.current_warehouse_id):
-            raise BoxAccessError("warehouse access denied")
         if box.archived_at is not None:
             raise BoxConflictError("archived boxes cannot be assigned")
     source_pallet_id = box.pallet_id
@@ -205,6 +233,9 @@ def set_box_pallet_assignment(
     box.updated_by_user_id = user.id
     box.updated_at = now
     if source_pallet_id is not None and source_pallet_id != target_pallet_id:
+        # Session autoflush is disabled. Persist this assignment before counting
+        # the source pallet so sequential/bulk removals cannot see stale links.
+        db.flush([box])
         source_pallet = db.get(Pallet, source_pallet_id)
         if source_pallet is not None and source_pallet.is_active:
             remaining = int(
@@ -570,7 +601,6 @@ def restore_archived_box(
             pallet is None
             or not pallet.is_active
             or pallet.lot_id != box.lot_id
-            or pallet.current_warehouse_id != warehouse_id
         ):
             set_box_pallet_assignment(
                 db,
@@ -646,7 +676,6 @@ def update_box(
     cancelled_request_ids: set[int] | None = None,
     target_pallet_id: int | None = None,
     detach_pallet: bool = False,
-    preserve_pallet_on_move: bool = False,
     additional_event_metadata: dict[str, object] | None = None,
     skip_request_guards: bool = False,
     _request_return_move: _RequestReturnMove | None = None,
@@ -752,13 +781,13 @@ def update_box(
             metadata={"operation": "box_update_pallet_assignment"},
         )
         metadata_changed = source_pallet_id != target_pallet.id
-    elif detach_pallet or (moving and box.pallet_id is not None and not preserve_pallet_on_move):
+    elif detach_pallet:
         source_pallet_id = set_box_pallet_assignment(
             db,
             user=user,
             box=box,
             target_pallet=None,
-            reason=note or "Detached pallet during box warehouse move.",
+            reason=note or "Explicitly detached pallet during box update.",
             expected_warehouse_id=box.current_warehouse_id,
             metadata={"operation": "box_update_pallet_detach"},
         )
@@ -893,6 +922,96 @@ def move_return_box_for_request(
             target_warehouse_id=target_warehouse_id,
         ),
     )
+
+
+def _move_received_box_for_inbound_request(
+    db: Session,
+    *,
+    user: User,
+    box: Box,
+    request_id: int,
+    target_warehouse_id: int,
+    target_pallet: Pallet,
+    mapped_contents: str | None,
+    commit: bool = False,
+) -> Box:
+    """Relocate one received box with a narrowly scoped source-ACL bypass."""
+    source_warehouse_id = box.current_warehouse_id
+    source_pallet_id = box.pallet_id
+    if source_warehouse_id == target_warehouse_id:
+        raise BoxConflictError("box already exists in the target warehouse")
+    if box.archived_at is not None:
+        raise BoxConflictError("archived boxes cannot be relocated")
+    if box.status != BoxStatus.received:
+        raise BoxConflictError("only received boxes can be relocated")
+    _ensure_warehouse(db, target_warehouse_id)
+    if not can_access(user, target_warehouse_id):
+        raise BoxAccessError("warehouse access denied")
+    if (
+        not target_pallet.is_active
+        or target_pallet.lot_id != box.lot_id
+    ):
+        raise BoxConflictError("target pallet is invalid for inbound relocation")
+
+    context = _InboundRequestMove(
+        request_id=request_id,
+        source_warehouse_id=source_warehouse_id,
+        target_warehouse_id=target_warehouse_id,
+        source_pallet_id=source_pallet_id,
+        target_pallet_id=target_pallet.id,
+    )
+    metadata = context.metadata()
+    reason = f"Received through inbound request #{request_id} from another warehouse"
+    set_box_pallet_assignment(
+        db,
+        user=user,
+        box=box,
+        target_pallet=target_pallet,
+        reason=reason,
+        expected_lot_id=box.lot_id,
+        expected_warehouse_id=target_warehouse_id,
+        metadata={
+            **metadata,
+            "operation": "inbound_existing_box_pallet_remap",
+        },
+        _inbound_request_move=context,
+    )
+
+    previous_contents = box.contents
+    cleaned_contents = (mapped_contents or "").strip()
+    if cleaned_contents:
+        box.contents = cleaned_contents
+    now = datetime.now(UTC)
+    db.add(
+        BoxEvent(
+            box_id=box.id,
+            warehouse_id=target_warehouse_id,
+            event_type=BoxEventType.moved,
+            from_status=BoxStatus.received,
+            to_status=BoxStatus.received,
+            from_warehouse_id=source_warehouse_id,
+            to_warehouse_id=target_warehouse_id,
+            occurred_at=now,
+            user_id=user.id,
+            note=reason,
+            event_metadata={
+                **metadata,
+                "operation": "inbound_existing_box_relocation",
+                "previous_contents": previous_contents,
+                "new_contents": box.contents,
+                "contents_changed": box.contents != previous_contents,
+            },
+        )
+    )
+    box.current_warehouse_id = target_warehouse_id
+    box.updated_by_user_id = user.id
+    box.updated_at = now
+    if commit:
+        db.commit()
+        db.refresh(box)
+    else:
+        db.flush()
+    return box
 
 
 def reassign_box_lot(
@@ -1095,6 +1214,7 @@ class BulkOutcome:
     skipped: list[BulkSkipEntry] = field(default_factory=list)
     cancelled_request_ids: set[int] = field(default_factory=set)
     affected_warehouse_ids: set[int] = field(default_factory=set)
+    affected_pallet_warehouse_ids: dict[int, set[int]] = field(default_factory=dict)
 
 
 def bulk_update_boxes(
@@ -1154,6 +1274,10 @@ def bulk_update_boxes(
         outcome.affected_warehouse_ids.update(
             (source_warehouse_id, updated.current_warehouse_id)
         )
+        if updated.pallet_id is not None:
+            outcome.affected_pallet_warehouse_ids.setdefault(
+                updated.pallet_id, set()
+            ).update((source_warehouse_id, updated.current_warehouse_id))
 
     return outcome
 

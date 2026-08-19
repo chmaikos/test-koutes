@@ -161,13 +161,11 @@ export function RenameLotDialog({
                   {candidate.pallet_collisions.map((collision) => (
                     <li key={`${collision.source_pallet_id}:${collision.target_pallet_id}`}>
                       “{collision.source_pallet_number}” conflicts with “{collision.target_pallet_number}”:{" "}
-                      {collision.reason === "warehouse_mismatch"
-                        ? "same normalized number in different warehouses"
-                        : "the target pallet is archived"}.
+                      the target pallet is archived.
                     </li>
                   ))}
                 </ul>
-                <p className="mt-2">Move, rename, restore, or otherwise reconcile these pallets, then retry to load a fresh merge preview.</p>
+                <p className="mt-2">Rename, restore, or otherwise reconcile these pallets, then retry to load a fresh merge preview.</p>
               </div>
             )}
             {mergeClassification === "normal" && (

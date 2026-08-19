@@ -18,8 +18,6 @@ from app.schemas.pallets import (
     PalletDetailOut,
     PalletEventOut,
     PalletIntegrityOut,
-    PalletMove,
-    PalletMoveOut,
     PalletOptionOut,
     PalletProgressState,
     PalletRename,
@@ -39,7 +37,6 @@ from app.services.pallets import (
     list_pallet_events,
     list_pallet_options,
     list_pallet_summaries,
-    move_pallet,
     mutate_pallet_boxes,
     pallet_integrity_report,
     rename_pallet,
@@ -51,6 +48,23 @@ router = APIRouter(prefix="/pallets", tags=["pallets"])
 
 def _summary_out(summary) -> PalletSummaryOut:
     return PalletSummaryOut.model_validate(summary, from_attributes=True)
+
+
+async def _publish_pallet_change(
+    event_type: str,
+    *,
+    summary,
+    data: dict[str, object],
+) -> None:
+    warehouse_ids = sorted(set(summary.warehouse_ids))
+    if not warehouse_ids:
+        await bus.publish(event_type, {**data, "warehouse_id": None})
+        return
+    for warehouse_id in warehouse_ids:
+        await bus.publish(
+            event_type,
+            {**data, "warehouse_id": warehouse_id},
+        )
 
 
 def _rule_error(exc: PalletRuleError) -> HTTPException:
@@ -183,7 +197,12 @@ async def create(
             warehouse_id=payload.warehouse_id,
             pallet_number=payload.pallet_number,
         )
-        summary = get_visible_pallet_summary(db, user=user, pallet_id=pallet.id)
+        summary = get_visible_pallet_summary(
+            db,
+            user=user,
+            pallet_id=pallet.id,
+            allow_unrepresented_lot=True,
+        )
     except PalletConflictError as exc:
         db.rollback()
         raise HTTPException(
@@ -193,13 +212,14 @@ async def create(
     except PalletRuleError as exc:
         db.rollback()
         raise _rule_error(exc) from exc
-    await bus.publish(
+    await _publish_pallet_change(
         "pallet.created",
-        {
+        summary=summary,
+        data={
             "id": pallet.id,
             "pallet_number": pallet.pallet_number,
             "lot_id": pallet.lot_id,
-            "warehouse_id": pallet.current_warehouse_id,
+            "authorization_warehouse_id": payload.warehouse_id,
             "version": pallet.version,
         },
     )
@@ -255,16 +275,23 @@ def events(
 async def _publish_pallet_box_mutation(
     db: DbSession,
     *,
-    pallet_id: int,
-    warehouse_ids: set[int],
+    pallet_warehouse_ids: dict[int, set[int]],
     box_ids: list[int],
     cancelled_request_ids: list[int],
 ) -> None:
-    for warehouse_id in warehouse_ids:
-        await bus.publish(
-            "pallet.updated",
-            {"id": pallet_id, "warehouse_id": warehouse_id},
-        )
+    for pallet_id, warehouse_ids in sorted(pallet_warehouse_ids.items()):
+        for warehouse_id in sorted(warehouse_ids):
+            await bus.publish(
+                "pallet.updated",
+                {"id": pallet_id, "warehouse_id": warehouse_id},
+            )
+    for warehouse_id in sorted(
+        {
+            warehouse_id
+            for warehouse_ids in pallet_warehouse_ids.values()
+            for warehouse_id in warehouse_ids
+        }
+    ):
         await bus.publish(
             "box.updated",
             {"warehouse_id": warehouse_id, "box_ids": box_ids, "bulk": True},
@@ -303,12 +330,9 @@ async def assign_boxes(
     except PalletRuleError as exc:
         db.rollback()
         raise _rule_error(exc) from exc
-    pallet = db.get(Pallet, pallet_id)
-    assert pallet is not None
     await _publish_pallet_box_mutation(
         db,
-        pallet_id=pallet_id,
-        warehouse_ids={pallet.current_warehouse_id},
+        pallet_warehouse_ids=result.affected_pallet_warehouse_ids,
         box_ids=result.updated_box_ids,
         cancelled_request_ids=result.cancelled_request_ids,
     )
@@ -337,46 +361,27 @@ async def detach_boxes(
     except PalletRuleError as exc:
         db.rollback()
         raise _rule_error(exc) from exc
-    pallet = db.get(Pallet, pallet_id)
-    assert pallet is not None
     await _publish_pallet_box_mutation(
         db,
-        pallet_id=pallet_id,
-        warehouse_ids={pallet.current_warehouse_id},
+        pallet_warehouse_ids=result.affected_pallet_warehouse_ids,
         box_ids=result.updated_box_ids,
         cancelled_request_ids=result.cancelled_request_ids,
     )
     return PalletBoxMutationOut.model_validate(result, from_attributes=True)
 
 
-@router.post("/{pallet_id}/move", response_model=PalletMoveOut)
+@router.post("/{pallet_id}/move", status_code=status.HTTP_410_GONE)
 async def move(
     pallet_id: int,
-    payload: PalletMove,
-    db: DbSession,
-    user: Annotated[User, Depends(require_operator)],
-) -> PalletMoveOut:
-    try:
-        result = move_pallet(
-            db,
-            user=user,
-            pallet_id=pallet_id,
-            target_warehouse_id=payload.warehouse_id,
-            expected_version=payload.expected_version,
-            force=payload.force,
-            reason=payload.reason,
-        )
-    except PalletRuleError as exc:
-        db.rollback()
-        raise _rule_error(exc) from exc
-    await _publish_pallet_box_mutation(
-        db,
-        pallet_id=pallet_id,
-        warehouse_ids={result.from_warehouse_id, result.to_warehouse_id},
-        box_ids=result.box_ids,
-        cancelled_request_ids=result.cancelled_request_ids,
+    _user: CurrentUser,
+) -> None:
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=(
+            f"pallet {pallet_id} cannot be moved because pallets have no location; "
+            "move individual boxes instead"
+        ),
     )
-    return PalletMoveOut.model_validate(result, from_attributes=True)
 
 
 @router.patch(
@@ -409,13 +414,13 @@ async def rename(
     except PalletRuleError as exc:
         db.rollback()
         raise _rule_error(exc) from exc
-    await bus.publish(
+    await _publish_pallet_change(
         "pallet.renamed",
-        {
+        summary=summary,
+        data={
             "id": pallet.id,
             "pallet_number": pallet.pallet_number,
             "lot_id": pallet.lot_id,
-            "warehouse_id": pallet.current_warehouse_id,
             "version": pallet.version,
         },
     )
@@ -453,12 +458,12 @@ async def archive(
     except PalletRuleError as exc:
         db.rollback()
         raise _rule_error(exc) from exc
-    await bus.publish(
+    await _publish_pallet_change(
         "pallet.archived",
-        {
+        summary=summary,
+        data={
             "id": pallet.id,
             "lot_id": pallet.lot_id,
-            "warehouse_id": pallet.current_warehouse_id,
             "version": pallet.version,
         },
     )
@@ -494,12 +499,12 @@ async def restore(
     except PalletRuleError as exc:
         db.rollback()
         raise _rule_error(exc) from exc
-    await bus.publish(
+    await _publish_pallet_change(
         "pallet.restored",
-        {
+        summary=summary,
+        data={
             "id": pallet.id,
             "lot_id": pallet.lot_id,
-            "warehouse_id": pallet.current_warehouse_id,
             "version": pallet.version,
         },
     )

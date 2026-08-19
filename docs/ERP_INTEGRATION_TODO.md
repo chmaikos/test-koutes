@@ -9,11 +9,12 @@ Implementation must not begin until the following are agreed with the ERP owner:
 - Canonical identifiers for delivery notes, return notes, requests, warehouses,
   lots, pallets, and boxes. Define whether ERP Pallet identity is the app's
   numeric `pallet_id`, the case-insensitive number scoped by canonical Lot, or
-  an explicit cross-system mapping; never use display text alone as a global
-  key.
+  an explicit cross-system mapping. A Pallet has no warehouse identifier or
+  location; warehouse distribution must be derived from its Boxes. Never use
+  display text alone as a global key.
 - Snapshot semantics for request lines: immutable Lot/Pallet display values
-  preserve what was received even after a later rename, move, merge absorption,
-  archival, or purge. Agree which canonical IDs remain resolvable and how an
+  preserve what was received even after a later rename, Box relocation, merge
+  absorption, archival, or purge. Agree which canonical IDs remain resolvable and how an
   absorbed Pallet points to its surviving target.
 - Reference uniqueness, document versioning, cancellation, correction, and late-arrival rules.
 - Direction of authority for quantities, line discrepancies, completion, and reconciliation.

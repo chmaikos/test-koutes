@@ -50,12 +50,10 @@ def _pallet(
     lot: Lot,
     number: str,
     *,
-    warehouse_id: int = 1,
     active: bool = True,
 ) -> Pallet:
     pallet = Pallet(
         lot_id=lot.id,
-        current_warehouse_id=warehouse_id,
         pallet_number=number,
         is_active=active,
         archived_at=None if active else datetime.now(UTC),
@@ -67,7 +65,6 @@ def _pallet(
             pallet_id=pallet.id,
             event_type=PalletEventType.created,
             new_pallet_number=pallet.pallet_number,
-            to_warehouse_id=warehouse_id,
         )
     )
     return pallet
@@ -80,12 +77,13 @@ def _box(
     number: str,
     *,
     archived: bool = False,
+    warehouse_id: int = 1,
 ) -> Box:
     box = Box(
         box_number=number,
         lot_id=lot.id,
         pallet_id=pallet.id,
-        current_warehouse_id=pallet.current_warehouse_id,
+        current_warehouse_id=warehouse_id,
         status=BoxStatus.received,
         archived_at=datetime.now(UTC) if archived else None,
     )
@@ -177,40 +175,37 @@ def test_merge_combines_same_number_same_warehouse_and_preserves_snapshot(
     )
 
 
-def test_merge_blocks_same_number_cross_warehouse_without_mutation(
+def test_merge_combines_same_number_across_warehouses(
     session, make_user
 ) -> None:
     admin = make_user(UserRole.admin)
     source = _lot(session, "Warehouse Collision Source")
     target = _lot(session, "Warehouse Collision Target")
-    source_pallet = _pallet(session, source, "Shared", warehouse_id=1)
-    target_pallet = _pallet(session, target, "shared", warehouse_id=2)
-    source_box = _box(session, source, source_pallet, "001")
+    source_pallet = _pallet(session, source, "Shared")
+    target_pallet = _pallet(session, target, "shared")
+    source_box = _box(
+        session, source, source_pallet, "001", warehouse_id=1
+    )
+    _box(session, target, target_pallet, "002", warehouse_id=2)
     session.commit()
 
     candidate = _merge_candidate(session, source, target)
-    assert candidate.merge_allowed is False
-    assert candidate.pallet_collisions[0].reason == "warehouse_mismatch"
-    assert (
-        candidate.pallet_collisions[0].source_warehouse_id,
-        candidate.pallet_collisions[0].target_warehouse_id,
-    ) == (1, 2)
+    assert candidate.merge_allowed is True
+    assert candidate.pallet_collisions == []
+    assert candidate.pallet_actions[0].action == "combine"
 
-    with pytest.raises(LotMergeConflictError) as blocked:
-        merge_lots(
-            session,
-            user=admin,
-            source_lot_id=source.id,
-            target_lot_id=target.id,
-            reason="Must not move a same-number pallet across warehouses",
-            expected_source_version=source.version,
-            expected_target_version=target.version,
-        )
-    assert blocked.value.code == "pallet_collision"
-    session.rollback()
-    assert session.get(Box, source_box.id).lot_id == source.id
-    assert session.get(Pallet, source_pallet.id).lot_id == source.id
-    assert session.get(Pallet, target_pallet.id).lot_id == target.id
+    result = merge_lots(
+        session,
+        user=admin,
+        source_lot_id=source.id,
+        target_lot_id=target.id,
+        reason="Combine one organizational pallet identity",
+        expected_source_version=source.version,
+        expected_target_version=target.version,
+    )
+    session.expire_all()
+    assert result.combined_pallet_count == 1
+    assert session.get(Box, source_box.id).pallet_id == target_pallet.id
 
 
 def test_merge_transfers_nonmatching_archived_pallet_and_signature_tracks_topology(
@@ -365,6 +360,7 @@ def test_safe_purge_deletes_selected_pallet_events_and_snapshots_them(
     assert audit.pallet_snapshots[0]["assigned_box_count"] == 1
     assert audit.pallet_snapshots[0]["active_box_count"] == 0
     assert audit.pallet_snapshots[0]["archived_box_count"] == 1
+    assert audit.pallet_snapshots[0]["warehouse_ids"] == [1]
     assert audit.event_metadata["deleted_counts"]["pallet_events"] == 1
     assert session.get(BoxRequest, request_id) is None
 
@@ -450,4 +446,5 @@ def test_force_purge_clears_live_pallet_fk_but_preserves_mixed_snapshot_and_targ
     assert audit.pallet_snapshots[0]["assigned_box_count"] == 1
     assert audit.pallet_snapshots[0]["active_box_count"] == 1
     assert audit.pallet_snapshots[0]["archived_box_count"] == 0
+    assert audit.pallet_snapshots[0]["warehouse_ids"] == [1]
     assert audit.event_metadata["deleted_counts"]["pallets"] == 1

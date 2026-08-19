@@ -8,7 +8,7 @@ from statistics import fmean
 from sqlalchemy import select
 from sqlalchemy.orm import Session, aliased, noload
 
-from app.models.boxes import BoxEvent
+from app.models.boxes import Box, BoxEvent
 from app.models.requests import (
     BoxRequest,
     BoxRequestDiscrepancy,
@@ -192,7 +192,14 @@ def build_reconciliation(
         )
     ).all()
     request_item_event_rows = db.execute(
-        select(BoxRequestItem, BoxEvent)
+        select(
+            BoxRequestItem,
+            BoxEvent,
+            Box.current_warehouse_id,
+            Warehouse.name,
+        )
+        .outerjoin(Box, Box.id == BoxRequestItem.box_id)
+        .outerjoin(Warehouse, Warehouse.id == Box.current_warehouse_id)
         .outerjoin(
             BoxEvent,
             BoxEvent.box_id == BoxRequestItem.box_id,
@@ -204,6 +211,7 @@ def build_reconciliation(
     ).all()
     item_snapshots: dict[tuple[int, int | None], BoxRequestItem] = {}
     item_snapshots_by_id: dict[int, BoxRequestItem] = {}
+    box_warehouses: dict[int, tuple[int, str]] = {}
 
     discrepancies_by_request: dict[int, list[BoxRequestDiscrepancy]] = defaultdict(list)
     for discrepancy in discrepancies:
@@ -218,9 +226,18 @@ def build_reconciliation(
     for exception in operational_exceptions:
         exceptions_by_request[exception.request_id].append(exception)
     box_events_by_request: dict[int, list[BoxEvent]] = defaultdict(list)
-    for item, event in request_item_event_rows:
+    for item, event, box_warehouse_id, box_warehouse_name in request_item_event_rows:
         item_snapshots[(item.request_id, item.box_id)] = item
         item_snapshots_by_id[item.id] = item
+        if (
+            item.box_id is not None
+            and box_warehouse_id is not None
+            and box_warehouse_name is not None
+        ):
+            box_warehouses[item.box_id] = (
+                box_warehouse_id,
+                box_warehouse_name,
+            )
         if event is not None:
             box_events_by_request[item.request_id].append(event)
 
@@ -249,6 +266,10 @@ def build_reconciliation(
             if request_item_id is not None
             else item_snapshots.get((request.id, box_id))
         )
+        issue_warehouse_id, issue_warehouse_name = box_warehouses.get(
+            box_id,
+            (request.warehouse_id, warehouse_names[request.id]),
+        )
         issues.append(
             RequestReconciliationIssue(
                 issue_key=f"{request.id}:{key}",
@@ -258,8 +279,8 @@ def build_reconciliation(
                 box_id=box_id,
                 pallet_id=snapshot.pallet_id if snapshot is not None else None,
                 pallet_number=snapshot.pallet if snapshot is not None else None,
-                warehouse_id=request.warehouse_id,
-                warehouse_name=warehouse_names[request.id],
+                warehouse_id=issue_warehouse_id,
+                warehouse_name=issue_warehouse_name,
                 target_warehouse_id=request.target_warehouse_id,
                 target_warehouse_name=target_warehouse_names[request.id],
                 assigned_mover_user_id=request.assigned_mover_user_id,

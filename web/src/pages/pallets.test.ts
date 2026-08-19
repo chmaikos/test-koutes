@@ -1,14 +1,20 @@
 import { describe, expect, it } from "vitest";
 import type { PalletOption, Role } from "@/api/types";
+import hooksSource from "@/api/hooks.ts?raw";
+import typesSource from "@/api/types.ts?raw";
+import palletDetailSource from "@/pages/PalletDetailPage.tsx?raw";
 import {
   canAdministerPallet,
   canManagePalletBoxes,
   exactPalletMatch,
   normalizePalletNumber,
+  palletCandidateFilters,
   palletOptionSelection,
   palletCreatePayload,
   palletBoxMutationPayload,
+  palletPickerOptionFilters,
   palletScopeKey,
+  palletWarehouseDistributionLabel,
   parsePalletSearchParams,
   unassignedPalletLabel,
 } from "@/pages/pallets";
@@ -19,8 +25,8 @@ const option: PalletOption = {
   normalized_pallet_number: "pal 01",
   lot_id: 2,
   lot_name: "LOT-2",
-  current_warehouse_id: 3,
-  warehouse_name: "North",
+  warehouse_ids: [3, 4],
+  warehouse_names: ["North", "South"],
   is_active: true,
   exact_normalized_match: false,
 };
@@ -35,7 +41,6 @@ describe("pallet list and picker helpers", () => {
     expect(parsed).toEqual({
       filters: {
         search: "PAL",
-        warehouse_id: 3,
         lot_id: 2,
         progress_state: "in_progress",
         include_inactive: true,
@@ -56,9 +61,14 @@ describe("pallet list and picker helpers", () => {
     });
   });
 
-  it("changes scope keys so pickers reset on lot or warehouse changes", () => {
-    expect(palletScopeKey(2, 3)).not.toBe(palletScopeKey(2, 4));
-    expect(palletScopeKey(2, 3)).not.toBe(palletScopeKey(5, 3));
+  it("scopes picker identity by lot and preserves it across warehouse changes", () => {
+    expect(palletScopeKey(2)).toBe(palletScopeKey(2));
+    expect(palletScopeKey(2)).not.toBe(palletScopeKey(5));
+    expect(palletPickerOptionFilters(2, " PAL ", false)).toEqual({
+      lot_id: 2,
+      search: " PAL ",
+      include_inactive: false,
+    });
   });
 
   it("uses an explicit unassigned fallback and role controls", () => {
@@ -67,6 +77,39 @@ describe("pallet list and picker helpers", () => {
     const roles: Role[] = ["admin", "operator", "warehouse_mover", "viewer"];
     expect(roles.filter(canManagePalletBoxes)).toEqual(["admin", "operator"]);
     expect(roles.filter(canAdministerPallet)).toEqual(["admin"]);
+  });
+
+  it("labels visible box warehouse distributions without pallet ownership", () => {
+    expect(palletWarehouseDistributionLabel(["North", "South"])).toBe(
+      "Boxes currently in North, South",
+    );
+    expect(palletWarehouseDistributionLabel(["North"])).toBe(
+      "Boxes currently in North",
+    );
+    expect(palletWarehouseDistributionLabel([])).toBe(
+      "No boxes in accessible warehouses",
+    );
+  });
+
+  it("shows same-lot assignment candidates across warehouses with an optional filter", () => {
+    expect(palletCandidateFilters(2)).toMatchObject({
+      lot_id: 2,
+      warehouse_id: undefined,
+      pallet_id: undefined,
+    });
+    expect(palletCandidateFilters(2, 4, 7)).toMatchObject({
+      lot_id: 2,
+      warehouse_id: 4,
+      pallet_id: 7,
+    });
+  });
+
+  it("keeps retired pallet move contracts and controls out of the frontend", () => {
+    expect(hooksSource).not.toContain("useMovePallet");
+    expect(hooksSource).not.toContain("/pallets/${input.id}/move");
+    expect(typesSource).not.toContain("PalletMovePayload");
+    expect(typesSource).not.toContain("PalletMoveResult");
+    expect(palletDetailSource).not.toContain("Move pallet");
   });
 
   it("builds normalized create and box-mutation payloads", () => {

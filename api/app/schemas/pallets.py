@@ -26,8 +26,8 @@ class PalletSummaryOut(BaseModel):
     id: int
     lot_id: int
     lot_name: str
-    current_warehouse_id: int
-    warehouse_name: str
+    warehouse_ids: list[int]
+    warehouse_names: list[str]
     pallet_number: str
     normalized_pallet_number: str
     version: int
@@ -62,8 +62,8 @@ class PalletOptionOut(BaseModel):
     normalized_pallet_number: str
     lot_id: int
     lot_name: str
-    current_warehouse_id: int
-    warehouse_name: str
+    warehouse_ids: list[int]
+    warehouse_names: list[str]
     is_active: bool
     exact_normalized_match: bool = False
 
@@ -97,23 +97,6 @@ class PalletBoxMutationOut(BaseModel):
     cancelled_request_ids: list[int] = Field(default_factory=list)
 
 
-class PalletMove(BaseModel):
-    warehouse_id: int = Field(ge=1)
-    reason: str | None = Field(default=None, max_length=2000)
-    force: bool = False
-    expected_version: int = Field(ge=1)
-
-
-class PalletMoveOut(BaseModel):
-    pallet_id: int
-    from_warehouse_id: int
-    to_warehouse_id: int
-    affected_box_count: int
-    box_ids: list[int]
-    cancelled_request_ids: list[int]
-    version: int
-
-
 class PalletIntegrityGroup(BaseModel):
     count: int
     box_ids: list[int]
@@ -122,7 +105,6 @@ class PalletIntegrityGroup(BaseModel):
 class PalletIntegrityOut(BaseModel):
     orphaned_pallet_ids: PalletIntegrityGroup
     cross_lot: PalletIntegrityGroup
-    cross_warehouse: PalletIntegrityGroup
     inactive_pallet_assignments: PalletIntegrityGroup
     unassigned_active_boxes: PalletIntegrityGroup
 
@@ -175,8 +157,6 @@ __all__ = [
     "PalletEventOut",
     "PalletOptionOut",
     "PalletIntegrityOut",
-    "PalletMove",
-    "PalletMoveOut",
     "PalletProgressState",
     "PalletRename",
     "PalletSortField",

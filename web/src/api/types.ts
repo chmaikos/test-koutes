@@ -878,8 +878,8 @@ export interface PalletSummary {
   id: number;
   lot_id: number;
   lot_name: string;
-  current_warehouse_id: number;
-  warehouse_name: string;
+  warehouse_ids: number[];
+  warehouse_names: string[];
   pallet_number: string;
   normalized_pallet_number: string;
   version: number;
@@ -912,8 +912,8 @@ export interface PalletOption {
   normalized_pallet_number: string;
   lot_id: number;
   lot_name: string;
-  current_warehouse_id: number;
-  warehouse_name: string;
+  warehouse_ids: number[];
+  warehouse_names: string[];
   is_active: boolean;
   exact_normalized_match: boolean;
 }
@@ -934,7 +934,6 @@ export interface PalletEvent {
 
 export interface PalletFilters {
   search?: string;
-  warehouse_id?: number;
   lot_id?: number;
   progress_state?: PalletProgressState;
   include_inactive?: boolean;
@@ -944,7 +943,6 @@ export interface PalletFilters {
 
 export interface PalletOptionFilters {
   search?: string;
-  warehouse_id?: number;
   lot_id?: number;
   include_inactive?: boolean;
 }
@@ -978,23 +976,6 @@ export interface PalletBoxMutationResult {
   cancelled_request_ids: number[];
 }
 
-export interface PalletMovePayload {
-  warehouse_id: number;
-  reason?: string;
-  force?: boolean;
-  expected_version: number;
-}
-
-export interface PalletMoveResult {
-  pallet_id: number;
-  from_warehouse_id: number;
-  to_warehouse_id: number;
-  affected_box_count: number;
-  box_ids: number[];
-  cancelled_request_ids: number[];
-  version: number;
-}
-
 export interface PalletIntegrityGroup {
   count: number;
   box_ids: number[];
@@ -1003,7 +984,6 @@ export interface PalletIntegrityGroup {
 export interface PalletIntegrity {
   orphaned_pallet_ids: PalletIntegrityGroup;
   cross_lot: PalletIntegrityGroup;
-  cross_warehouse: PalletIntegrityGroup;
   inactive_pallet_assignments: PalletIntegrityGroup;
   unassigned_active_boxes: PalletIntegrityGroup;
 }
@@ -1154,19 +1134,16 @@ export interface LotPalletCollision {
   normalized_pallet_number: string;
   source_pallet_id: number;
   source_pallet_number: string;
-  source_warehouse_id: number;
   source_is_active: boolean;
   target_pallet_id: number;
   target_pallet_number: string;
-  target_warehouse_id: number;
   target_is_active: boolean;
-  reason: "warehouse_mismatch" | "inactive_target";
+  reason: "inactive_target";
 }
 
 export interface LotPalletMergeAction {
   source_pallet_id: number;
   source_pallet_number: string;
-  source_warehouse_id: number;
   source_is_active: boolean;
   action: "combine" | "transfer";
   target_pallet_id: number | null;
@@ -1520,6 +1497,82 @@ export interface InboundRequestItemInput {
   pallet_number: string;
   pallet_id?: number;
   contents?: string;
+}
+
+export type InboundCompletionClassification =
+  | "create"
+  | "relocate"
+  | "blocked";
+
+export type InboundTargetPalletResolution =
+  | "existing"
+  | "will_create"
+  | "blocked";
+
+export interface InboundCompletionPreviewRequest {
+  inbound_items?: InboundRequestItemInput[] | null;
+}
+
+export interface InboundCompletionTargetPallet {
+  resolution: InboundTargetPalletResolution;
+  pallet_id: number | null;
+  pallet_number: string;
+}
+
+export interface InboundCompletionSourceWarehouseCount {
+  warehouse_id: number;
+  warehouse_name: string;
+  count: number;
+}
+
+export interface InboundCompletionPreviewRow {
+  classification: InboundCompletionClassification;
+  lot: string;
+  box_number: string;
+  normalized_lot: string;
+  normalized_box_number: string;
+  mapped_pallet_number: string;
+  mapped_pallet_id: number | null;
+  existing_box_id: number | null;
+  current_status: BoxStatus | null;
+  source_warehouse_id: number | null;
+  source_warehouse_name: string | null;
+  current_pallet_id: number | null;
+  current_pallet_number: string | null;
+  target_warehouse_id: number;
+  target_warehouse_name: string;
+  target_pallet_resolution: InboundCompletionTargetPallet;
+  active_return_reservation_ids: number[];
+  blocked_code: string | null;
+  blocked_message: string | null;
+}
+
+export interface InboundCompletionPreviewSummary {
+  created: number;
+  relocated: number;
+  blocked: number;
+  source_warehouse_counts: InboundCompletionSourceWarehouseCount[];
+}
+
+export interface InboundCompletionPreview {
+  request_id: number;
+  request_version: number;
+  target_warehouse_id: number;
+  target_warehouse_name: string;
+  impact_signature: string;
+  can_complete: boolean;
+  summary: InboundCompletionPreviewSummary;
+  rows: InboundCompletionPreviewRow[];
+}
+
+export interface InboundCompletionFields {
+  accept_existing_received_boxes: boolean;
+  inbound_impact_signature: string | null;
+}
+
+export interface ReviewedInboundCompletionFields
+  extends InboundCompletionFields {
+  inbound_impact_signature: string;
 }
 
 export interface RequestConflict {

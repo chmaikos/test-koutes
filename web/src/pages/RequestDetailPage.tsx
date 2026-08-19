@@ -1,4 +1,4 @@
-import { useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
   ArrowLeft,
@@ -20,6 +20,7 @@ import {
 import {
   useDownloadRequestDocument,
   useDownloadDiscrepancyPhoto,
+  useInboundCompletionPreview,
   useMe,
   useRequest,
   useRequestAction,
@@ -33,7 +34,10 @@ import {
 } from "@/api/hooks";
 import type {
   BoxRequest,
+  InboundCompletionPreview,
+  InboundCompletionPreviewRow,
   InboundRequestItemInput,
+  ReviewedInboundCompletionFields,
   RequestConflict,
   RequestDiscrepancyInput,
   RequestDocument,
@@ -58,9 +62,22 @@ import {
 import {
   deliveryVariance,
   hasRequiredDiscrepancyReason,
-  tryGroupInboundItems,
 } from "@/pages/xlsxMapping";
 import { requestWarehouseRoute } from "@/pages/requestWarehouses";
+import {
+  EMPTY_INBOUND_COMPLETION_REVIEW,
+  canSubmitInboundCompletion,
+  currentInboundCompletionPreview,
+  inboundBlockedMessage,
+  inboundCompletionCounts,
+  inboundCompletionFields,
+  inboundCompletionFingerprint,
+  inboundCompletionItems,
+  invalidateInboundCompletion,
+  isStaleInboundImpactConflict,
+  reviewedInboundCompletion,
+  setInboundRelocationAcceptance,
+} from "@/pages/inboundCompletion";
 
 type ReasonDialog = "reject" | "cancel" | null;
 type OperationalDialog =
@@ -137,6 +154,7 @@ export function RequestDetailPage() {
 
   async function perform(
     input: Parameters<typeof action.mutateAsync>[0],
+    onStaleInboundImpact?: () => void,
   ): Promise<boolean> {
     setActionError(null);
     try {
@@ -144,6 +162,12 @@ export function RequestDetailPage() {
       setConflict(null);
       return true;
     } catch (caught) {
+      if (onStaleInboundImpact && isStaleInboundImpactConflict(caught)) {
+        setConflict(null);
+        setActionError(null);
+        onStaleInboundImpact();
+        return false;
+      }
       const detail = conflictDetail(caught);
       if (detail) {
         setConflict({ input, detail });
@@ -640,7 +664,9 @@ export function RequestDetailPage() {
             discrepancyReason,
             collectedBoxIds,
             discrepancies,
+            completionFields,
           ) => {
+            let staleInboundImpact = false;
             const ok = await perform({
               id: request.id,
               expectedVersion: request.version,
@@ -651,6 +677,7 @@ export function RequestDetailPage() {
                       inbound_items: items,
                       discrepancy_reason: discrepancyReason || undefined,
                       discrepancies,
+                      ...completionFields,
                       idempotency_key: crypto.randomUUID(),
                     }
                   : {
@@ -659,8 +686,15 @@ export function RequestDetailPage() {
                       discrepancy_reason: discrepancyReason || undefined,
                       idempotency_key: crypto.randomUUID(),
                     },
+            }, () => {
+              staleInboundImpact = true;
             });
             if (ok) setShowCompletion(false);
+            return ok
+              ? "completed"
+              : staleInboundImpact
+                ? "stale"
+                : "failed";
           }}
         />
       )}
@@ -1573,10 +1607,12 @@ function CompletionDialog({
     discrepancyReason?: string,
     collectedBoxIds?: number[],
     discrepancies?: RequestDiscrepancyInput[],
-  ) => Promise<void>;
+    completionFields?: ReviewedInboundCompletionFields,
+  ) => Promise<"completed" | "stale" | "failed">;
 }) {
   const inbound = request.direction === "inbound";
   const me = useMe();
+  const previewMutation = useInboundCompletionPreview();
   const [rows, setRows] = useState<InboundRequestItemInput[]>(() =>
     inbound
       ? Array.from({ length: request.quantity }, () => ({
@@ -1594,6 +1630,9 @@ function CompletionDialog({
   const [lineDiscrepancies, setLineDiscrepancies] = useState<
     RequestDiscrepancyInput[]
   >([]);
+  const [impactReview, setImpactReview] = useState(
+    EMPTY_INBOUND_COMPLETION_REVIEW,
+  );
   const [collectedBoxIds, setCollectedBoxIds] = useState<Set<number>>(
     () =>
       new Set(
@@ -1602,12 +1641,7 @@ function CompletionDialog({
         ),
       ),
   );
-  const groupedRows = tryGroupInboundItems(
-    rows.filter(
-      (row) =>
-        row.box_number.trim() && row.lot.trim() && row.pallet_number.trim(),
-    ),
-  );
+  const groupedRows = inboundCompletionItems(rows, rowPallets);
   const actualCount = groupedRows.items.length;
   const variance = deliveryVariance(request.quantity, actualCount);
   const hasMismatch = variance !== 0;
@@ -1627,6 +1661,57 @@ function CompletionDialog({
         rowPallets[index]?.pallet_number.trim().toLocaleUpperCase() ===
           row.pallet_number.trim().replace(/\s+/g, " ").toLocaleUpperCase(),
     );
+  const allRowsComplete =
+    inbound &&
+    rows.length > 0 &&
+    rows.every(
+      (row) =>
+        row.box_number.trim().length > 0 &&
+        row.lot.trim().length > 0 &&
+        row.pallet_number.trim().length > 0,
+    );
+  const impactFingerprint = inboundCompletionFingerprint({
+    requestId: request.id,
+    requestVersion: request.version,
+    rows,
+    lotConfirmations: rowLots,
+    palletConfirmations: rowPallets,
+  });
+  const currentImpactPreview = currentInboundCompletionPreview(
+    impactReview,
+    impactFingerprint,
+    request.version,
+  );
+  const readyToReview =
+    allRowsComplete &&
+    allLotsConfirmed &&
+    allPalletsConfirmed &&
+    actualCount > 0 &&
+    !groupedRows.error;
+  const canCompleteImpact = canSubmitInboundCompletion(
+    currentImpactPreview,
+    impactReview.acceptRelocations,
+  );
+
+  useEffect(() => {
+    setImpactReview(invalidateInboundCompletion());
+    previewMutation.reset();
+    // The fingerprint captures every row, confirmation, and request-version input.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [impactFingerprint]);
+
+  async function reviewInventoryImpact() {
+    if (!readyToReview) return;
+    try {
+      const preview = await previewMutation.mutateAsync({
+        id: request.id,
+        payload: { inbound_items: groupedRows.items },
+      });
+      setImpactReview(reviewedInboundCompletion(preview, impactFingerprint));
+    } catch {
+      setImpactReview(invalidateInboundCompletion());
+    }
+  }
 
   function updateRow(
     index: number,
@@ -1654,22 +1739,30 @@ function CompletionDialog({
         {inbound ? (
           <form
             className="mt-3 space-y-4"
-            onSubmit={(event) => {
+            onSubmit={async (event) => {
               event.preventDefault();
-              void onSubmit(
-                rows.map((row, index) => ({
-                  lot: row.lot.trim(),
-                  box_number: row.box_number.trim(),
-                  pallet_number: row.pallet_number.trim(),
-                  ...(rowPallets[index]?.id
-                    ? { pallet_id: rowPallets[index]!.id }
-                    : {}),
-                  contents: row.contents?.trim() || undefined,
-                })),
+              if (!currentImpactPreview) {
+                await reviewInventoryImpact();
+                return;
+              }
+              if (!canCompleteImpact) return;
+              const result = await onSubmit(
+                groupedRows.items,
                 hasMismatch ? discrepancyReason.trim() || undefined : undefined,
                 undefined,
                 lineDiscrepancies,
+                inboundCompletionFields(
+                  currentImpactPreview,
+                  impactReview.acceptRelocations,
+                ),
               );
+              if (result === "stale") {
+                setImpactReview(
+                  invalidateInboundCompletion(
+                    "Inventory changed; review again",
+                  ),
+                );
+              }
             }}
           >
             <p className="text-sm text-slate-600">
@@ -1729,6 +1822,7 @@ function CompletionDialog({
                       onClick={() =>
                         setRows((current) => {
                           setRowLots({});
+                          setRowPallets({});
                           return current.filter((_, rowIndex) => rowIndex !== index);
                         })
                       }
@@ -1827,13 +1921,62 @@ function CompletionDialog({
             {!allPalletsConfirmed && (
               <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
                 Select an existing pallet for every row, or create one in the
-                selected lot and warehouse. Pallet assignment is required.
+                selected lot. Pallets may contain boxes from multiple
+                warehouses. Pallet assignment is required.
               </p>
             )}
             {groupedRows.error && (
               <p role="alert" className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">
                 {groupedRows.error}
               </p>
+            )}
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={!readyToReview || previewMutation.isPending || pending}
+                onClick={() => void reviewInventoryImpact()}
+              >
+                <PackageCheck className="h-4 w-4" />
+                {previewMutation.isPending
+                  ? "Reviewing inventory impact…"
+                  : currentImpactPreview
+                    ? "Review inventory impact again"
+                    : "Review inventory impact"}
+              </button>
+              {!readyToReview && (
+                <span className="text-xs text-slate-500">
+                  Complete valid rows and confirm every lot and pallet first.
+                </span>
+              )}
+            </div>
+            {impactReview.notice && (
+              <p
+                role="alert"
+                className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm font-medium text-amber-950"
+              >
+                {impactReview.notice}
+              </p>
+            )}
+            {previewMutation.error && (
+              <p role="alert" className="text-sm text-rose-600">
+                {apiError(
+                  previewMutation.error,
+                  "Inventory impact could not be reviewed.",
+                )}
+              </p>
+            )}
+            {currentImpactPreview && (
+              <InboundImpactPreview
+                ordered={request.quantity}
+                preview={currentImpactPreview}
+                acceptRelocations={impactReview.acceptRelocations}
+                onAcceptRelocations={(accepted) =>
+                  setImpactReview((current) =>
+                    setInboundRelocationAcceptance(current, accepted),
+                  )
+                }
+              />
             )}
             {hasMismatch && (
               <label className="block rounded-lg border border-amber-200 bg-amber-50 p-3">
@@ -1869,7 +2012,10 @@ function CompletionDialog({
               </p>
             )}
             <DialogButtons
-              pending={pending}
+              pending={pending || previewMutation.isPending}
+              pendingLabel={
+                previewMutation.isPending ? "Reviewing…" : "Completing…"
+              }
               disabled={
                 actualCount < 1 ||
                 !allLotsConfirmed ||
@@ -1879,10 +2025,13 @@ function CompletionDialog({
                   request.quantity,
                   actualCount,
                   discrepancyReason,
-                )
+                ) ||
+                (!!currentImpactPreview && !canCompleteImpact)
               }
               confirmLabel={
-                hasMismatch ? "Accept with discrepancy" : "Accept delivery"
+                currentImpactPreview
+                  ? `Complete ${currentImpactPreview.summary.created + currentImpactPreview.summary.relocated} boxes (${currentImpactPreview.summary.created} new + ${currentImpactPreview.summary.relocated} relocated)`
+                  : "Review inventory impact"
               }
               onClose={onClose}
             />
@@ -1990,6 +2139,220 @@ function CompletionDialog({
   );
 }
 
+function InboundImpactPreview({
+  ordered,
+  preview,
+  acceptRelocations,
+  onAcceptRelocations,
+}: {
+  ordered: number;
+  preview: InboundCompletionPreview;
+  acceptRelocations: boolean;
+  onAcceptRelocations: (accepted: boolean) => void;
+}) {
+  const created = preview.rows.filter(
+    (row) => row.classification === "create",
+  );
+  const relocated = preview.rows.filter(
+    (row) => row.classification === "relocate",
+  );
+  const blocked = preview.rows.filter(
+    (row) => row.classification === "blocked",
+  );
+  const counts = inboundCompletionCounts(
+    ordered,
+    preview,
+    acceptRelocations,
+  );
+  const varianceLabel =
+    counts.variance === 0
+      ? "matches the ordered quantity"
+      : counts.variance < 0
+        ? `short by ${Math.abs(counts.variance)}`
+        : `over by ${counts.variance}`;
+
+  return (
+    <section className="space-y-4 rounded-lg border border-slate-300 bg-white p-4">
+      <div>
+        <h3 className="font-semibold text-slate-900">Inventory impact</h3>
+        <p className="text-xs text-slate-500">
+          Reviewed against request version {preview.request_version}.
+        </p>
+      </div>
+      <dl className="grid grid-cols-3 gap-3">
+        <ImpactMetric
+          label="New boxes"
+          value={preview.summary.created}
+          tone="text-emerald-700"
+        />
+        <ImpactMetric
+          label="Existing boxes to relocate"
+          value={preview.summary.relocated}
+          tone="text-sky-700"
+        />
+        <ImpactMetric
+          label="Blocked"
+          value={preview.summary.blocked}
+          tone={preview.summary.blocked > 0 ? "text-rose-700" : "text-slate-700"}
+        />
+      </dl>
+
+      {created.length > 0 && (
+        <ImpactRows title="New boxes">
+          {created.map((row) => (
+            <li key={impactRowKey(row)} className="rounded bg-emerald-50 p-2">
+              <strong className="font-mono">{row.box_number}</strong>
+              {" · "}
+              lot {row.lot}
+              {" → "}
+              box warehouse {row.target_warehouse_name} · pallet{" "}
+              {row.target_pallet_resolution.pallet_number}
+              {row.target_pallet_resolution.resolution === "will_create"
+                ? " (new pallet)"
+                : ""}
+            </li>
+          ))}
+        </ImpactRows>
+      )}
+
+      {relocated.length > 0 && (
+        <>
+          <ImpactRows title="Existing boxes to relocate">
+            {relocated.map((row) => (
+              <li key={impactRowKey(row)} className="rounded bg-sky-50 p-2">
+                <strong className="font-mono">{row.box_number}</strong>
+                {" · "}
+                lot {row.lot}
+                {" · current pallet "}
+                {row.current_pallet_number ?? "Unassigned"}
+                <span className="mt-0.5 block">
+                  {row.source_warehouse_name ?? "Unknown warehouse"}
+                  {" → "}
+                  {row.target_warehouse_name}
+                  {" · target pallet "}
+                  {row.target_pallet_resolution.pallet_number}
+                </span>
+              </li>
+            ))}
+          </ImpactRows>
+          <label className="flex items-start gap-3 rounded-lg border border-sky-300 bg-sky-50 p-3">
+            <input
+              type="checkbox"
+              className="mt-1"
+              checked={acceptRelocations}
+              onChange={(event) => onAcceptRelocations(event.target.checked)}
+            />
+            <span>
+              <strong className="text-sm text-sky-950">
+                Move all {preview.summary.relocated} eligible matched boxes
+              </strong>
+              <span className="mt-1 block text-xs text-sky-900">
+                This applies to every matched box; there is no per-row
+                selection and no source-warehouse access is required. Only
+                received, unreserved boxes in another warehouse qualify. Their
+                status and original receipt history and timestamp stay
+                unchanged; only each box’s warehouse and pallet assignment
+                change. The pallet itself has no warehouse location, so keeping
+                the same pallet across source and target warehouses is valid.
+              </span>
+            </span>
+          </label>
+        </>
+      )}
+
+      {blocked.length > 0 && (
+        <ImpactRows title="Blocked rows">
+          {blocked.map((row) => (
+            <li
+              key={impactRowKey(row)}
+              className="rounded border border-rose-200 bg-rose-50 p-2 text-rose-900"
+            >
+              <strong className="font-mono">{row.box_number}</strong>
+              {" · "}
+              lot {row.lot}
+              <span className="mt-0.5 block text-xs font-medium uppercase tracking-wide">
+                {row.blocked_code ?? "blocked"}
+              </span>
+              <span className="block text-sm">{inboundBlockedMessage(row)}</span>
+            </li>
+          ))}
+        </ImpactRows>
+      )}
+
+      <div
+        className={`rounded-lg border p-3 text-sm ${
+          preview.can_complete
+            ? "border-brand-200 bg-brand-50 text-brand-950"
+            : "border-rose-200 bg-rose-50 text-rose-950"
+        }`}
+      >
+        <strong className="block">Final confirmation</strong>
+        {preview.can_complete ? (
+          <>
+            <span className="block">
+              {counts.eligible} boxes will be completed: {counts.created} new +{" "}
+              {counts.relocated} relocated
+              {counts.relocated > 0
+                ? acceptRelocations
+                  ? " (accepted)"
+                  : " (relocation acceptance required)"
+                : ""}
+              .
+            </span>
+            <span className="block">
+              Current accepted count: {counts.accepted} of {counts.eligible}.
+            </span>
+            <span className="block">
+              Ordered {ordered}; this delivery {varianceLabel}.
+            </span>
+          </>
+        ) : (
+          <span>
+            Completion is blocked until all {counts.blocked} blocked rows are
+            resolved and the impact is reviewed again.
+          </span>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function ImpactMetric({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: number;
+  tone: string;
+}) {
+  return (
+    <div className="rounded-lg bg-slate-50 p-3">
+      <dt className="text-xs text-slate-500">{label}</dt>
+      <dd className={`text-xl font-semibold tabular-nums ${tone}`}>{value}</dd>
+    </div>
+  );
+}
+
+function ImpactRows({
+  title,
+  children,
+}: {
+  title: string;
+  children: ReactNode;
+}) {
+  return (
+    <div>
+      <h4 className="text-sm font-medium text-slate-800">{title}</h4>
+      <ul className="mt-2 space-y-2 text-sm">{children}</ul>
+    </div>
+  );
+}
+
+function impactRowKey(row: InboundCompletionPreviewRow): string {
+  return `${row.normalized_lot}\u0000${row.normalized_box_number}`;
+}
+
 function DeliveryVarianceSummary({
   ordered,
   actual,
@@ -2034,12 +2397,14 @@ function DialogButtons({
   pending,
   disabled = false,
   confirmLabel = "Complete request",
+  pendingLabel = "Completing…",
   onClose,
   onConfirm,
 }: {
   pending: boolean;
   disabled?: boolean;
   confirmLabel?: string;
+  pendingLabel?: string;
   onClose: () => void;
   onConfirm?: () => void;
 }) {
@@ -2060,7 +2425,7 @@ function DialogButtons({
         onClick={onConfirm}
       >
         <PackageCheck className="h-4 w-4" />
-        {pending ? "Completing…" : confirmLabel}
+        {pending ? pendingLabel : confirmLabel}
       </button>
     </div>
   );

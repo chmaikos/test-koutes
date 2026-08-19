@@ -25,11 +25,13 @@ and threshold alerts (in-app + email via Microsoft Graph).
   only archived boxes and completed, exclusive manual/XLSX self-receipts with
   no later workflow, lineage, merge, or reassignment history.
 - First-class Pallets form the durable `Lot → Pallet → Box` hierarchy. Pallet
-  identities are case-insensitive within a Lot, remain warehouse-scoped for
-  operations, expose list/detail/progress/audit views, and support audited
-  create, rename, assign/detach, move, archive, restore, merge absorption, and
-  purge behavior. Legacy boxes may remain `Unassigned`; every new manual,
-  imported, staged, or request-completed receipt requires a pallet.
+  identities are case-insensitive within a Lot and are organizational rather
+  than physical locations: one Pallet may contain Boxes in several warehouses.
+  Warehouse distributions and metrics are derived from ACL-visible Boxes.
+  Pallets support audited create, rename, assign/detach, archive, restore,
+  merge absorption, and purge behavior. Legacy boxes may remain `Unassigned`;
+  every new manual, imported, staged, or request-completed receipt requires a
+  pallet.
 - Full audit trail per box (timeline of events).
 - Audited inbound box orders and return requests with the explicit lifecycle
   `submitted → approved → preparing → ready_for_transport → in_transit →
@@ -67,7 +69,17 @@ and threshold alerts (in-app + email via Microsoft Graph).
   source rows. Pallet is required and may be mapped from a column or fixed
   value. Repeated rows for the same lot and box number are merged only when
   their normalized pallet agrees, with distinct item-description text combined
-  into one physical box record up to 2,000 characters.
+  deterministically into one physical box record up to 2,000 characters.
+- Inbound confirmation includes a read-only inventory-impact review before the
+  final write. It distinguishes new boxes, eligible received boxes in other
+  warehouses, and blocked identities; shows source-to-target and pallet
+  topology; and requires one default-off acceptance for every relocation.
+  Only the original requester or an Admin may preview and confirm at
+  `awaiting_confirmation`, and access to the target request warehouse is
+  sufficient—source access is neither required nor granted. Completion
+  rechecks the signed impact under locks and atomically creates or relocates
+  boxes while preserving status, original receipt timestamp, and prior request
+  history.
 - Versioned ERP delivery and return notes stored privately in local RustFS.
 - Explainable demand recommendations combine minimum stock, outstanding inbound
   and return work, lead-time demand, weighted 30/90-day history, safety stock,
@@ -577,29 +589,33 @@ deleted-only keys enter durable post-commit cleanup and Admin retry.
 ## Pallets domain and permissions
 
 Pallets are first-class identities between Lots and Boxes. A Pallet belongs to
-exactly one Lot, has one current warehouse, and has a case-insensitive number
-unique within that Lot. A Box may be assigned only to an active Pallet with the
-same Lot and warehouse. Existing pre-0032 boxes may remain nullable and appear
-as **Unassigned**, but all new manual, XLSX, staged, direct-inbound, and request
-completion writes require a Pallet and preserve its ID/number snapshot on the
-request item.
+exactly one Lot and has a case-insensitive number unique within that Lot. It
+has no current warehouse. A Box may be assigned only to an active Pallet in the
+same Lot, so one Pallet can safely contain Boxes in multiple warehouses.
+Existing pre-0032 boxes may remain nullable and appear as **Unassigned**, but
+all new manual, XLSX, staged, direct-inbound, and request-completion writes
+require a Pallet and preserve its ID/number snapshot on the request item.
 
-Viewers and movers can read Pallets inside their warehouse ACL. Operators and
-admins can create Pallets, assign/detach Boxes, and move a complete Pallet;
-rename, archive, restore, and inactive visibility are admin-only. A Pallet move
-locks the Pallet and contained Boxes, moves them together, and reports active
-return requests cancelled by the warehouse change. Removing the last Box
-automatically archives the empty source Pallet; absorbed merge sources cannot
-be restored.
+Non-admin Pallet identity is visible only through an accessible Box or
+accessible staged Lot context; counts, status metrics, audit metadata, and
+warehouse distributions are ACL-scoped. Operators and admins can create
+Pallets and assign/detach Boxes when they can access every affected Box
+warehouse. Rename, archive, restore, and inactive visibility are admin-only.
+Warehouse moves, forced corrections, bulk moves, returns, inbound relocation,
+and restore preserve the Box's Pallet; changing Lot detaches or explicitly
+reassigns it. Removing the last Box automatically archives the empty source
+Pallet; absorbed merge sources cannot be restored. The retired Pallet move
+endpoint returns HTTP 410 without changing data.
 
 Lot merge handles same-number Pallets deterministically: the target-Lot Pallet
 survives, source Boxes are transferred, and the source Pallet becomes an
-absorbed audit tombstone linked to its survivor. Non-colliding Pallets move to
+absorbed audit tombstone linked to its survivor, regardless of either Pallet's
+Box warehouse distribution. Non-colliding Pallets move to
 the target Lot. Preview signatures include the Pallet graph and all mutation
 paths revalidate Lot/Pallet/Box state under deterministic locks. Safe and force
 purges include Pallet IDs, events, and non-sensitive snapshots in their impact
-and independent purge audit. Active Pallets also prevent warehouse archival,
-including empty active Pallets.
+and independent purge audit. Warehouse archival is based on physical Boxes and
+blocking requests, not organizational Pallet rows.
 
 Pallet list/detail queries, options, progress metrics, contained-Box pagination,
 integrity reporting, audit events, CSV/XLSX summaries, and SSE invalidation are
@@ -687,7 +703,8 @@ Pallet endpoints are:
 
 - `GET/POST /api/pallets`, `GET /api/pallets/options`, and
   `GET /api/pallets/{pallet_id}`,
-- `PATCH /api/pallets/{pallet_id}/rename`, `/archive`, `/restore`, and `/move`,
+- `PATCH /api/pallets/{pallet_id}/rename`, plus `POST` archive/restore actions;
+  the legacy `/move` action is an HTTP 410 no-op,
 - `POST /api/pallets/{pallet_id}/boxes/assign` and `/boxes/detach`,
 - `GET /api/pallets/{pallet_id}/events` and `/integrity`,
 - ACL-scoped `GET /api/exports/pallets.csv` and
@@ -708,7 +725,7 @@ invalidate the relevant request, inventory, and dashboard queries.
 You can run things directly without Docker if you prefer; see
 [`api/README.md`](api/README.md) and [`web/README.md`](web/README.md).
 
-## Deploying Lot/Pallet migrations 0027–0032
+## Deploying Lot/Pallet migrations 0027–0033
 
 `0027_first_class_lots` is a coordinated cutover from `boxes.lot` to the
 required `boxes.lot_id` foreign key. Stop old API instances, run the read-only
@@ -739,7 +756,16 @@ requires Pallets on new writes, stop old writers, back up PostgreSQL and
 RustFS, apply `alembic upgrade head`, and run the read-only
 `api/scripts/pallet_preflight.py` report. Reconcile legacy `Unassigned` rows and
 every integrity conflict operationally. PostgreSQL enum values are added during
-the migration and retained on downgrade.
+the migration and retained on downgrade. `0033_organizational_pallets` then
+removes `pallets.current_warehouse_id`; Pallet warehouse distributions are
+derived only from assigned Boxes.
+
+Downgrade from 0033 is guarded and data-preserving only when every Pallet has at
+least one assigned Box and all of its Boxes are in exactly one warehouse. It
+refuses empty and multi-warehouse Pallets. Generate and inspect both PostgreSQL
+and SQLite offline SQL for `0033`, verify one Alembic head, rehearse
+upgrade/downgrade on disposable databases, and rerun `pallet_preflight.py`
+before reopening writes.
 Downgrade is blocked when Pallet data/audit snapshots, assignments, request
 snapshots, or item descriptions longer than the old 200-character shape exist.
 See

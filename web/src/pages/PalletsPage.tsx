@@ -23,7 +23,6 @@ export function PalletsPage() {
   const [params, setParams] = useSearchParams();
   const parsed = useMemo(() => parsePalletSearchParams(params), [params]);
   const pallets = usePallets(parsed.filters, parsed.page, parsed.pageSize);
-  const warehouses = useWarehouses(true);
   const canWrite = useHasRole(["admin", "operator"]);
   const isAdmin = useHasRole(["admin"]);
   const [creating, setCreating] = useState(false);
@@ -46,7 +45,7 @@ export function PalletsPage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Pallets</h1>
           <p className="text-sm text-slate-500">
-            Track pallet inventory, status distribution, and completion across accessible warehouses.
+            Track pallet organization and box progress across warehouses.
           </p>
         </div>
         {canWrite && (
@@ -57,15 +56,15 @@ export function PalletsPage() {
       </header>
       {!isAdmin && (
         <p className="rounded-lg border border-sky-200 bg-sky-50 p-3 text-sm text-sky-900">
-          Pallets and metrics are scoped to your accessible warehouses.
+          Box counts and warehouse distributions include accessible warehouses only.
         </p>
       )}
-      <section className="card card-pad grid gap-3 md:grid-cols-2 xl:grid-cols-7">
+      <section className="card card-pad grid gap-3 md:grid-cols-2 xl:grid-cols-6">
         <label className="block xl:col-span-2">
           <span className="text-xs text-slate-500">Search</span>
           <div className="relative">
             <Search className="pointer-events-none absolute left-2 top-2.5 h-4 w-4 text-slate-400" />
-            <input className="input pl-8" placeholder="Pallet number, lot, or warehouse" value={parsed.filters.search ?? ""} onChange={(e) => setParam("q", e.target.value)} />
+            <input className="input pl-8" placeholder="Pallet number or lot" value={parsed.filters.search ?? ""} onChange={(e) => setParam("q", e.target.value)} />
           </div>
         </label>
         <LotPicker
@@ -91,13 +90,6 @@ export function PalletsPage() {
             setParams(next);
           }}
         />
-        <label className="block">
-          <span className="text-xs text-slate-500">Warehouse</span>
-          <select className="input" value={parsed.filters.warehouse_id ?? ""} onChange={(e) => setParam("warehouse_id", e.target.value)}>
-            <option value="">All accessible</option>
-            {warehouses.data?.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}
-          </select>
-        </label>
         <label className="block">
           <span className="text-xs text-slate-500">Progress</span>
           <select className="input" value={parsed.filters.progress_state ?? ""} onChange={(e) => setParam("progress", e.target.value)}>
@@ -130,13 +122,12 @@ export function PalletsPage() {
         <section className="card overflow-hidden">
           <div className="hidden overflow-x-auto md:block">
             <table className="w-full text-sm">
-              <thead className="bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500"><tr><th className="px-4 py-3">Pallet</th><th className="px-4 py-3">Lot</th><th className="px-4 py-3">Warehouse</th><th className="px-4 py-3">Boxes</th><th className="min-w-52 px-4 py-3">Status distribution</th><th className="px-4 py-3">Completion</th><th className="px-4 py-3">Activity</th></tr></thead>
+              <thead className="bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500"><tr><th className="px-4 py-3">Pallet</th><th className="px-4 py-3">Lot</th><th className="px-4 py-3">Boxes</th><th className="min-w-52 px-4 py-3">Status distribution</th><th className="px-4 py-3">Completion</th><th className="px-4 py-3">Activity</th></tr></thead>
               <tbody className="divide-y divide-slate-100">
                 {pallets.data.items.map((pallet) => (
                   <tr key={pallet.id} className="hover:bg-slate-50">
-                    <td className="px-4 py-3"><Link className="font-medium text-brand-700 hover:underline" to={`/pallets/${pallet.id}`}>{pallet.pallet_number}</Link>{!pallet.is_active && <span className="ml-2 rounded bg-slate-200 px-1.5 py-0.5 text-xs">Archived</span>}</td>
+                    <td className="px-4 py-3"><Link className="font-medium text-brand-700 hover:underline" to={`/pallets/${pallet.id}`}>{pallet.pallet_number}</Link>{!pallet.is_active && <span className="ml-2 rounded bg-slate-200 px-1.5 py-0.5 text-xs">Archived</span>}<p className="mt-1 text-xs text-slate-500">{pallet.warehouse_names.length ? `Boxes currently in ${pallet.warehouse_names.join(", ")}` : "No boxes in accessible warehouses"}</p></td>
                     <td className="px-4 py-3"><Link className="text-brand-700 hover:underline" to={`/lots/${pallet.lot_id}`}>{pallet.lot_name}</Link></td>
-                    <td className="px-4 py-3">{pallet.warehouse_name}</td>
                     <td className="px-4 py-3 tabular-nums">{pallet.box_count}</td>
                     <td className="px-4 py-3"><LotStatusBar counts={pallet.status_counts} /></td>
                     <td className="px-4 py-3 font-medium">{palletCompletionLabel(pallet.completion_percent)}</td>
@@ -149,7 +140,7 @@ export function PalletsPage() {
           <div className="divide-y divide-slate-100 md:hidden">
             {pallets.data.items.map((pallet) => (
               <article key={pallet.id} className="space-y-2 p-4">
-                <div className="flex justify-between gap-3"><div><Link className="font-semibold text-brand-700" to={`/pallets/${pallet.id}`}>{pallet.pallet_number}</Link><p className="text-xs text-slate-500">{pallet.lot_name} · {pallet.warehouse_name}</p></div><strong>{palletCompletionLabel(pallet.completion_percent)}</strong></div>
+                <div className="flex justify-between gap-3"><div><Link className="font-semibold text-brand-700" to={`/pallets/${pallet.id}`}>{pallet.pallet_number}</Link><p className="text-xs text-slate-500">{pallet.lot_name}</p><p className="text-xs text-slate-500">{pallet.warehouse_names.length ? `Boxes currently in ${pallet.warehouse_names.join(", ")}` : "No boxes in accessible warehouses"}</p></div><strong>{palletCompletionLabel(pallet.completion_percent)}</strong></div>
                 <LotStatusBar counts={pallet.status_counts} />
                 <p className="text-xs text-slate-600">{pallet.box_count} boxes · {pallet.completed_box_count} completed{!pallet.is_active ? " · Archived" : ""}</p>
               </article>
@@ -172,29 +163,35 @@ export function PalletsPage() {
 function CreatePalletDialog({ onClose }: { onClose: () => void }) {
   const warehouses = useWarehouses();
   const create = useCreatePallet();
-  const [warehouseId, setWarehouseId] = useState<number | "">("");
   const [lot, setLot] = useState<LotSelection | null>(null);
   const [number, setNumber] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const authorizationWarehouseId = warehouses.data?.find(
+    (warehouse) => warehouse.is_active,
+  )?.id;
   return (
     <div className="modal-backdrop z-40">
       <form className="modal-sheet max-w-md space-y-3" onSubmit={async (event) => {
         event.preventDefault();
-        if (!warehouseId || !lot) return;
+        if (!lot) return;
+        if (!authorizationWarehouseId) {
+          setError("Pallet creation needs access to at least one active warehouse for authorization. This does not set a pallet location.");
+          return;
+        }
         try {
-          await create.mutateAsync({ warehouse_id: warehouseId, lot_id: lot.id, pallet_number: number.trim() });
+          await create.mutateAsync({ warehouse_id: authorizationWarehouseId, lot_id: lot.id, pallet_number: number.trim() });
           onClose();
         } catch (caught) {
           const detail = (caught as { response?: { data?: { detail?: unknown } } }).response?.data?.detail;
-          setError(typeof detail === "string" ? detail : "The pallet could not be created.");
+          const message = typeof detail === "string" ? detail : "The pallet could not be created.";
+          setError(`${message} An active accessible warehouse was supplied only as authorization context; it does not locate the pallet.`);
         }
       }}>
         <h2 className="text-lg font-semibold">Create pallet</h2>
-        <label className="block"><span className="text-xs text-slate-500">Warehouse</span><select required className="input" value={warehouseId} onChange={(e) => { setWarehouseId(e.target.value ? Number(e.target.value) : ""); setLot(null); }}><option value="">Choose warehouse</option>{warehouses.data?.filter((warehouse) => warehouse.is_active).map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}</select></label>
-        <LotPicker value={lot} onChange={setLot} warehouseId={warehouseId || undefined} canCreate disabled={!warehouseId} />
+        <LotPicker value={lot} onChange={setLot} warehouseId={authorizationWarehouseId} canCreate />
         <label className="block"><span className="text-xs text-slate-500">Pallet number</span><input required maxLength={64} className="input" value={number} onChange={(e) => setNumber(e.target.value)} /></label>
         {error && <p role="alert" className="text-sm text-rose-600">{error}</p>}
-        <div className="flex justify-end gap-2"><button type="button" className="btn-secondary" onClick={onClose}>Cancel</button><button className="btn-primary" disabled={create.isPending || !lot || !warehouseId || !number.trim()}>{create.isPending ? "Creating…" : "Create pallet"}</button></div>
+        <div className="flex justify-end gap-2"><button type="button" className="btn-secondary" onClick={onClose}>Cancel</button><button className="btn-primary" disabled={create.isPending || !lot || !number.trim()}>{create.isPending ? "Creating…" : "Create pallet"}</button></div>
       </form>
     </div>
   );

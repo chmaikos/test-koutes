@@ -166,7 +166,6 @@ def test_pallet_summary_csv_and_xlsx_exports(client, session) -> None:
     lot = _lot(session, "Export Lot")
     pallet = Pallet(
         lot_id=lot.id,
-        current_warehouse_id=1,
         pallet_number="Export Rack",
     )
     session.add(pallet)
@@ -177,6 +176,15 @@ def test_pallet_summary_csv_and_xlsx_exports(client, session) -> None:
             lot_id=lot.id,
             pallet_id=pallet.id,
             current_warehouse_id=1,
+            status=BoxStatus.received,
+        )
+    )
+    session.add(
+        Box(
+            box_number="002",
+            lot_id=lot.id,
+            pallet_id=pallet.id,
+            current_warehouse_id=2,
             status=BoxStatus.received,
         )
     )
@@ -193,8 +201,8 @@ def test_pallet_summary_csv_and_xlsx_exports(client, session) -> None:
         "Pallet Number",
         "Lot ID",
         "Lot",
-        "Warehouse ID",
-        "Warehouse",
+        "Warehouse IDs",
+        "Warehouses",
     ]
     assert csv_rows[1][0:4] == [
         str(pallet.id),
@@ -202,7 +210,8 @@ def test_pallet_summary_csv_and_xlsx_exports(client, session) -> None:
         str(lot.id),
         "Export Lot",
     ]
-    assert csv_rows[1][7:9] == ["1", "1"]
+    assert csv_rows[1][4:6] == ["1; 2", "Building 1; Building 2"]
+    assert csv_rows[1][7:9] == ["2", "2"]
 
     xlsx_response = client.get(
         "/api/exports/pallets.xlsx",
@@ -213,7 +222,8 @@ def test_pallet_summary_csv_and_xlsx_exports(client, session) -> None:
     try:
         rows = list(workbook["Pallet summary"].iter_rows(values_only=True))
         assert rows[1][0:4] == (pallet.id, "Export Rack", lot.id, "Export Lot")
-        assert rows[1][7:9] == (1, 1)
+        assert rows[1][4:6] == ("1; 2", "Building 1; Building 2")
+        assert rows[1][7:9] == (2, 2)
     finally:
         workbook.close()
 
@@ -223,16 +233,34 @@ def test_acl_active_filters_options_and_detail(client, session, make_user) -> No
     warehouse = session.get(Warehouse, 1)
     assert warehouse is not None
     warehouse.name = "North Search Depot"
-    one = Pallet(lot_id=lot.id, current_warehouse_id=1, pallet_number="One")
-    two = Pallet(lot_id=lot.id, current_warehouse_id=2, pallet_number="Two")
+    one = Pallet(lot_id=lot.id, pallet_number="One")
+    two = Pallet(lot_id=lot.id, pallet_number="Two")
     archived = Pallet(
         lot_id=lot.id,
-        current_warehouse_id=1,
         pallet_number="Old",
         is_active=False,
         archived_at=sa.func.now(),
     )
     session.add_all([one, two, archived])
+    session.flush()
+    session.add_all(
+        [
+            Box(
+                box_number="one",
+                lot_id=lot.id,
+                pallet_id=one.id,
+                current_warehouse_id=1,
+                status=BoxStatus.received,
+            ),
+            Box(
+                box_number="two",
+                lot_id=lot.id,
+                pallet_id=two.id,
+                current_warehouse_id=2,
+                status=BoxStatus.received,
+            ),
+        ]
+    )
     session.commit()
 
     operator = make_user(UserRole.operator)
@@ -241,8 +269,12 @@ def test_acl_active_filters_options_and_detail(client, session, make_user) -> No
 
     listed = client.get("/api/pallets")
     assert listed.status_code == 200
-    assert [item["pallet_number"] for item in listed.json()["items"]] == ["One"]
-    assert client.get(f"/api/pallets/{two.id}").status_code == 404
+    items = {item["pallet_number"]: item for item in listed.json()["items"]}
+    assert set(items) == {"One", "Two"}
+    assert items["One"]["warehouse_ids"] == [1]
+    assert items["Two"]["warehouse_ids"] == []
+    assert items["Two"]["box_count"] == 0
+    assert client.get(f"/api/pallets/{two.id}").status_code == 200
     assert client.get("/api/pallets?include_inactive=true").status_code == 403
     options = client.get("/api/pallets/options?search=one")
     assert options.status_code == 200
@@ -261,7 +293,7 @@ def test_acl_active_filters_options_and_detail(client, session, make_user) -> No
 
 def test_summary_uses_lot_completion_semantics(client, session) -> None:
     lot = _lot(session)
-    pallet = Pallet(lot_id=lot.id, current_warehouse_id=1, pallet_number="Metrics")
+    pallet = Pallet(lot_id=lot.id, pallet_number="Metrics")
     session.add(pallet)
     session.flush()
     for index, status in enumerate(BoxStatus, start=1):
@@ -377,7 +409,7 @@ def test_rename_requires_admin_and_active_parents(
     warehouse.is_active = False
     warehouse.archived_at = sa.func.now()
     session.commit()
-    blocked = client.patch(
+    renamed = client.patch(
         f"/api/pallets/{created['id']}/rename",
         json={
             "new_pallet_number": "After",
@@ -385,17 +417,16 @@ def test_rename_requires_admin_and_active_parents(
             "expected_version": created["version"],
         },
     )
-    assert blocked.status_code == 409
+    assert renamed.status_code == 200
 
 
-def test_active_pallet_blocks_warehouse_archive(client, session) -> None:
+def test_active_pallet_does_not_block_warehouse_archive(client, session) -> None:
     lot = _lot(session)
-    session.add(Pallet(lot_id=lot.id, current_warehouse_id=1, pallet_number="Physical"))
+    session.add(Pallet(lot_id=lot.id, pallet_number="Organizational"))
     session.commit()
 
-    blocked = client.delete("/api/warehouses/1")
-    assert blocked.status_code == 409
-    assert blocked.json()["detail"]["active_pallets"] == 1
+    archived = client.delete("/api/warehouses/1")
+    assert archived.status_code == 200
 
 
 def test_preflight_reports_unassigned_and_impossible_assignments() -> None:
@@ -408,23 +439,28 @@ def test_preflight_reports_unassigned_and_impossible_assignments() -> None:
             {
                 "id": 5,
                 "lot_id": 10,
-                "current_warehouse_id": 1,
                 "normalized_pallet_number": "p-1",
                 "is_active": False,
                 "merged_into_lot_id": None,
-                "warehouse_is_active": True,
             }
         ],
     )
     assert report["unassigned_box_ids"] == [1]
     assert report["safe"] is False
     assert report["conflicts"]["lot_mismatches"][0]["box_id"] == 2
-    assert report["conflicts"]["warehouse_mismatches"][0]["box_id"] == 2
+    assert "warehouse_mismatches" not in report["conflicts"]
+    assert report["warehouse_distribution"] == [
+        {
+            "pallet_id": 5,
+            "warehouses": [{"warehouse_id": 2, "box_count": 1}],
+        }
+    ]
     assert report["conflicts"]["inactive_pallet_assignments"][0]["box_id"] == 2
 
 
 def test_migration_metadata_offline_sql_and_single_head() -> None:
     assert Pallet.__table__.c.normalized_pallet_number.type.length == 64
+    assert "current_warehouse_id" not in Pallet.__table__.c
     assert Box.__table__.c.pallet_id.nullable is True
 
     migration = _load_migration()
@@ -461,7 +497,7 @@ def test_migration_metadata_offline_sql_and_single_head() -> None:
     config = Config(str(root / "alembic.ini"))
     config.set_main_option("script_location", str(root / "alembic"))
     assert ScriptDirectory.from_config(config).get_heads() == [
-        "0032_first_class_pallets"
+        "0033_organizational_pallets"
     ]
     assert migration.down_revision == "0031_return_target_warehouse"
 

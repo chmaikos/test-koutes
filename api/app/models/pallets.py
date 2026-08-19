@@ -25,7 +25,6 @@ from app.db import Base
 if TYPE_CHECKING:
     from app.models.boxes import Box
     from app.models.lots import Lot
-    from app.models.warehouses import Warehouse
 
 
 MAX_PALLET_NUMBER_LENGTH = 64
@@ -86,7 +85,6 @@ class Pallet(Base):
             "AND absorbed_at IS NOT NULL)",
             name="ck_pallets_absorbed_state",
         ),
-        Index("ix_pallets_warehouse_active", "current_warehouse_id", "is_active"),
         Index("ix_pallets_lot_active", "lot_id", "is_active"),
         Index("ix_pallets_absorbed_into", "absorbed_into_pallet_id"),
     )
@@ -94,9 +92,6 @@ class Pallet(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     lot_id: Mapped[int] = mapped_column(
         ForeignKey("lots.id", ondelete="RESTRICT"), nullable=False
-    )
-    current_warehouse_id: Mapped[int] = mapped_column(
-        ForeignKey("warehouses.id", ondelete="RESTRICT"), nullable=False
     )
     pallet_number: Mapped[str] = mapped_column(
         String(MAX_PALLET_NUMBER_LENGTH), nullable=False
@@ -137,7 +132,6 @@ class Pallet(Base):
     __mapper_args__ = {"version_id_col": version}
 
     lot: Mapped[Lot] = relationship(back_populates="pallets")
-    current_warehouse: Mapped[Warehouse] = relationship()
     boxes: Mapped[list[Box]] = relationship(back_populates="pallet")
     events: Mapped[list[PalletEvent]] = relationship(
         back_populates="pallet",

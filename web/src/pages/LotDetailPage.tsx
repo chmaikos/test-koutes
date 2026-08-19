@@ -188,7 +188,8 @@ export function LotDetailPage() {
                 <strong className="text-brand-700">{pallet.pallet_number}</strong>
                 <span className="text-xs text-slate-500">{pallet.box_count} boxes</span>
               </div>
-              <p className="mt-1 text-xs text-slate-600">{pallet.warehouse_name} · {pallet.completion_percent === null ? "N/A" : `${Math.round(pallet.completion_percent)}%`} complete</p>
+              <p className="mt-1 text-xs text-slate-600">{pallet.completion_percent === null ? "N/A" : `${Math.round(pallet.completion_percent)}%`} complete</p>
+              <p className="mt-1 text-xs text-slate-500">{pallet.warehouse_names.length ? `Boxes currently in ${pallet.warehouse_names.join(", ")}` : "No boxes in accessible warehouses"}</p>
             </Link>
           ))}
           <Link to={`/boxes?lot_id=${summary.id}&lot_name=${encodeURIComponent(summary.name)}&unassigned_pallet=true`} className="rounded-lg border border-dashed border-slate-300 p-3 hover:bg-slate-50">

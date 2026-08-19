@@ -22,8 +22,10 @@ def analyze_rows(
     unassigned_box_ids: list[int] = []
     missing_pallet_references: list[dict[str, int]] = []
     lot_mismatches: list[dict[str, int]] = []
-    warehouse_mismatches: list[dict[str, int]] = []
     inactive_pallet_assignments: list[dict[str, int]] = []
+    warehouse_counts: dict[int, dict[int, int]] = {
+        pallet_id: {} for pallet_id in pallets
+    }
 
     for box in box_rows:
         box_id = int(box["id"])
@@ -46,17 +48,9 @@ def analyze_rows(
                     "pallet_lot_id": int(pallet["lot_id"]),
                 }
             )
-        if int(box["current_warehouse_id"]) != int(
-            pallet["current_warehouse_id"]
-        ):
-            warehouse_mismatches.append(
-                {
-                    "box_id": box_id,
-                    "box_warehouse_id": int(box["current_warehouse_id"]),
-                    "pallet_id": int(pallet_id),
-                    "pallet_warehouse_id": int(pallet["current_warehouse_id"]),
-                }
-            )
+        warehouse_id = int(box["current_warehouse_id"])
+        pallet_warehouses = warehouse_counts[int(pallet_id)]
+        pallet_warehouses[warehouse_id] = pallet_warehouses.get(warehouse_id, 0) + 1
         if not bool(pallet["is_active"]):
             inactive_pallet_assignments.append(
                 {"box_id": box_id, "pallet_id": int(pallet_id)}
@@ -68,9 +62,7 @@ def analyze_rows(
     for pallet in pallet_rows:
         key = (int(pallet["lot_id"]), str(pallet["normalized_pallet_number"]))
         grouped.setdefault(key, []).append(int(pallet["id"]))
-        if pallet["merged_into_lot_id"] is not None or not bool(
-            pallet["warehouse_is_active"]
-        ):
+        if pallet["merged_into_lot_id"] is not None:
             invalid_parent_pallet_ids.append(int(pallet["id"]))
     for (lot_id, normalized), pallet_ids in grouped.items():
         if len(pallet_ids) > 1:
@@ -85,7 +77,6 @@ def analyze_rows(
     conflicts = {
         "missing_pallet_references": missing_pallet_references,
         "lot_mismatches": lot_mismatches,
-        "warehouse_mismatches": warehouse_mismatches,
         "inactive_pallet_assignments": inactive_pallet_assignments,
         "duplicate_identities": duplicate_identities,
         "invalid_parent_pallet_ids": sorted(invalid_parent_pallet_ids),
@@ -96,6 +87,16 @@ def analyze_rows(
         "pallet_count": len(pallet_rows),
         "unassigned_box_count": len(unassigned_box_ids),
         "unassigned_box_ids": sorted(unassigned_box_ids),
+        "warehouse_distribution": [
+            {
+                "pallet_id": pallet_id,
+                "warehouses": [
+                    {"warehouse_id": warehouse_id, "box_count": count}
+                    for warehouse_id, count in sorted(warehouse_counts[pallet_id].items())
+                ],
+            }
+            for pallet_id in sorted(warehouse_counts)
+        ],
         "conflicts": conflicts,
     }
 
@@ -106,6 +107,7 @@ def _render_text(report: Mapping[str, Any]) -> str:
         f"Pallets: {report['pallet_count']}",
         f"Unassigned boxes: {report['unassigned_box_count']} "
         f"{report['unassigned_box_ids']}",
+        f"Pallet warehouse distribution: {report['warehouse_distribution']}",
     ]
     for name, values in report["conflicts"].items():
         if values:
@@ -149,14 +151,11 @@ def main() -> int:
                         SELECT
                             p.id,
                             p.lot_id,
-                            p.current_warehouse_id,
                             p.normalized_pallet_number,
                             p.is_active,
-                            l.merged_into_lot_id,
-                            w.is_active AS warehouse_is_active
+                            l.merged_into_lot_id
                         FROM pallets p
                         JOIN lots l ON l.id = p.lot_id
-                        JOIN warehouses w ON w.id = p.current_warehouse_id
                         ORDER BY p.id
                         """
                     )

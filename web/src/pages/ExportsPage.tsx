@@ -18,7 +18,6 @@ export function ExportsPage() {
   const [lotProgress, setLotProgress] = useState<LotProgressState | "">("");
   const [lotDownloading, setLotDownloading] = useState<"csv" | "xlsx" | null>(null);
   const [palletSearch, setPalletSearch] = useState("");
-  const [palletWarehouseId, setPalletWarehouseId] = useState<number | "">("");
   const [palletProgress, setPalletProgress] = useState<PalletProgressState | "">("");
   const [palletDownloading, setPalletDownloading] = useState<"csv" | "xlsx" | null>(null);
   const [productivityWarehouseId, setProductivityWarehouseId] = useState<
@@ -150,7 +149,6 @@ export function ExportsPage() {
     try {
       const params: Record<string, string> = {};
       if (palletSearch.trim()) params.search = palletSearch.trim();
-      if (palletWarehouseId) params.warehouse_id = String(palletWarehouseId);
       if (palletProgress) params.progress_state = palletProgress;
       const response = await api.get<Blob>(`/exports/pallets.${format}`, {
         params,
@@ -316,13 +314,13 @@ export function ExportsPage() {
         <div>
           <h2 className="font-semibold">Pallet summary</h2>
           <p className="text-xs text-slate-500">
-            Export ACL-scoped pallet numbers, lots, warehouses, box counts,
-            status distribution, completion, and latest activity.
+            Export ACL-scoped pallet organization across box warehouses,
+            including lots, box counts, status distribution, completion, and
+            latest activity.
           </p>
         </div>
-        <div className="grid gap-4 md:grid-cols-3">
+        <div className="grid gap-4 md:grid-cols-2">
           <label className="block"><span className="text-xs text-slate-500">Search</span><input className="input" placeholder="Pallet number or lot" value={palletSearch} onChange={(event) => setPalletSearch(event.target.value)} /></label>
-          <label className="block"><span className="text-xs text-slate-500">Warehouse</span><select className="input" value={palletWarehouseId} onChange={(event) => setPalletWarehouseId(event.target.value ? Number(event.target.value) : "")}><option value="">All accessible</option>{warehouses.data?.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}</select></label>
           <label className="block"><span className="text-xs text-slate-500">Progress</span><select className="input" value={palletProgress} onChange={(event) => setPalletProgress(event.target.value as PalletProgressState | "")}><option value="">All</option><option value="active">Active</option><option value="in_progress">In progress</option><option value="complete">Complete</option><option value="no_eligible">No eligible boxes</option></select></label>
         </div>
         <div className="flex flex-wrap gap-3">

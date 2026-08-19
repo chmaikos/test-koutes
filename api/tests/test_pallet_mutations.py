@@ -35,7 +35,6 @@ def _lot(session, name: str) -> Lot:
 def _pallet(session, lot: Lot, number: str, warehouse_id: int = 1) -> Pallet:
     pallet = Pallet(
         lot_id=lot.id,
-        current_warehouse_id=warehouse_id,
         pallet_number=number,
     )
     session.add(pallet)
@@ -140,6 +139,9 @@ def test_bulk_assign_reassign_detach_and_audit(client, session) -> None:
     ).all()
     assert PalletEventType.boxes_assigned in pallet_types
     assert PalletEventType.boxes_unassigned in pallet_types
+    session.expire_all()
+    assert session.get(Pallet, source.id).is_active is True
+    assert session.get(Pallet, target.id).is_active is False
 
 
 def test_assignment_acl_archived_and_warehouse_guards(
@@ -158,7 +160,7 @@ def test_assignment_acl_archived_and_warehouse_guards(
             f"/api/pallets/{target.id}/boxes/assign",
             json={"box_ids": [box.id], "reason": "Denied"},
         ).status_code
-        == 403
+        == 404
     )
 
     admin = make_user(UserRole.admin)
@@ -175,7 +177,7 @@ def test_assignment_acl_archived_and_warehouse_guards(
     )
 
 
-def test_pallet_move_empty_and_with_boxes(client, session) -> None:
+def test_pallet_move_is_gone_without_mutation(client, session) -> None:
     lot = _lot(session, "Moves")
     empty = _pallet(session, lot, "Empty")
     loaded = _pallet(session, lot, "Loaded")
@@ -187,22 +189,21 @@ def test_pallet_move_empty_and_with_boxes(client, session) -> None:
         f"/api/pallets/{empty.id}/move",
         json={"warehouse_id": 2, "expected_version": empty.version},
     )
-    assert empty_move.status_code == 200, empty_move.text
-    assert empty_move.json()["affected_box_count"] == 0
+    assert empty_move.status_code == 410, empty_move.text
+    assert "pallets have no location" in empty_move.json()["detail"]
 
     loaded_move = client.post(
         f"/api/pallets/{loaded.id}/move",
         json={"warehouse_id": 2, "expected_version": loaded.version},
     )
-    assert loaded_move.status_code == 200, loaded_move.text
-    assert loaded_move.json()["box_ids"] == [first.id, second.id]
+    assert loaded_move.status_code == 410, loaded_move.text
     session.refresh(first)
     session.refresh(second)
-    assert first.current_warehouse_id == second.current_warehouse_id == 2
+    assert first.current_warehouse_id == second.current_warehouse_id == 1
     assert first.pallet_id == second.pallet_id == loaded.id
 
 
-def test_normal_move_rolls_back_and_force_move_cancels_requests(
+def test_deprecated_pallet_move_never_cancels_requests(
     client, session
 ) -> None:
     lot = _lot(session, "Reserved Move")
@@ -217,7 +218,7 @@ def test_normal_move_rolls_back_and_force_move_cancels_requests(
         f"/api/pallets/{pallet.id}/move",
         json={"warehouse_id": 2, "expected_version": version},
     )
-    assert blocked.status_code == 409
+    assert blocked.status_code == 410
     session.refresh(free)
     session.refresh(reserved)
     assert free.current_warehouse_id == reserved.current_warehouse_id == 1
@@ -226,7 +227,7 @@ def test_normal_move_rolls_back_and_force_move_cancels_requests(
         f"/api/pallets/{pallet.id}/move",
         json={"warehouse_id": 2, "expected_version": version, "force": True},
     )
-    assert no_reason.status_code == 400
+    assert no_reason.status_code == 410
     forced = client.post(
         f"/api/pallets/{pallet.id}/move",
         json={
@@ -236,13 +237,12 @@ def test_normal_move_rolls_back_and_force_move_cancels_requests(
             "reason": "Emergency relocation",
         },
     )
-    assert forced.status_code == 200, forced.text
-    assert forced.json()["cancelled_request_ids"] == [request.id]
+    assert forced.status_code == 410, forced.text
     session.refresh(request)
-    assert request.status == BoxRequestStatus.cancelled
+    assert request.status == BoxRequestStatus.submitted
 
 
-def test_public_box_and_lot_moves_detach_incompatible_pallet(
+def test_box_warehouse_move_preserves_pallet_but_lot_move_detaches(
     client, session
 ) -> None:
     source_lot = _lot(session, "Source Lot")
@@ -256,8 +256,8 @@ def test_public_box_and_lot_moves_detach_incompatible_pallet(
         json={"warehouse_id": 2, "note": "Move loose box"},
     )
     assert moved.status_code == 200, moved.text
-    assert moved.json()["pallet_id"] is None
-    assert moved.json()["detached_pallet_id"] == pallet.id
+    assert moved.json()["pallet_id"] == pallet.id
+    assert moved.json()["detached_pallet_id"] is None
 
     box.current_warehouse_id = 1
     box.pallet_id = pallet.id
@@ -274,7 +274,7 @@ def test_public_box_and_lot_moves_detach_incompatible_pallet(
     assert reassigned.json()["pallet_id"] is None
 
 
-def test_restore_detaches_incompatible_pallet(session, make_user) -> None:
+def test_restore_preserves_same_lot_pallet_across_warehouses(session, make_user) -> None:
     admin = make_user(UserRole.admin)
     lot = _lot(session, "Restore")
     pallet = _pallet(session, lot, "Old Warehouse")
@@ -292,13 +292,7 @@ def test_restore_detaches_incompatible_pallet(session, make_user) -> None:
         legacy_allow_unassigned=True,
     )
     assert restored is not None
-    assert restored.pallet_id is None
-    assert session.scalar(
-        select(BoxEvent.id).where(
-            BoxEvent.box_id == box.id,
-            BoxEvent.event_type == BoxEventType.pallet_unassigned,
-        )
-    )
+    assert restored.pallet_id == pallet.id
 
 
 def test_assigned_box_delete_archives_to_preserve_history(client, session) -> None:
@@ -322,7 +316,9 @@ def test_admin_integrity_report_groups_anomalies(client, session) -> None:
     inactive.is_active = False
     inactive.archived_at = datetime.now(UTC)
     cross_lot = _box(session, other, "001", pallet=pallet)
-    cross_warehouse = _box(session, lot, "002", warehouse_id=2, pallet=pallet)
+    valid_multi_warehouse = _box(
+        session, lot, "002", warehouse_id=2, pallet=pallet
+    )
     inactive_box = _box(session, lot, "003", pallet=inactive)
     unassigned = _box(session, lot, "004")
     session.commit()
@@ -331,6 +327,7 @@ def test_admin_integrity_report_groups_anomalies(client, session) -> None:
     assert response.status_code == 200, response.text
     report = response.json()
     assert cross_lot.id in report["cross_lot"]["box_ids"]
-    assert cross_warehouse.id in report["cross_warehouse"]["box_ids"]
+    assert "cross_warehouse" not in report
+    assert valid_multi_warehouse.id not in report["cross_lot"]["box_ids"]
     assert inactive_box.id in report["inactive_pallet_assignments"]["box_ids"]
     assert unassigned.id in report["unassigned_active_boxes"]["box_ids"]

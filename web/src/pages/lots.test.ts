@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import renameLotDialogSource from "@/components/RenameLotDialog.tsx?raw";
 import type {
   LotForcePurgePreview,
   LotMergeCandidate,
@@ -219,6 +220,16 @@ describe("audited lot changes", () => {
     );
     expect(lotMergeCandidateClassification(candidate)).toBe("normal");
     expect(lotMergeConfirmationIsValid(candidate, "reason", false)).toBe(true);
+  });
+
+  it("combines matching pallet numbers without warehouse collision language", () => {
+    expect(renameLotDialogSource).toContain(
+      'action.action === "combine"',
+    );
+    expect(renameLotDialogSource).not.toContain("warehouse_mismatch");
+    expect(renameLotDialogSource).not.toContain(
+      "same normalized number in different warehouses",
+    );
   });
 
   it("classifies archived overwrite, gates acknowledgement, and locks its signature", () => {

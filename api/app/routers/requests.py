@@ -52,6 +52,8 @@ from app.schemas.requests import (
     BoxRequestItemOut,
     BoxRequestOut,
     BoxRequestSuggestion,
+    InboundCompletionPreviewOut,
+    InboundCompletionPreviewRequest,
     RequestAction,
     RequestAnalyticsOut,
     RequestAssigneeOut,
@@ -110,6 +112,7 @@ from app.services.requests import (
     list_return_sources,
     mark_awaiting_confirmation,
     mark_ready_for_transport,
+    preview_inbound_completion,
     reject_request,
     report_failed_delivery,
     reschedule_request,
@@ -1257,6 +1260,27 @@ async def cancel(
     )
 
 
+@router.post(
+    "/{request_id}/inbound-completion-preview",
+    response_model=InboundCompletionPreviewOut,
+)
+def inbound_completion_preview(
+    request_id: int,
+    payload: InboundCompletionPreviewRequest,
+    db: DbSession,
+    user: CurrentUser,
+) -> InboundCompletionPreviewOut:
+    try:
+        return preview_inbound_completion(
+            db,
+            request_id=request_id,
+            user=user,
+            inbound_items=payload.inbound_items,
+        )
+    except RequestRuleError as exc:
+        raise _error(exc) from exc
+
+
 @router.post("/{request_id}/complete", response_model=BoxRequestOut)
 async def complete(
     request_id: int,
@@ -1265,32 +1289,81 @@ async def complete(
     background: BackgroundTasks,
     user: CurrentUser,
 ) -> BoxRequestOut:
+    affected_warehouse_ids: set[int] = set()
+    affected_pallet_warehouse_ids: dict[int, set[int]] = {}
     result = await _run_action(
         db,
         complete_request,
         request_id=request_id,
         user=user,
         inbound_items=payload.inbound_items,
+        accept_existing_received_boxes=payload.accept_existing_received_boxes,
+        inbound_impact_signature=payload.inbound_impact_signature,
         collected_box_ids=payload.collected_box_ids,
         discrepancies=payload.discrepancies,
         discrepancy_reason=payload.discrepancy_reason,
         expected_version=payload.expected_version,
         idempotency_key=payload.idempotency_key,
+        affected_warehouse_ids=affected_warehouse_ids,
+        affected_pallet_warehouse_ids=affected_pallet_warehouse_ids,
     )
-    affected_warehouse_ids = {result.warehouse_id}
-    if result.target_warehouse_id is not None:
-        affected_warehouse_ids.add(result.target_warehouse_id)
-    for warehouse_id in affected_warehouse_ids:
+    inbound_target_id = (
+        result.warehouse_id
+        if result.direction == BoxRequestDirection.inbound
+        else None
+    )
+    inbound_source_ids = sorted(
+        affected_warehouse_ids - {inbound_target_id}
+        if inbound_target_id is not None
+        else set()
+    )
+    for warehouse_id in sorted(affected_warehouse_ids):
+        source_warehouse_id = (
+            (
+                warehouse_id
+                if warehouse_id in inbound_source_ids
+                else inbound_source_ids[0] if len(inbound_source_ids) == 1 else None
+            )
+            if result.direction == BoxRequestDirection.inbound
+            else result.warehouse_id
+        )
         await bus.publish(
             "box.updated",
             {
                 "warehouse_id": warehouse_id,
-                "source_warehouse_id": result.warehouse_id,
-                "target_warehouse_id": result.target_warehouse_id,
+                "source_warehouse_id": source_warehouse_id,
+                "source_warehouse_ids": inbound_source_ids,
+                "target_warehouse_id": (
+                    inbound_target_id
+                    if inbound_target_id is not None
+                    else result.target_warehouse_id
+                ),
                 "request_id": result.id,
                 "bulk": True,
             },
         )
+    if (
+        not affected_pallet_warehouse_ids
+        and result.direction != BoxRequestDirection.inbound
+    ):
+        for pallet_id in {
+            item.pallet_id for item in result.items if item.pallet_id is not None
+        }:
+            affected_pallet_warehouse_ids[pallet_id] = set(
+                affected_warehouse_ids
+            )
+    for pallet_id, warehouse_ids in sorted(
+        affected_pallet_warehouse_ids.items()
+    ):
+        for warehouse_id in sorted(warehouse_ids):
+            await bus.publish(
+                "pallet.updated",
+                {
+                    "id": pallet_id,
+                    "warehouse_id": warehouse_id,
+                    "request_id": result.id,
+                },
+            )
     background.add_task(evaluate_safe, db)
     return result
 

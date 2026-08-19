@@ -21,6 +21,8 @@ import type {
   EmployeeImportItem,
   EmployeeImportResult,
   ImportResult,
+  InboundCompletionPreview,
+  InboundCompletionPreviewRequest,
   InboundRequestItemInput,
   LotCreatePayload,
   LotDetail,
@@ -48,8 +50,6 @@ import type {
   PalletEvent,
   PalletFilters,
   PalletIntegrity,
-  PalletMovePayload,
-  PalletMoveResult,
   PalletOption,
   PalletOptionFilters,
   PalletRenamePayload,
@@ -637,8 +637,7 @@ export function usePalletOptions(
           `/pallets/options${buildQueryString({ ...filters, page, limit })}`,
         )
       ).data,
-    enabled:
-      filters.lot_id !== undefined && filters.warehouse_id !== undefined,
+    enabled: filters.lot_id !== undefined,
   });
 }
 
@@ -765,21 +764,6 @@ export function useAssignPalletBoxes() {
 
 export function useDetachPalletBoxes() {
   return usePalletBoxMutation("detach");
-}
-
-export function useMovePallet() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: async (input: { id: number; payload: PalletMovePayload }) =>
-      (
-        await api.post<PalletMoveResult>(
-          `/pallets/${input.id}/move`,
-          input.payload,
-        )
-      ).data,
-    onSettled: (_data, _error, input) =>
-      invalidatePalletState(qc, [input.id]),
-  });
 }
 
 export function useCreateLot() {
@@ -1399,6 +1383,21 @@ export function useReturnCandidates(
   });
 }
 
+export function useInboundCompletionPreview() {
+  return useMutation({
+    mutationFn: async (input: {
+      id: number;
+      payload: InboundCompletionPreviewRequest;
+    }) =>
+      (
+        await api.post<InboundCompletionPreview>(
+          `/requests/${input.id}/inbound-completion-preview`,
+          input.payload,
+        )
+      ).data,
+  });
+}
+
 function invalidateRequestQueries(
   qc: ReturnType<typeof useQueryClient>,
   id?: number,
@@ -1486,6 +1485,8 @@ type RequestActionInput =
       action: "complete";
       body: {
         inbound_items?: InboundRequestItemInput[];
+        accept_existing_received_boxes?: boolean;
+        inbound_impact_signature?: string | null;
         collected_box_ids?: number[];
         discrepancies?: RequestDiscrepancyInput[];
         discrepancy_reason?: string;

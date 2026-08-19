@@ -6,6 +6,9 @@ import { useHasRole } from "@/components/RoleGate";
 import {
   exactPalletMatch,
   normalizePalletNumber,
+  palletPickerOptionFilters,
+  palletScopeKey,
+  palletWarehouseDistributionLabel,
 } from "@/pages/pallets";
 
 export interface PalletSelection {
@@ -44,15 +47,10 @@ export function PalletPicker({
   const [open, setOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const isAdmin = useHasRole(["admin"]);
-  const scope = `${lotId ?? "none"}:${warehouseId ?? "none"}`;
+  const scope = palletScopeKey(lotId);
   const previousScope = useRef(scope);
   const options = usePalletOptions(
-    {
-      search: debounced || undefined,
-      lot_id: lotId,
-      warehouse_id: warehouseId,
-      include_inactive: isAdmin,
-    },
+    palletPickerOptionFilters(lotId, debounced, isAdmin),
     1,
     50,
   );
@@ -84,7 +82,8 @@ export function PalletPicker({
     setError(null);
     onChange(null);
     onNumberChange?.("");
-    // Reset is intentional whenever either scope changes.
+    // Pallet identity is scoped by lot. A receipt warehouse change must not
+    // clear a valid pallet selection.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scope]);
 
@@ -127,21 +126,21 @@ export function PalletPicker({
           };
         }
       ).response?.data?.detail;
-      if (typeof detail === "object" && detail?.code) {
-        setError(
-          detail.code.includes("inactive")
+      const message =
+        typeof detail === "object" && detail?.code
+          ? detail.code.includes("inactive")
             ? "An archived pallet has this number. Ask an administrator to restore it."
-            : detail.message || "This pallet number conflicts with an existing pallet.",
-        );
-      } else {
-        setError(
-          typeof detail === "string" ? detail : "The pallet could not be created.",
-        );
-      }
+            : detail.message || "This pallet number conflicts with an existing pallet."
+          : typeof detail === "string"
+            ? detail
+            : "The pallet could not be created.";
+      setError(
+        `${message} The receipt warehouse is used only to authorize creation; pallets do not have a warehouse location.`,
+      );
     }
   }
 
-  const unavailable = disabled || !lotId || !warehouseId;
+  const unavailable = disabled || !lotId;
   return (
     <div className="relative">
       <label className="block">
@@ -157,8 +156,8 @@ export function PalletPicker({
             aria-controls={listId}
             autoComplete="off"
             placeholder={
-              !lotId || !warehouseId
-                ? "Choose lot and warehouse first"
+              !lotId
+                ? "Choose lot first"
                 : "Search or enter pallet number"
             }
             value={query}
@@ -204,12 +203,14 @@ export function PalletPicker({
               onClick={() => select(option)}
             >
               <span>{option.pallet_number}{!option.is_active ? " (archived)" : ""}</span>
-              <span className="text-xs text-slate-500">{option.lot_name}</span>
+              <span className="text-right text-xs text-slate-500">
+                {palletWarehouseDistributionLabel(option.warehouse_names)}
+              </span>
             </button>
           ))}
           {!options.isLoading && items.length === 0 && !canOfferCreate && (
             <p className="px-3 py-2 text-sm text-slate-500">
-              No pallets in this lot and warehouse.
+              No pallets in this lot.
             </p>
           )}
           {canOfferCreate && (
@@ -228,6 +229,10 @@ export function PalletPicker({
           )}
         </div>
       )}
+      <p className="mt-1 text-xs text-slate-500">
+        Pallets span warehouses through their boxes. The same pallet can be
+        selected for receipts at different warehouses.
+      </p>
       {error && (
         <p role="alert" className="mt-1 text-xs text-rose-600">
           {error}

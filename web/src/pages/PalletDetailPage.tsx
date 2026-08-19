@@ -6,18 +6,17 @@ import {
   useAssignPalletBoxes,
   useBoxes,
   useDetachPalletBoxes,
-  useMovePallet,
   usePallet,
   usePalletEvents,
   useRenamePallet,
   useRestorePallet,
   useWarehouses,
 } from "@/api/hooks";
-import { ALL_BOX_STATUSES, type BoxStatus } from "@/api/types";
+import { ALL_BOX_STATUSES, type BoxStatus, type Warehouse } from "@/api/types";
 import { LotStatusBar } from "@/components/LotStatusBar";
 import { STATUS_LABEL, StatusBadge } from "@/components/StatusBadge";
 import { useHasRole } from "@/components/RoleGate";
-import { palletCompletionLabel } from "@/pages/pallets";
+import { palletCandidateFilters, palletCompletionLabel } from "@/pages/pallets";
 
 export function PalletDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -30,26 +29,25 @@ export function PalletDetailPage() {
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<BoxStatus | "">("");
   const [boxPage, setBoxPage] = useState(1);
-  const [action, setAction] = useState<"rename" | "archive" | "restore" | "move" | null>(null);
+  const [boxWarehouseId, setBoxWarehouseId] = useState<number | "">("");
+  const [action, setAction] = useState<"rename" | "archive" | "restore" | null>(null);
   const [reason, setReason] = useState("");
   const [newNumber, setNewNumber] = useState("");
-  const [warehouseId, setWarehouseId] = useState<number | "">("");
-  const [forceMove, setForceMove] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
   const rename = useRenamePallet();
   const archive = useArchivePallet();
   const restore = useRestorePallet();
-  const move = useMovePallet();
 
   const boxFilters = useMemo(
     () => ({
       pallet_id: palletId,
       search: search || undefined,
       status: status || undefined,
+      warehouse_id: boxWarehouseId || undefined,
       sort_by: "updated_at" as const,
       sort_dir: "desc" as const,
     }),
-    [palletId, search, status],
+    [boxWarehouseId, palletId, search, status],
   );
   const boxPageSize = 50;
   const boxes = useBoxes(boxFilters, boxPage, boxPageSize);
@@ -61,7 +59,7 @@ export function PalletDetailPage() {
   if (pallet.isLoading) return <p className="text-sm text-slate-500">Loading pallet…</p>;
   if (!pallet.data) return <div role="alert" className="card card-pad text-sm text-rose-700">This pallet could not be loaded. <Link className="underline" to="/pallets">Back to pallets</Link></div>;
   const summary = pallet.data;
-  const pending = rename.isPending || archive.isPending || restore.isPending || move.isPending;
+  const pending = rename.isPending || archive.isPending || restore.isPending;
 
   async function submitAction(event: React.FormEvent) {
     event.preventDefault();
@@ -74,23 +72,10 @@ export function PalletDetailPage() {
         await archive.mutateAsync({ id: summary.id, payload: { reason: reason.trim(), expected_version: summary.version } });
       } else if (action === "restore") {
         await restore.mutateAsync({ id: summary.id, payload: { reason: reason.trim(), expected_version: summary.version } });
-      } else if (warehouseId) {
-        const result = await move.mutateAsync({
-          id: summary.id,
-          payload: {
-            warehouse_id: warehouseId,
-            reason: reason.trim() || undefined,
-            force: forceMove,
-            expected_version: summary.version,
-          },
-        });
-        setFeedback(result.cancelled_request_ids.length ? `Moved ${result.affected_box_count} boxes. Cancelled conflicting request IDs: ${result.cancelled_request_ids.join(", ")}.` : `Moved ${result.affected_box_count} boxes.`);
       }
       setAction(null);
       setReason("");
       setNewNumber("");
-      setWarehouseId("");
-      setForceMove(false);
     } catch (caught) {
       const detail = (caught as { response?: { data?: { detail?: string | { message?: string } } } }).response?.data?.detail;
       setFeedback(typeof detail === "object" ? detail.message ?? "The pallet changed; latest state is loading." : detail ?? "The pallet action failed.");
@@ -104,14 +89,14 @@ export function PalletDetailPage() {
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <div className="flex items-center gap-2"><h1 className="text-2xl font-semibold">{summary.pallet_number}</h1>{!summary.is_active && <span className="rounded-full bg-slate-200 px-2 py-0.5 text-xs">Archived</span>}</div>
-            <p className="text-sm text-slate-500"><Link className="text-brand-700 hover:underline" to={`/lots/${summary.lot_id}`}>{summary.lot_name}</Link> · {summary.warehouse_name} · version {summary.version}</p>
+            <p className="text-sm text-slate-500"><Link className="text-brand-700 hover:underline" to={`/lots/${summary.lot_id}`}>{summary.lot_name}</Link> · version {summary.version}</p>
+            <p className="mt-1 text-xs text-slate-500">{summary.warehouse_names.length ? `Boxes currently in ${summary.warehouse_names.join(", ")}` : "No boxes in accessible warehouses"}</p>
           </div>
           {canWrite && (
             <div className="flex flex-wrap gap-2">
               {isAdmin && <button className="btn-secondary" onClick={() => { setAction("rename"); setNewNumber(summary.pallet_number); }}><Pencil className="h-4 w-4" /> Rename</button>}
               {isAdmin && summary.is_active && <button className="btn-secondary" onClick={() => setAction("archive")}><Archive className="h-4 w-4" /> Archive</button>}
               {isAdmin && !summary.is_active && summary.absorbed_into_pallet_id === null && <button className="btn-secondary" onClick={() => setAction("restore")}><RotateCcw className="h-4 w-4" /> Restore</button>}
-              {summary.is_active && <button className="btn-secondary" onClick={() => setAction("move")}>Move pallet</button>}
             </div>
           )}
         </div>
@@ -131,23 +116,8 @@ export function PalletDetailPage() {
         <form className="card card-pad space-y-3" onSubmit={submitAction}>
           <h2 className="font-semibold capitalize">{action} pallet</h2>
           {action === "rename" && <label className="block"><span className="text-xs text-slate-500">New pallet number</span><input required maxLength={64} className="input" value={newNumber} onChange={(e) => setNewNumber(e.target.value)} /></label>}
-          {action === "move" && <label className="block"><span className="text-xs text-slate-500">Destination warehouse</span><select required className="input" value={warehouseId} onChange={(e) => setWarehouseId(e.target.value ? Number(e.target.value) : "")}><option value="">Choose destination</option>{warehouses.data?.filter((warehouse) => warehouse.is_active && warehouse.id !== summary.current_warehouse_id).map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}</select></label>}
-          {action === "move" && isAdmin && (
-            <label className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-950">
-              <input
-                className="mt-0.5"
-                type="checkbox"
-                checked={forceMove}
-                onChange={(event) => setForceMove(event.target.checked)}
-              />
-              <span>
-                Force move this pallet. This may override linked-box constraints
-                and cancel conflicting return requests.
-              </span>
-            </label>
-          )}
-          <label className="block"><span className="text-xs text-slate-500">{action === "move" && !forceMove ? "Reason (optional)" : "Reason"}</span><textarea required={action !== "move" || forceMove} maxLength={2000} rows={2} className="input" value={reason} onChange={(e) => setReason(e.target.value)} /></label>
-          <div className="flex justify-end gap-2"><button type="button" className="btn-secondary" onClick={() => { setAction(null); setForceMove(false); }}>Cancel</button><button className={action === "archive" ? "btn-danger" : "btn-primary"} disabled={pending || (action === "move" && (!warehouseId || (forceMove && !reason.trim())))}>{pending ? "Applying…" : `Confirm ${action}`}</button></div>
+          <label className="block"><span className="text-xs text-slate-500">Reason</span><textarea required maxLength={2000} rows={2} className="input" value={reason} onChange={(e) => setReason(e.target.value)} /></label>
+          <div className="flex justify-end gap-2"><button type="button" className="btn-secondary" onClick={() => setAction(null)}>Cancel</button><button className={action === "archive" ? "btn-danger" : "btn-primary"} disabled={pending}>{pending ? "Applying…" : `Confirm ${action}`}</button></div>
         </form>
       )}
       {feedback && <p role="status" className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">{feedback}</p>}
@@ -155,13 +125,14 @@ export function PalletDetailPage() {
       <section className="card overflow-hidden">
         <header className="border-b p-4">
           <h2 className="font-semibold">Contained boxes</h2>
-          <div className="mt-3 grid gap-3 sm:grid-cols-2">
+          <div className="mt-3 grid gap-3 sm:grid-cols-3">
             <label className="relative"><span className="sr-only">Search boxes</span><Search className="pointer-events-none absolute left-2 top-2.5 h-4 w-4 text-slate-400" /><input className="input pl-8" placeholder="Box number or item descriptions" value={search} onChange={(e) => { setSearch(e.target.value); setBoxPage(1); }} /></label>
             <select aria-label="Status" className="input" value={status} onChange={(e) => { setStatus(e.target.value as BoxStatus | ""); setBoxPage(1); }}><option value="">All statuses</option>{ALL_BOX_STATUSES.map((value) => <option key={value} value={value}>{STATUS_LABEL[value]}</option>)}</select>
+            <select aria-label="Warehouse" className="input" value={boxWarehouseId} onChange={(e) => { setBoxWarehouseId(e.target.value ? Number(e.target.value) : ""); setBoxPage(1); }}><option value="">All accessible warehouses</option>{warehouses.data?.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}</select>
           </div>
         </header>
         <div className="overflow-x-auto">
-          <table className="w-full text-sm"><thead className="bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500"><tr><th className="px-4 py-2.5">Box</th><th className="px-4 py-2.5">Status</th><th className="px-4 py-2.5">Item descriptions</th><th className="px-4 py-2.5">Updated</th></tr></thead><tbody className="divide-y">{boxes.data?.items.map((box) => <tr key={box.id}><td className="px-4 py-3"><Link className="font-mono text-brand-700 hover:underline" to={`/boxes/${box.id}`}>{box.box_number}</Link></td><td className="px-4 py-3"><StatusBadge status={box.status} /></td><td className="max-w-80 truncate px-4 py-3">{box.contents || "—"}</td><td className="px-4 py-3 text-slate-500">{new Date(box.updated_at).toLocaleString()}</td></tr>)}</tbody></table>
+          <table className="w-full text-sm"><thead className="bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500"><tr><th className="px-4 py-2.5">Box</th><th className="px-4 py-2.5">Status</th><th className="px-4 py-2.5">Warehouse</th><th className="px-4 py-2.5">Item descriptions</th><th className="px-4 py-2.5">Updated</th></tr></thead><tbody className="divide-y">{boxes.data?.items.map((box) => <tr key={box.id}><td className="px-4 py-3"><Link className="font-mono text-brand-700 hover:underline" to={`/boxes/${box.id}`}>{box.box_number}</Link></td><td className="px-4 py-3"><StatusBadge status={box.status} /></td><td className="px-4 py-3">{warehouses.data?.find((warehouse) => warehouse.id === box.current_warehouse_id)?.name ?? `#${box.current_warehouse_id}`}</td><td className="max-w-80 truncate px-4 py-3">{box.contents || "—"}</td><td className="px-4 py-3 text-slate-500">{new Date(box.updated_at).toLocaleString()}</td></tr>)}</tbody></table>
           {!boxes.isLoading && boxes.data?.items.length === 0 && <p className="p-6 text-center text-sm text-slate-500">No contained boxes match.</p>}
         </div>
         {boxes.data && boxes.data.total > boxPageSize && (
@@ -175,7 +146,7 @@ export function PalletDetailPage() {
         )}
       </section>
 
-      {canWrite && summary.is_active && <PalletBoxControls pallet={summary} />}
+      {canWrite && summary.is_active && <PalletBoxControls pallet={summary} warehouses={warehouses.data ?? []} />}
 
       <section className="card card-pad">
         <h2 className="font-semibold">Pallet events</h2>
@@ -185,23 +156,22 @@ export function PalletDetailPage() {
   );
 }
 
-function PalletBoxControls({ pallet }: { pallet: import("@/api/types").PalletSummary }) {
+function PalletBoxControls({ pallet, warehouses }: { pallet: import("@/api/types").PalletSummary; warehouses: Warehouse[] }) {
   const assign = useAssignPalletBoxes();
   const detach = useDetachPalletBoxes();
   const [mode, setMode] = useState<"assign" | "detach">("assign");
   const [candidatePage, setCandidatePage] = useState(1);
   const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [warehouseId, setWarehouseId] = useState<number | "">("");
   const [reason, setReason] = useState("");
   const [message, setMessage] = useState<string | null>(null);
   const candidatePageSize = 50;
   const candidates = useBoxes(
-    {
-      lot_id: pallet.lot_id,
-      warehouse_id: pallet.current_warehouse_id,
-      ...(mode === "detach" ? { pallet_id: pallet.id } : {}),
-      sort_by: "updated_at",
-      sort_dir: "desc",
-    },
+    palletCandidateFilters(
+      pallet.lot_id,
+      warehouseId || undefined,
+      mode === "detach" ? pallet.id : undefined,
+    ),
     candidatePage,
     candidatePageSize,
   );
@@ -213,9 +183,10 @@ function PalletBoxControls({ pallet }: { pallet: import("@/api/types").PalletSum
   return (
     <section className="card card-pad">
       <h2 className="font-semibold">Assign or detach boxes</h2>
-      <p className="mt-1 text-sm text-slate-600">Only boxes in this pallet’s lot and warehouse are shown. Assignment changes are audited and do not change box status, warehouse, or active return reservations.</p>
+      <p className="mt-1 text-sm text-slate-600">Candidates can come from any accessible warehouse in this pallet’s lot. Assignment changes are audited and do not change each box’s status, warehouse, or active return reservations.</p>
       <div className="mt-3 flex gap-2"><button className={mode === "assign" ? "btn-primary" : "btn-secondary"} onClick={() => { setMode("assign"); setCandidatePage(1); setSelected(new Set()); }}>Assign / reassign</button><button className={mode === "detach" ? "btn-primary" : "btn-secondary"} onClick={() => { setMode("detach"); setCandidatePage(1); setSelected(new Set()); }}>Detach</button></div>
-      <div className="mt-3 max-h-56 overflow-auto rounded border">{eligible.map((box) => <label key={box.id} className="flex items-center justify-between gap-3 border-b px-3 py-2 text-sm"><span><input className="mr-2" type="checkbox" checked={selected.has(box.id)} onChange={() => setSelected((current) => { const next = new Set(current); next.has(box.id) ? next.delete(box.id) : next.add(box.id); return next; })} />Box {box.box_number}</span><span className="text-xs text-slate-500">{box.pallet_number ? `Currently ${box.pallet_number}` : "Unassigned"}</span></label>)}{eligible.length === 0 && <p className="p-3 text-sm text-slate-500">No eligible boxes.</p>}</div>
+      <label className="mt-3 block max-w-sm"><span className="text-xs text-slate-500">Candidate warehouse (optional)</span><select className="input" value={warehouseId} onChange={(event) => { setWarehouseId(event.target.value ? Number(event.target.value) : ""); setCandidatePage(1); setSelected(new Set()); }}><option value="">All accessible warehouses</option>{warehouses.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}</select></label>
+      <div className="mt-3 max-h-56 overflow-auto rounded border">{eligible.map((box) => <label key={box.id} className="flex items-center justify-between gap-3 border-b px-3 py-2 text-sm"><span><input className="mr-2" type="checkbox" checked={selected.has(box.id)} onChange={() => setSelected((current) => { const next = new Set(current); next.has(box.id) ? next.delete(box.id) : next.add(box.id); return next; })} />Box {box.box_number}</span><span className="text-right text-xs text-slate-500">{warehouses.find((warehouse) => warehouse.id === box.current_warehouse_id)?.name ?? `Warehouse #${box.current_warehouse_id}`} · {box.pallet_number ? `Currently ${box.pallet_number}` : "Unassigned"}</span></label>)}{eligible.length === 0 && <p className="p-3 text-sm text-slate-500">No eligible boxes.</p>}</div>
       {candidates.data && candidates.data.total > candidatePageSize && <div className="mt-2 flex items-center justify-between text-xs text-slate-500"><span>Candidate page {candidatePage} of {candidatePageCount}</span><div className="flex gap-2"><button className="btn-secondary" disabled={candidatePage <= 1} onClick={() => setCandidatePage((page) => Math.max(1, page - 1))}>Previous</button><button className="btn-secondary" disabled={candidatePage >= candidatePageCount} onClick={() => setCandidatePage((page) => Math.min(candidatePageCount, page + 1))}>Next</button></div></div>}
       <label className="mt-3 block"><span className="text-xs text-slate-500">Reason</span><input required className="input" maxLength={2000} value={reason} onChange={(e) => setReason(e.target.value)} /></label>
       <button className="btn-primary mt-3" disabled={!selected.size || !reason.trim() || assign.isPending || detach.isPending} onClick={async () => { try { const mutation = mode === "assign" ? assign : detach; const result = await mutation.mutateAsync({ id: pallet.id, payload: { box_ids: [...selected], reason: reason.trim() } }); setMessage(`${result.updated_box_ids.length} boxes updated${result.cancelled_request_ids.length ? `; cancelled request IDs ${result.cancelled_request_ids.join(", ")}` : ""}.`); setSelected(new Set()); setReason(""); } catch { setMessage("The box assignment could not be applied."); } }}>{mode === "assign" ? "Assign selected" : "Detach selected"}</button>

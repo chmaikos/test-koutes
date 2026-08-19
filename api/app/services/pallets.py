@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
 
-from sqlalchemy import Float, case, cast, func, or_, select
+from sqlalchemy import Float, case, cast, func, or_, select, union_all
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -17,14 +17,11 @@ from app.models.pallets import (
     clean_pallet_number,
     normalize_pallet_number,
 )
+from app.models.requests import BoxRequest, BoxRequestItem, BoxRequestOrigin, BoxRequestStatus
 from app.models.users import User, UserRole
 from app.models.warehouses import Warehouse
 from app.services.acl import allowed_warehouse_ids, can_access
-from app.services.boxes import (
-    BoxRuleError,
-    set_box_pallet_assignment,
-    update_box,
-)
+from app.services.boxes import set_box_pallet_assignment
 
 PalletProgressState = Literal["active", "in_progress", "complete", "no_eligible"]
 PalletSortField = Literal["pallet_number", "completion", "box_count", "latest_activity"]
@@ -68,8 +65,8 @@ class PalletSummary:
     id: int
     lot_id: int
     lot_name: str
-    current_warehouse_id: int
-    warehouse_name: str
+    warehouse_ids: list[int]
+    warehouse_names: list[str]
     pallet_number: str
     normalized_pallet_number: str
     version: int
@@ -101,8 +98,8 @@ class PalletOption:
     normalized_pallet_number: str
     lot_id: int
     lot_name: str
-    current_warehouse_id: int
-    warehouse_name: str
+    warehouse_ids: list[int]
+    warehouse_names: list[str]
     is_active: bool
     exact_normalized_match: bool
 
@@ -113,17 +110,22 @@ class PalletBoxMutationResult:
     updated_box_ids: list[int]
     skipped: list[dict[str, object]]
     cancelled_request_ids: list[int]
+    affected_pallet_warehouse_ids: dict[int, set[int]]
 
 
 @dataclass(frozen=True)
-class PalletMoveResult:
+class PalletEventView:
+    id: int
     pallet_id: int
-    from_warehouse_id: int
-    to_warehouse_id: int
-    affected_box_count: int
-    box_ids: list[int]
-    cancelled_request_ids: list[int]
-    version: int
+    event_type: PalletEventType
+    old_pallet_number: str | None
+    new_pallet_number: str | None
+    from_warehouse_id: int | None
+    to_warehouse_id: int | None
+    actor_user_id: int | None
+    reason: str | None
+    occurred_at: datetime
+    event_metadata: dict[str, object]
 
 
 def _count_if(condition):
@@ -144,9 +146,72 @@ def _validate_mutable_parents(db: Session, pallet: Pallet) -> None:
     lot = db.get(Lot, pallet.lot_id)
     if lot is None or lot.merged_into_lot_id is not None:
         raise PalletConflictError("pallet lot is unavailable or merged")
-    warehouse = db.get(Warehouse, pallet.current_warehouse_id)
-    if warehouse is None or not warehouse.is_active:
-        raise PalletConflictError("pallet warehouse is archived or unavailable")
+
+
+def _visibility_sources(user: User):
+    """Return ACL-scoped assigned boxes and represented lot identities."""
+    allowed = allowed_warehouse_ids(user)
+    assigned_conditions = [
+        Box.pallet_id.is_not(None),
+        Box.archived_at.is_(None),
+    ]
+    lot_box_conditions = [Box.archived_at.is_(None)]
+    staged_conditions = [
+        BoxRequest.status == BoxRequestStatus.submitted,
+        BoxRequest.origin.in_(
+            (BoxRequestOrigin.xlsx_import, BoxRequestOrigin.manual_entry)
+        ),
+        BoxRequestItem.lot_id.is_not(None),
+    ]
+    if allowed is not None:
+        assigned_conditions.append(Box.current_warehouse_id.in_(allowed))
+        lot_box_conditions.append(Box.current_warehouse_id.in_(allowed))
+        staged_conditions.append(BoxRequest.warehouse_id.in_(allowed))
+
+    assigned = (
+        select(
+            Box.pallet_id.label("pallet_id"),
+            Box.current_warehouse_id.label("warehouse_id"),
+            Box.status.label("status"),
+            Box.updated_at.label("updated_at"),
+        )
+        .where(*assigned_conditions)
+        .cte("scoped_pallet_boxes")
+    )
+    represented = union_all(
+        select(Box.lot_id.label("lot_id")).where(*lot_box_conditions),
+        select(BoxRequestItem.lot_id.label("lot_id"))
+        .join(BoxRequest, BoxRequest.id == BoxRequestItem.request_id)
+        .where(*staged_conditions),
+    ).cte("represented_pallet_lots")
+    return assigned, represented
+
+
+def _warehouse_values_for(
+    db: Session,
+    *,
+    pallet_ids: list[int],
+    scoped_boxes,
+) -> dict[int, tuple[list[int], list[str]]]:
+    values = {pallet_id: ([], []) for pallet_id in pallet_ids}
+    if not pallet_ids:
+        return values
+    rows = db.execute(
+        select(
+            scoped_boxes.c.pallet_id,
+            scoped_boxes.c.warehouse_id,
+            Warehouse.name,
+        )
+        .join(Warehouse, Warehouse.id == scoped_boxes.c.warehouse_id)
+        .where(scoped_boxes.c.pallet_id.in_(pallet_ids))
+        .distinct()
+        .order_by(scoped_boxes.c.pallet_id, scoped_boxes.c.warehouse_id)
+    ).all()
+    for pallet_id, warehouse_id, warehouse_name in rows:
+        ids, names = values[int(pallet_id)]
+        ids.append(int(warehouse_id))
+        names.append(str(warehouse_name))
+    return values
 
 
 def _visible_pallet(
@@ -162,9 +227,9 @@ def _visible_pallet(
     stmt = select(Pallet).where(Pallet.id == pallet_id)
     if not include_inactive:
         stmt = stmt.where(Pallet.is_active.is_(True))
-    allowed = allowed_warehouse_ids(user)
-    if allowed is not None:
-        stmt = stmt.where(Pallet.current_warehouse_id.in_(allowed))
+    if user.role != UserRole.admin:
+        _scoped_boxes, represented = _visibility_sources(user)
+        stmt = stmt.where(Pallet.lot_id.in_(select(represented.c.lot_id)))
     if lock:
         stmt = stmt.with_for_update()
     pallet = db.scalar(stmt)
@@ -187,19 +252,12 @@ def list_pallet_summaries(
     page: int = 1,
     page_size: int = 50,
     pallet_id: int | None = None,
+    allow_unrepresented_lot: bool = False,
 ) -> tuple[list[PalletSummary], int]:
     if include_inactive and user.role != UserRole.admin:
         raise PalletAccessError("inactive pallets require admin role")
 
-    scoped_boxes = (
-        select(
-            Box.pallet_id.label("pallet_id"),
-            Box.status.label("status"),
-            Box.updated_at.label("updated_at"),
-        )
-        .where(Box.pallet_id.is_not(None), Box.archived_at.is_(None))
-        .cte("scoped_pallet_boxes")
-    )
+    scoped_boxes, represented = _visibility_sources(user)
     aggregate = (
         select(
             scoped_boxes.c.pallet_id,
@@ -246,7 +304,6 @@ def list_pallet_summaries(
         select(
             Pallet,
             Lot.name.label("lot_name"),
-            Warehouse.name.label("warehouse_name"),
             box_count.label("box_count"),
             func.coalesce(aggregate.c.physical_box_count, 0).label(
                 "physical_box_count"
@@ -263,7 +320,6 @@ def list_pallet_summaries(
             latest_activity,
         )
         .join(Lot, Lot.id == Pallet.lot_id)
-        .join(Warehouse, Warehouse.id == Pallet.current_warehouse_id)
         .outerjoin(aggregate, aggregate.c.pallet_id == Pallet.id)
     )
     if not include_inactive:
@@ -271,11 +327,16 @@ def list_pallet_summaries(
             Pallet.is_active.is_(True),
             Lot.merged_into_lot_id.is_(None),
         )
-    allowed = allowed_warehouse_ids(user)
-    if allowed is not None:
-        stmt = stmt.where(Pallet.current_warehouse_id.in_(allowed))
+    if user.role != UserRole.admin and not allow_unrepresented_lot:
+        stmt = stmt.where(Pallet.lot_id.in_(select(represented.c.lot_id)))
     if warehouse_id is not None:
-        stmt = stmt.where(Pallet.current_warehouse_id == warehouse_id)
+        stmt = stmt.where(
+            Pallet.id.in_(
+                select(scoped_boxes.c.pallet_id).where(
+                    scoped_boxes.c.warehouse_id == warehouse_id
+                )
+            )
+        )
     if lot_id is not None:
         stmt = stmt.where(Pallet.lot_id == lot_id)
     if pallet_id is not None:
@@ -286,7 +347,11 @@ def list_pallet_summaries(
             or_(
                 Pallet.pallet_number.ilike(f"%{cleaned_search}%"),
                 Lot.name.ilike(f"%{cleaned_search}%"),
-                Warehouse.name.ilike(f"%{cleaned_search}%"),
+                Pallet.id.in_(
+                    select(scoped_boxes.c.pallet_id)
+                    .join(Warehouse, Warehouse.id == scoped_boxes.c.warehouse_id)
+                    .where(Warehouse.name.ilike(f"%{cleaned_search}%"))
+                ),
             )
         )
     if progress_state == "no_eligible":
@@ -311,6 +376,11 @@ def list_pallet_summaries(
     rows = db.execute(
         stmt.offset((page - 1) * page_size).limit(page_size)
     ).all()
+    warehouse_values = _warehouse_values_for(
+        db,
+        pallet_ids=[row[0].id for row in rows],
+        scoped_boxes=scoped_boxes,
+    )
     summaries: list[PalletSummary] = []
     for row in rows:
         pallet = row[0]
@@ -323,8 +393,8 @@ def list_pallet_summaries(
                 id=pallet.id,
                 lot_id=pallet.lot_id,
                 lot_name=values["lot_name"],
-                current_warehouse_id=pallet.current_warehouse_id,
-                warehouse_name=values["warehouse_name"],
+                warehouse_ids=warehouse_values[pallet.id][0],
+                warehouse_names=warehouse_values[pallet.id][1],
                 pallet_number=pallet.pallet_number,
                 normalized_pallet_number=pallet.normalized_pallet_number,
                 version=pallet.version,
@@ -363,12 +433,14 @@ def get_visible_pallet_summary(
     user: User,
     pallet_id: int,
     include_inactive: bool = False,
+    allow_unrepresented_lot: bool = False,
 ) -> PalletSummary:
     rows, _ = list_pallet_summaries(
         db,
         user=user,
         pallet_id=pallet_id,
         include_inactive=include_inactive,
+        allow_unrepresented_lot=allow_unrepresented_lot,
         page=1,
         page_size=1,
     )
@@ -390,21 +462,23 @@ def list_pallet_options(
 ) -> tuple[list[PalletOption], int]:
     if include_inactive and user.role != UserRole.admin:
         raise PalletAccessError("inactive pallets require admin role")
-    stmt = (
-        select(Pallet, Lot.name, Warehouse.name)
-        .join(Lot, Lot.id == Pallet.lot_id)
-        .join(Warehouse, Warehouse.id == Pallet.current_warehouse_id)
-    )
+    scoped_boxes, represented = _visibility_sources(user)
+    stmt = select(Pallet, Lot.name).join(Lot, Lot.id == Pallet.lot_id)
     if not include_inactive:
         stmt = stmt.where(
             Pallet.is_active.is_(True),
             Lot.merged_into_lot_id.is_(None),
         )
-    allowed = allowed_warehouse_ids(user)
-    if allowed is not None:
-        stmt = stmt.where(Pallet.current_warehouse_id.in_(allowed))
+    if user.role != UserRole.admin:
+        stmt = stmt.where(Pallet.lot_id.in_(select(represented.c.lot_id)))
     if warehouse_id is not None:
-        stmt = stmt.where(Pallet.current_warehouse_id == warehouse_id)
+        stmt = stmt.where(
+            Pallet.id.in_(
+                select(scoped_boxes.c.pallet_id).where(
+                    scoped_boxes.c.warehouse_id == warehouse_id
+                )
+            )
+        )
     if lot_id is not None:
         stmt = stmt.where(Pallet.lot_id == lot_id)
     exact_normalized: str | None = None
@@ -416,7 +490,11 @@ def list_pallet_options(
                 Pallet.pallet_number.ilike(f"%{cleaned}%"),
                 Pallet.normalized_pallet_number == exact_normalized,
                 Lot.name.ilike(f"%{cleaned}%"),
-                Warehouse.name.ilike(f"%{cleaned}%"),
+                Pallet.id.in_(
+                    select(scoped_boxes.c.pallet_id)
+                    .join(Warehouse, Warehouse.id == scoped_boxes.c.warehouse_id)
+                    .where(Warehouse.name.ilike(f"%{cleaned}%"))
+                ),
             )
         )
         stmt = stmt.order_by(
@@ -428,6 +506,11 @@ def list_pallet_options(
         stmt = stmt.order_by(func.lower(Pallet.pallet_number), Pallet.id)
     total = int(db.scalar(select(func.count()).select_from(stmt.subquery())) or 0)
     rows = db.execute(stmt.offset((page - 1) * limit).limit(limit)).all()
+    warehouse_values = _warehouse_values_for(
+        db,
+        pallet_ids=[row[0].id for row in rows],
+        scoped_boxes=scoped_boxes,
+    )
     return (
         [
             PalletOption(
@@ -436,14 +519,14 @@ def list_pallet_options(
                 normalized_pallet_number=pallet.normalized_pallet_number,
                 lot_id=pallet.lot_id,
                 lot_name=lot_name,
-                current_warehouse_id=pallet.current_warehouse_id,
-                warehouse_name=warehouse_name,
+                warehouse_ids=warehouse_values[pallet.id][0],
+                warehouse_names=warehouse_values[pallet.id][1],
                 is_active=pallet.is_active,
                 exact_normalized_match=(
                     pallet.normalized_pallet_number == exact_normalized
                 ),
             )
-            for pallet, lot_name, warehouse_name in rows
+            for pallet, lot_name in rows
         ],
         total,
     )
@@ -523,11 +606,6 @@ def resolve_or_create_active_pallet(
             raise PalletConflictError("pallet does not belong to the receipt lot")
         if not pallet.is_active:
             raise PalletConflictError("archived pallets cannot receive boxes")
-        if pallet.current_warehouse_id != warehouse_id:
-            raise PalletConflictError(
-                f"pallet {pallet.pallet_number!r} is in warehouse "
-                f"{pallet.current_warehouse_id}, not warehouse {warehouse_id}"
-            )
         if (
             not allow_snapshot_number_mismatch
             and pallet.normalized_pallet_number != normalized
@@ -550,17 +628,10 @@ def resolve_or_create_active_pallet(
             raise PalletNumberCollisionError(
                 f"pallet {collision.pallet_number!r} is archived in this lot"
             )
-        if collision.current_warehouse_id != warehouse_id:
-            raise PalletNumberCollisionError(
-                f"pallet {collision.pallet_number!r} already exists in warehouse "
-                f"{collision.current_warehouse_id}; it will not be moved to "
-                f"warehouse {warehouse_id}"
-            )
         return collision
 
     pallet = Pallet(
         lot_id=lot_id,
-        current_warehouse_id=warehouse_id,
         pallet_number=cleaned,
         created_by_user_id=user.id,
         updated_by_user_id=user.id,
@@ -574,9 +645,11 @@ def resolve_or_create_active_pallet(
                     pallet_id=pallet.id,
                     event_type=PalletEventType.created,
                     new_pallet_number=pallet.pallet_number,
-                    to_warehouse_id=warehouse_id,
                     actor_user_id=user.id,
-                    event_metadata={"operation": "receipt_resolve_or_create"},
+                    event_metadata={
+                        "operation": "receipt_resolve_or_create",
+                        "authorization_warehouse_id": warehouse_id,
+                    },
                 )
             )
             db.flush()
@@ -615,7 +688,6 @@ def create_pallet(
         )
     pallet = Pallet(
         lot_id=lot_id,
-        current_warehouse_id=warehouse_id,
         pallet_number=cleaned,
         created_by_user_id=user.id,
         updated_by_user_id=user.id,
@@ -628,9 +700,11 @@ def create_pallet(
                 pallet_id=pallet.id,
                 event_type=PalletEventType.created,
                 new_pallet_number=pallet.pallet_number,
-                to_warehouse_id=warehouse_id,
                 actor_user_id=user.id,
-                event_metadata={"operation": "create"},
+                event_metadata={
+                    "operation": "create",
+                    "authorization_warehouse_id": warehouse_id,
+                },
             )
         )
         db.commit()
@@ -789,6 +863,14 @@ def restore_pallet(
             f"pallet version conflict: expected {expected_version}, "
             f"current {pallet.version}"
         )
+    box_count = int(
+        db.scalar(select(func.count(Box.id)).where(Box.pallet_id == pallet.id)) or 0
+    )
+    if box_count:
+        raise PalletArchiveConflictError(
+            "pallet cannot be restored while boxes are assigned",
+            box_count=box_count,
+        )
     pallet.is_active = True
     pallet.archived_at = None
     pallet.archived_by_user_id = None
@@ -855,6 +937,13 @@ def mutate_pallet_boxes(
     if not unique_ids or len(unique_ids) > 500:
         raise PalletRuleError("box_ids must contain between 1 and 500 unique IDs")
 
+    visible_target = _visible_pallet(
+        db,
+        user=user,
+        pallet_id=pallet_id,
+        include_inactive=user.role == UserRole.admin,
+        lock=True,
+    )
     source_pallet_ids = set(
         db.scalars(
             select(Box.pallet_id).where(
@@ -874,13 +963,10 @@ def mutate_pallet_boxes(
         ).all()
     }
     target = locked_pallets.get(pallet_id)
-    if target is None:
-        raise PalletNotFoundError(f"pallet {pallet_id} not found")
+    assert target is not None and target.id == visible_target.id
     if not target.is_active and not detach:
         raise PalletConflictError("archived pallets cannot change assignments")
     _validate_mutable_parents(db, target)
-    if not can_access(user, target.current_warehouse_id):
-        raise PalletAccessError("warehouse access denied")
 
     boxes = {
         box.id: box
@@ -894,6 +980,7 @@ def mutate_pallet_boxes(
     updated: list[int] = []
     skipped: list[dict[str, object]] = []
     removed_by_pallet: dict[int, list[int]] = {}
+    affected_pallet_warehouse_ids: dict[int, set[int]] = {}
     assigned: list[int] = []
     for box_id in unique_ids:
         box = boxes.get(box_id)
@@ -920,18 +1007,18 @@ def mutate_pallet_boxes(
             )
             assert source_id is not None
             removed_by_pallet.setdefault(source_id, []).append(box.id)
+            affected_pallet_warehouse_ids.setdefault(source_id, set()).add(
+                box.current_warehouse_id
+            )
         else:
             if box.archived_at is not None:
                 skipped.append({"box_id": box.id, "reason": "box is archived"})
                 continue
-            if (
-                box.lot_id != target.lot_id
-                or box.current_warehouse_id != target.current_warehouse_id
-            ):
+            if box.lot_id != target.lot_id:
                 skipped.append(
                     {
                         "box_id": box.id,
-                        "reason": "box must match pallet lot and warehouse",
+                        "reason": "box must match pallet lot",
                     }
                 )
                 continue
@@ -949,6 +1036,12 @@ def mutate_pallet_boxes(
                 continue
             if source_id is not None:
                 removed_by_pallet.setdefault(source_id, []).append(box.id)
+                affected_pallet_warehouse_ids.setdefault(source_id, set()).add(
+                    box.current_warehouse_id
+                )
+            affected_pallet_warehouse_ids.setdefault(target.id, set()).add(
+                box.current_warehouse_id
+            )
             assigned.append(box.id)
         updated.append(box.id)
 
@@ -987,116 +1080,7 @@ def mutate_pallet_boxes(
         updated_box_ids=updated,
         skipped=skipped,
         cancelled_request_ids=[],
-    )
-
-
-def move_pallet(
-    db: Session,
-    *,
-    user: User,
-    pallet_id: int,
-    target_warehouse_id: int,
-    expected_version: int,
-    force: bool = False,
-    reason: str | None = None,
-) -> PalletMoveResult:
-    if user.role not in (UserRole.admin, UserRole.operator):
-        raise PalletAccessError("pallet movement requires operator or admin role")
-    if force and user.role != UserRole.admin:
-        raise PalletAccessError("force pallet movement requires admin role")
-    cleaned_reason = (reason or "").strip()
-    if force and not cleaned_reason:
-        raise PalletRuleError("a reason is required for force pallet movement")
-    pallet = db.scalar(
-        select(Pallet).where(Pallet.id == pallet_id).with_for_update(of=Pallet)
-    )
-    if pallet is None:
-        raise PalletNotFoundError(f"pallet {pallet_id} not found")
-    if not pallet.is_active:
-        raise PalletConflictError("archived pallets cannot be moved")
-    _validate_mutable_parents(db, pallet)
-    if pallet.version != expected_version:
-        raise PalletVersionConflictError(
-            f"pallet version conflict: expected {expected_version}, "
-            f"current {pallet.version}"
-        )
-    target = db.get(Warehouse, target_warehouse_id)
-    if target is None or not target.is_active:
-        raise PalletConflictError("target warehouse not found or archived")
-    source_warehouse_id = pallet.current_warehouse_id
-    if not can_access(user, source_warehouse_id) or not can_access(
-        user, target_warehouse_id
-    ):
-        raise PalletAccessError("source and target warehouse access required")
-    if source_warehouse_id == target_warehouse_id:
-        return PalletMoveResult(
-            pallet_id=pallet.id,
-            from_warehouse_id=source_warehouse_id,
-            to_warehouse_id=target_warehouse_id,
-            affected_box_count=0,
-            box_ids=[],
-            cancelled_request_ids=[],
-            version=pallet.version,
-        )
-    boxes = list(
-        db.scalars(
-            select(Box)
-            .where(Box.pallet_id == pallet.id, Box.archived_at.is_(None))
-            .order_by(Box.id)
-            .with_for_update(of=Box)
-        ).all()
-    )
-    cancelled_request_ids: set[int] = set()
-    try:
-        for box in boxes:
-            update_box(
-                db,
-                user=user,
-                box=box,
-                new_warehouse_id=target_warehouse_id,
-                note=cleaned_reason or f"Moved with pallet {pallet.pallet_number}",
-                force=force,
-                commit=False,
-                cancelled_request_ids=cancelled_request_ids,
-                preserve_pallet_on_move=True,
-                additional_event_metadata={
-                    "pallet_id": pallet.id,
-                    "pallet_move": True,
-                },
-            )
-    except BoxRuleError as exc:
-        raise PalletConflictError(str(exc)) from exc
-    now = datetime.now(UTC)
-    pallet.current_warehouse_id = target_warehouse_id
-    pallet.updated_by_user_id = user.id
-    pallet.updated_at = now
-    db.add(
-        PalletEvent(
-            pallet_id=pallet.id,
-            event_type=PalletEventType.moved,
-            from_warehouse_id=source_warehouse_id,
-            to_warehouse_id=target_warehouse_id,
-            actor_user_id=user.id,
-            reason=cleaned_reason or None,
-            occurred_at=now,
-            event_metadata={
-                "operation": "forced_move" if force else "move",
-                "box_ids": [box.id for box in boxes],
-                "box_count": len(boxes),
-                "cancelled_request_ids": sorted(cancelled_request_ids),
-            },
-        )
-    )
-    db.commit()
-    db.refresh(pallet)
-    return PalletMoveResult(
-        pallet_id=pallet.id,
-        from_warehouse_id=source_warehouse_id,
-        to_warehouse_id=target_warehouse_id,
-        affected_box_count=len(boxes),
-        box_ids=[box.id for box in boxes],
-        cancelled_request_ids=sorted(cancelled_request_ids),
-        version=pallet.version,
+        affected_pallet_warehouse_ids=affected_pallet_warehouse_ids,
     )
 
 
@@ -1114,15 +1098,6 @@ def pallet_integrity_report(db: Session) -> dict[str, dict[str, object]]:
             select(Box.id)
             .join(Pallet, Pallet.id == Box.pallet_id)
             .where(active_boxes, Box.lot_id != Pallet.lot_id)
-            .order_by(Box.id)
-        ).all(),
-        "cross_warehouse": db.scalars(
-            select(Box.id)
-            .join(Pallet, Pallet.id == Box.pallet_id)
-            .where(
-                active_boxes,
-                Box.current_warehouse_id != Pallet.current_warehouse_id,
-            )
             .order_by(Box.id)
         ).all(),
         "inactive_pallet_assignments": db.scalars(
@@ -1153,20 +1128,53 @@ def list_pallet_events(
     user: User,
     pallet_id: int,
     include_inactive: bool = False,
-) -> list[PalletEvent]:
+) -> list[PalletEventView]:
     _visible_pallet(
         db,
         user=user,
         pallet_id=pallet_id,
         include_inactive=include_inactive,
     )
-    return list(
+    events = list(
         db.scalars(
             select(PalletEvent)
             .where(PalletEvent.pallet_id == pallet_id)
             .order_by(PalletEvent.occurred_at.desc(), PalletEvent.id.desc())
         ).all()
     )
+    allowed = allowed_warehouse_ids(user)
+    return [
+        PalletEventView(
+            id=event.id,
+            pallet_id=event.pallet_id,
+            event_type=event.event_type,
+            old_pallet_number=event.old_pallet_number,
+            new_pallet_number=event.new_pallet_number,
+            from_warehouse_id=(
+                event.from_warehouse_id
+                if allowed is None or event.from_warehouse_id in allowed
+                else None
+            ),
+            to_warehouse_id=(
+                event.to_warehouse_id
+                if allowed is None or event.to_warehouse_id in allowed
+                else None
+            ),
+            actor_user_id=event.actor_user_id,
+            reason=event.reason,
+            occurred_at=event.occurred_at,
+            event_metadata=(
+                dict(event.event_metadata or {})
+                if allowed is None
+                else {
+                    key: value
+                    for key, value in (event.event_metadata or {}).items()
+                    if key in {"operation", "expected_version", "admin_override"}
+                }
+            ),
+        )
+        for event in events
+    ]
 
 
 __all__ = [
@@ -1177,7 +1185,7 @@ __all__ = [
     "PalletNumberCollisionError",
     "PalletOption",
     "PalletBoxMutationResult",
-    "PalletMoveResult",
+    "PalletEventView",
     "PalletProgressState",
     "PalletRuleError",
     "PalletSortField",
@@ -1189,7 +1197,6 @@ __all__ = [
     "list_pallet_events",
     "list_pallet_options",
     "list_pallet_summaries",
-    "move_pallet",
     "mutate_pallet_boxes",
     "pallet_integrity_report",
     "rename_pallet",

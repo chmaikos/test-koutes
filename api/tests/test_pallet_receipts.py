@@ -62,14 +62,14 @@ def test_manual_receipt_requires_resolves_and_reuses_pallet(client, session) -> 
     assert source["has_unassigned_boxes"] is False
 
 
-def test_same_pallet_number_in_another_warehouse_is_conflict(client) -> None:
-    assert client.post("/api/boxes", json=_manual_payload("1")).status_code == 201
-    conflict = client.post(
+def test_same_pallet_number_is_reused_in_another_warehouse(client) -> None:
+    first = client.post("/api/boxes", json=_manual_payload("1"))
+    second = client.post(
         "/api/boxes",
         json=_manual_payload("2", warehouse_id=2),
     )
-    assert conflict.status_code == 409
-    assert "will not be moved" in conflict.json()["detail"]
+    assert first.status_code == second.status_code == 201
+    assert first.json()["pallet_id"] == second.json()["pallet_id"]
 
 
 def test_mapped_import_merges_contents_and_rejects_pallet_conflict(client) -> None:
@@ -95,7 +95,7 @@ def test_mapped_import_merges_contents_and_rejects_pallet_conflict(client) -> No
     )
     assert merged.status_code == 200, merged.text
     assert len(merged.json()["created"]) == 1
-    assert merged.json()["created"][0]["contents"] == "Invoices | Contracts"
+    assert merged.json()["created"][0]["contents"] == "Contracts | Invoices"
 
     conflict = client.post(
         "/api/boxes/import-mapped",

@@ -79,7 +79,6 @@ function handleEvent(
       qc.invalidateQueries({ queryKey: ["pallet"] });
       qc.invalidateQueries({ queryKey: ["pallet-events"] });
       qc.invalidateQueries({ queryKey: ["pallet-integrity"] });
-      qc.invalidateQueries({ queryKey: ["pallet-integrity"] });
       qc.invalidateQueries({ queryKey: ["boxes"] });
       qc.invalidateQueries({ queryKey: ["lots"] });
       qc.invalidateQueries({ queryKey: ["lot"] });

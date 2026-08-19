@@ -8,6 +8,9 @@ from sqlalchemy import event, select
 
 from app.deps import get_current_user
 from app.main import app
+from app.models.boxes import Box, BoxStatus
+from app.models.lots import Lot
+from app.models.pallets import Pallet
 from app.models.requests import (
     BoxRequest,
     BoxRequestDirection,
@@ -17,6 +20,7 @@ from app.models.requests import (
     BoxRequestDocumentType,
     BoxRequestEvent,
     BoxRequestEventType,
+    BoxRequestItem,
     BoxRequestOrigin,
     BoxRequestPriority,
     BoxRequestStatus,
@@ -120,6 +124,76 @@ def test_reconciliation_filters_acl_dates_and_structured_events(
     assert client.get(
         "/api/requests/reconciliation", params={"severity": "critical"}
     ).json()["total"] == 0
+
+
+def test_reconciliation_box_issue_uses_box_warehouse_and_pallet_snapshot(
+    session, make_user
+) -> None:
+    admin = make_user(UserRole.admin)
+    now = datetime(2026, 8, 10, 12, tzinfo=UTC)
+    request = _request(
+        warehouse_id=1,
+        requester_id=admin.id,
+        status=BoxRequestStatus.completed,
+        submitted_at=now,
+        quantity=1,
+        actual=1,
+        variance=0,
+    )
+    lot = Lot(name="Reconciliation Distribution")
+    session.add_all([request, lot])
+    session.flush()
+    pallet = Pallet(lot_id=lot.id, pallet_number="REPORT")
+    session.add(pallet)
+    session.flush()
+    box = Box(
+        box_number="001",
+        lot_id=lot.id,
+        pallet_id=pallet.id,
+        current_warehouse_id=2,
+        status=BoxStatus.received,
+    )
+    session.add(box)
+    session.flush()
+    item = BoxRequestItem(
+        request_id=request.id,
+        position=1,
+        box_id=box.id,
+        lot_id=lot.id,
+        lot=lot.name,
+        pallet_id=pallet.id,
+        pallet=pallet.pallet_number,
+        box_number=box.box_number,
+    )
+    session.add(item)
+    session.flush()
+    session.add(
+        BoxRequestDiscrepancy(
+            request_id=request.id,
+            request_item_id=item.id,
+            box_id=box.id,
+            discrepancy_type=BoxRequestDiscrepancyType.damaged,
+            quantity=1,
+            notes="Damaged in transit",
+        )
+    )
+    session.commit()
+
+    report = build_reconciliation(
+        session,
+        user=admin,
+        filters=RequestReportFilters(),
+        now=now,
+    )
+    issue = next(
+        row
+        for row in report.items
+        if row.issue_type == "typed_discrepancy" and row.box_id == box.id
+    )
+    assert issue.warehouse_id == 2
+    assert issue.warehouse_name == "Building 2"
+    assert issue.pallet_id == pallet.id
+    assert issue.pallet_number == pallet.pallet_number
 
 
 def test_request_analytics_denominators_nulls_and_throughput(

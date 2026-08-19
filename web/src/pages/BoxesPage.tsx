@@ -311,8 +311,6 @@ export function BoxesPage() {
                 const next = new URLSearchParams(params);
                 if (e.target.value) next.set("warehouse_id", e.target.value);
                 else next.delete("warehouse_id");
-                next.delete("pallet_id");
-                next.delete("pallet_number");
                 next.delete("page");
                 setParams(next);
               }
@@ -371,7 +369,7 @@ export function BoxesPage() {
           label="Pallet"
           lotId={filters.lot_id}
           warehouseId={filters.warehouse_id}
-          disabled={!filters.lot_id || !filters.warehouse_id}
+          disabled={!filters.lot_id}
           value={filters.pallet_id ? { id: filters.pallet_id, pallet_number: params.get("pallet_number") ?? `#${filters.pallet_id}` } : null}
           onChange={(selection) => {
             const next = new URLSearchParams(params);
@@ -387,7 +385,7 @@ export function BoxesPage() {
             setParams(next);
           }}
         />
-        {filters.lot_id && filters.warehouse_id && (
+        {filters.lot_id && (
           <label className="flex items-center gap-2 self-end pb-2 text-xs text-slate-700">
             <input
               type="checkbox"
@@ -405,7 +403,7 @@ export function BoxesPage() {
                 setParams(next);
               }}
             />
-            Unassigned pallets only
+            Boxes without a pallet
           </label>
         )}
       </div>
@@ -852,13 +850,6 @@ function BulkPalletAction({
   const lotId = completeSelection && boxes.every((box) => box.lot_id === boxes[0]?.lot_id)
     ? boxes[0]?.lot_id
     : undefined;
-  const warehouseId =
-    completeSelection &&
-    boxes.every(
-      (box) => box.current_warehouse_id === boxes[0]?.current_warehouse_id,
-    )
-      ? boxes[0]?.current_warehouse_id
-      : undefined;
   const currentPalletId =
     completeSelection &&
     boxes[0]?.pallet_id &&
@@ -868,10 +859,10 @@ function BulkPalletAction({
   return (
     <section className="card card-pad border-brand-200 bg-brand-50/40">
       <h2 className="text-sm font-semibold">Bulk pallet assignment</h2>
-      {!lotId || !warehouseId ? (
+      {!lotId ? (
         <p className="mt-1 text-xs text-amber-800">
-          Select boxes from one lot and warehouse on the current page to assign
-          them together.
+          Select boxes from one lot on the current page to assign them
+          together, even when they are in different warehouses.
         </p>
       ) : (
         <div className="mt-2 grid gap-2 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto_auto] md:items-end">
@@ -879,7 +870,6 @@ function BulkPalletAction({
             value={pallet}
             onChange={setPallet}
             lotId={lotId}
-            warehouseId={warehouseId}
             label="Target pallet"
           />
           <label className="block">
@@ -1412,11 +1402,7 @@ function CreateBoxModal({ onClose }: { onClose: () => void }) {
               className="input"
               value={warehouseId}
               onChange={(e) =>
-                {
-                  setWarehouseId(e.target.value ? Number(e.target.value) : "");
-                  setLot(null);
-                  setPallet(null);
-                }
+                setWarehouseId(e.target.value ? Number(e.target.value) : "")
               }
             >
               <option value="">Pick a warehouse</option>
