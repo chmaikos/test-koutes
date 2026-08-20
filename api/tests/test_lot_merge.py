@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from functools import partial
 
 import pytest
 from pydantic import ValidationError
@@ -50,7 +49,7 @@ from app.services.lots import (
 )
 from app.services.requests import create_completed_receipt
 
-create_box = partial(_create_box, legacy_allow_unassigned=True)
+create_box = _create_box
 
 
 def _box(client, number: str, lot: str) -> dict:
@@ -391,6 +390,14 @@ def test_merge_moves_boxes_and_links_but_preserves_snapshots_and_audits(
         lot="Source",
         warehouse_id=1,
     )
+    source_assigned_box = create_box(
+        session,
+        user=operator,
+        box_number="3",
+        lot="Source",
+        pallet_number="SOURCE-PALLET",
+        warehouse_id=1,
+    )
     target_box = create_box(
         session,
         user=operator,
@@ -423,7 +430,8 @@ def test_merge_moves_boxes_and_links_but_preserves_snapshots_and_audits(
 
     assert response.status_code == 200, response.text
     result = response.json()
-    assert result["moved_box_count"] == 1
+    assert result["moved_box_count"] == 2
+    assert result["moved_pallet_count"] == 1
     assert result["moved_request_item_count"] == 1
     assert result["overwritten_archived_box_count"] == 0
     assert result["relinked_request_item_count"] == 0
@@ -432,6 +440,7 @@ def test_merge_moves_boxes_and_links_but_preserves_snapshots_and_audits(
     merged_source = session.get(Lot, source.id)
     current_target = session.get(Lot, target.id)
     moved_box = session.get(Box, source_box.id)
+    moved_assigned_box = session.get(Box, source_assigned_box.id)
     item = session.get(BoxRequestItem, receipt.items[0].id)
     assert merged_source.name == "Source"
     assert merged_source.normalized_name is None
@@ -439,8 +448,12 @@ def test_merge_moves_boxes_and_links_but_preserves_snapshots_and_audits(
     assert merged_source.merged_at is not None
     assert merged_source.version == source_version + 1
     assert moved_box.lot_id == target.id
+    assert moved_box.pallet_id is None
+    assert moved_assigned_box.lot_id == target.id
+    assert moved_assigned_box.pallet_id == source_assigned_box.pallet_id
     assert item.lot_id == target.id
     assert item.lot == "Source"
+    assert (item.pallet_id, item.pallet) == (None, None)
     assert current_target.version == target_version + 1
     events = session.scalars(
         select(LotEvent)
@@ -449,7 +462,7 @@ def test_merge_moves_boxes_and_links_but_preserves_snapshots_and_audits(
     ).all()
     assert {event.lot_id for event in events} == {source.id, target.id}
     assert all(event.reason == "Same supplier lot confirmed" for event in events)
-    assert events[0].event_metadata["moved_box_count"] == 1
+    assert events[0].event_metadata["moved_box_count"] == 2
     box_event = session.scalar(
         select(BoxEvent).where(
             BoxEvent.box_id == source_box.id,

@@ -42,6 +42,13 @@ def clean_pallet_number(value: str) -> str:
     return cleaned
 
 
+def clean_optional_pallet_number(value: str | None) -> str | None:
+    """Canonicalize an optional pallet identifier, treating blanks as omitted."""
+    if value is None or not value.strip():
+        return None
+    return clean_pallet_number(value)
+
+
 def normalize_pallet_number(value: str) -> str:
     """Return the case-insensitive identity key used within a lot."""
     return clean_pallet_number(value).lower()

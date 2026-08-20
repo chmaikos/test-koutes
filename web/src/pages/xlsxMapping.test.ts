@@ -3,6 +3,7 @@ import {
   deliveryVariance,
   groupInboundItems,
   hasRequiredDiscrepancyReason,
+  mapXlsxInboundRows,
   normalizeXlsxHeader,
   resolveXlsxTemplate,
   xlsxTemplateInput,
@@ -53,6 +54,90 @@ describe("Excel inbound row grouping", () => {
         { lot: "PR100", pallet_number: "PAL-2", box_number: "001" },
       ]),
     ).toThrow(/different pallets/);
+  });
+
+  it("merges duplicate unassigned rows and clearly blocks assigned conflicts", () => {
+    expect(
+      groupInboundItems([
+        { lot: "PR100", pallet_number: null, box_number: "1", contents: "A" },
+        { lot: "pr100", box_number: "001", contents: "B" },
+      ]),
+    ).toEqual([
+      {
+        lot: "PR100",
+        box_number: "001",
+        pallet_number: null,
+        contents: "A | B",
+      },
+    ]);
+    expect(() =>
+      groupInboundItems([
+        { lot: "PR100", pallet_number: "PAL-1", box_number: "1" },
+        { lot: "PR100", pallet_number: null, box_number: "001" },
+      ]),
+    ).toThrow(/Assigned vs Unassigned/);
+  });
+
+  it("rejects pallet IDs without a canonical nonblank pallet number", () => {
+    expect(() =>
+      groupInboundItems([
+        {
+          lot: "PR100",
+          box_number: "1",
+          pallet_number: "   ",
+          pallet_id: 9,
+        },
+      ]),
+    ).toThrow(/pallet ID without a pallet number/);
+    expect(() =>
+      groupInboundItems([
+        {
+          lot: "PR100",
+          box_number: "2",
+          pallet_number: "PAL-1",
+          pallet_id: 0,
+        },
+      ]),
+    ).toThrow(/invalid pallet ID/);
+  });
+
+  it("maps no pallet column and mixed blank pallet cells without dropping rows", () => {
+    const selectedRows = new Set([2, 3]);
+    expect(
+      mapXlsxInboundRows({
+        sheet: previewSheet,
+        selectedRows,
+        boxColumn: 0,
+        lotSource: "column",
+        lotColumn: 2,
+        fixedLot: "",
+      }),
+    ).toEqual({
+      error: null,
+      items: [
+        { lot: "PR100", box_number: "001", pallet_number: null, contents: undefined },
+        { lot: "PR100", box_number: "002", pallet_number: null, contents: undefined },
+      ],
+    });
+    const mixed = {
+      ...previewSheet,
+      rows: [
+        previewSheet.rows[0],
+        previewSheet.rows[1],
+        { ...previewSheet.rows[2], cells: ["2", "", "PR100", "B"] },
+      ],
+    };
+    expect(
+      mapXlsxInboundRows({
+        sheet: mixed,
+        selectedRows,
+        boxColumn: 0,
+        palletColumn: 1,
+        lotSource: "column",
+        lotColumn: 2,
+        fixedLot: "",
+      }).items.map((item) => item.pallet_number),
+    ).toEqual(["PAL-1", null]);
   });
 });
 
@@ -169,5 +254,40 @@ describe("saved Excel mapping templates", () => {
       expect(input.include_rows_by_default).toBe(false);
       expect(input).not.toHaveProperty("rows");
     }
+  });
+
+  it("saves an explicit no-pallet mapping and distinguishes it from stale templates", () => {
+    const input = xlsxTemplateInput({
+      useCase: "box_import",
+      name: "Unassigned",
+      warehouseId: 1,
+      shared: false,
+      filename: "boxes.xlsx",
+      sheet: previewSheet,
+      boxColumn: 0,
+      lotSource: "fixed",
+      fixedLot: "PR200",
+      rowStart: 2,
+      includeRowsByDefault: true,
+    });
+    expect(input.column_mappings.pallet_number).toBeUndefined();
+    expect(
+      resolveXlsxTemplate(
+        template({ column_mappings: input.column_mappings }),
+        previewSheet,
+      ),
+    ).toMatchObject({ palletColumn: undefined, warnings: [] });
+
+    const stale = resolveXlsxTemplate(
+      template({
+        column_mappings: {
+          ...template().column_mappings,
+          pallet_number: { index: 9, header: "Missing pallet" },
+        },
+      }),
+      previewSheet,
+    );
+    expect(stale.palletColumn).toBeUndefined();
+    expect(stale.warnings.join(" ")).toMatch(/Pallet number.*missing or ambiguous/);
   });
 });

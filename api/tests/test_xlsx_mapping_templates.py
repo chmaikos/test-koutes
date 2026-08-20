@@ -185,20 +185,25 @@ def test_template_config_validation_and_use_case_filtering(client, make_user):
     missing_pallet = _payload("Missing pallet")
     missing_pallet["column_mappings"].pop("pallet_number")
     response = client.post("/api/xlsx-mapping-templates", json=missing_pallet)
-    assert response.status_code == 422
+    assert response.status_code == 201, response.text
+    assert response.json()["column_mappings"]["pallet_number"] is None
 
     inbound = client.post(
         "/api/xlsx-mapping-templates",
         json=_payload("Inbound", use_case="inbound_acceptance"),
     )
     assert inbound.status_code == 201
-    assert (
-        client.get(
-            "/api/xlsx-mapping-templates",
-            params={"use_case": "box_import"},
-        ).json()
-        == []
-    )
+    assert inbound.json()["column_mappings"]["pallet_number"] == {
+        "index": 3,
+        "header": "Pallet",
+    }
+    listed_box_imports = client.get(
+        "/api/xlsx-mapping-templates",
+        params={"use_case": "box_import"},
+    ).json()
+    assert [template["name"] for template in listed_box_imports] == [
+        "Missing pallet"
+    ]
 
 
 def test_admin_sees_all_shared_but_not_other_private_or_owner_controls(

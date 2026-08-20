@@ -24,7 +24,11 @@ from app.models.boxes import (
 )
 from app.models.lots import Lot, normalize_lot_name
 from app.models.notifications import RequestNotificationKind
-from app.models.pallets import Pallet, clean_pallet_number, normalize_pallet_number
+from app.models.pallets import (
+    Pallet,
+    clean_optional_pallet_number,
+    normalize_pallet_number,
+)
 from app.models.requests import (
     ACTIVE_REQUEST_STATUSES,
     BoxRequest,
@@ -906,25 +910,29 @@ def create_staged_receipt(
         raise RequestRuleError(str(exc)) from exc
     for position, item in enumerate(rows, start=1):
         lot_record = lots_by_name[normalize_lot_name(item.lot)]
-        try:
-            pallet = resolve_or_create_active_pallet(
-                db,
-                user=user,
-                lot_id=lot_record.id,
-                warehouse_id=warehouse_id,
-                pallet_number=item.pallet_number,
-                pallet_id=item.pallet_id,
-            )
-        except PalletRuleError as exc:
-            raise RequestRuleError(str(exc)) from exc
+        pallet: Pallet | None = None
+        if item.pallet_id is not None and item.pallet_number is None:
+            raise RequestRuleError("pallet_id requires pallet_number")
+        if item.pallet_number is not None:
+            try:
+                pallet = resolve_or_create_active_pallet(
+                    db,
+                    user=user,
+                    lot_id=lot_record.id,
+                    warehouse_id=warehouse_id,
+                    pallet_number=item.pallet_number,
+                    pallet_id=item.pallet_id,
+                )
+            except PalletRuleError as exc:
+                raise RequestRuleError(str(exc)) from exc
         db.add(
             BoxRequestItem(
                 request_id=request.id,
                 position=position,
                 lot_id=lot_record.id,
                 lot=lot_record.name,
-                pallet_id=pallet.id,
-                pallet=pallet.pallet_number,
+                pallet_id=pallet.id if pallet is not None else None,
+                pallet=pallet.pallet_number if pallet is not None else None,
                 box_number=item.box_number,
                 contents=item.contents,
             )
@@ -1056,12 +1064,15 @@ def finalize_staged_receipt(
     target_status = (
         BoxStatus.quarantined if request.receipt_quarantine else BoxStatus.received
     )
-    pallets_by_item_id: dict[int, Pallet] = {}
+    pallets_by_item_id: dict[int, Pallet | None] = {}
     for item in staged_items:
         if item.pallet is None:
-            raise RequestConflictError(
-                "staged receipt item has no pallet snapshot; restage the receipt"
-            )
+            if item.pallet_id is not None:
+                raise RequestConflictError(
+                    "staged receipt item has pallet_id without a pallet snapshot"
+                )
+            pallets_by_item_id[item.id] = None
+            continue
         try:
             pallets_by_item_id[item.id] = resolve_or_create_active_pallet(
                 db,
@@ -1085,8 +1096,12 @@ def finalize_staged_receipt(
                     user=user,
                     box_number=item.box_number or "",
                     lot_id=item.lot_id,
-                    pallet_number=target_pallet.pallet_number,
-                    pallet_id=target_pallet.id,
+                    pallet_number=(
+                        target_pallet.pallet_number
+                        if target_pallet is not None
+                        else None
+                    ),
+                    pallet_id=target_pallet.id if target_pallet is not None else None,
                     contents=item.contents,
                     warehouse_id=request.warehouse_id,
                     note=f"Restored through staged receipt #{request.id}.",
@@ -1099,8 +1114,12 @@ def finalize_staged_receipt(
                     user=user,
                     box_number=item.box_number or "",
                     lot_id=item.lot_id,
-                    pallet_number=target_pallet.pallet_number,
-                    pallet_id=target_pallet.id,
+                    pallet_number=(
+                        target_pallet.pallet_number
+                        if target_pallet is not None
+                        else None
+                    ),
+                    pallet_id=target_pallet.id if target_pallet is not None else None,
                     contents=item.contents,
                     warehouse_id=request.warehouse_id,
                     note=f"Created through staged receipt #{request.id}.",
@@ -2296,7 +2315,7 @@ def merge_inbound_items(items: list[InboundBoxItem]) -> list[InboundBoxItem]:
     """
     grouped: dict[
         tuple[str, str],
-        tuple[str, str, str, int | None, list[str]],
+        tuple[str, str | None, str | None, int | None, list[str]],
     ] = {}
     for item in items:
         try:
@@ -2308,11 +2327,12 @@ def merge_inbound_items(items: list[InboundBoxItem]) -> list[InboundBoxItem]:
             box_number = normalize_box_number(item.box_number)
         except BoxRuleError as exc:
             raise RequestRuleError(str(exc)) from exc
-        try:
-            pallet_number = clean_pallet_number(item.pallet_number)
-            normalized_pallet = normalize_pallet_number(pallet_number)
-        except ValueError as exc:
-            raise RequestRuleError(str(exc)) from exc
+        pallet_number = clean_optional_pallet_number(item.pallet_number)
+        normalized_pallet = (
+            normalize_pallet_number(pallet_number)
+            if pallet_number is not None
+            else None
+        )
         key = (normalized_lot, box_number)
         existing = grouped.get(key)
         if existing is None:
@@ -2323,34 +2343,45 @@ def merge_inbound_items(items: list[InboundBoxItem]) -> list[InboundBoxItem]:
                 item.pallet_id,
                 [],
             )
-        elif (
-            existing[2] != normalized_pallet
-            or (
-                existing[3] is not None
-                and item.pallet_id is not None
-                and existing[3] != item.pallet_id
-            )
-        ):
-            raise RequestRuleError(
-                f"box {box_number!r} in lot {lot!r} is assigned to "
-                "different pallet values"
-            )
-        elif existing[3] is None and item.pallet_id is not None:
-            grouped[key] = (
-                existing[0],
-                existing[1],
-                existing[2],
-                item.pallet_id,
-                existing[4],
-            )
+        else:
+            existing_assigned = existing[1] is not None
+            item_assigned = pallet_number is not None
+            if existing_assigned != item_assigned:
+                raise RequestRuleError(
+                    f"box {box_number!r} in lot {lot!r} has conflicting pallet "
+                    "assignment: Assigned vs Unassigned"
+                )
+            if existing_assigned and (
+                existing[2] != normalized_pallet
+                or (
+                    existing[3] is not None
+                    and item.pallet_id is not None
+                    and existing[3] != item.pallet_id
+                )
+            ):
+                raise RequestRuleError(
+                    f"box {box_number!r} in lot {lot!r} is assigned to "
+                    "different pallet values"
+                )
+            if existing[3] is None and item.pallet_id is not None:
+                grouped[key] = (
+                    existing[0],
+                    existing[1],
+                    existing[2],
+                    item.pallet_id,
+                    existing[4],
+                )
         existing = grouped[key]
-        grouped[key] = (
-            min(existing[0], lot, key=lambda value: (value.casefold(), value)),
-            min(
-                existing[1],
+        canonical_pallet_number = existing[1]
+        if canonical_pallet_number is not None and pallet_number is not None:
+            canonical_pallet_number = min(
+                canonical_pallet_number,
                 pallet_number,
                 key=lambda value: (value.casefold(), value),
-            ),
+            )
+        grouped[key] = (
+            min(existing[0], lot, key=lambda value: (value.casefold(), value)),
+            canonical_pallet_number,
             existing[2],
             existing[3],
             existing[4],
@@ -2396,9 +2427,82 @@ def _preview_pallet_resolution(
     *,
     item: InboundBoxItem,
     lot: Lot | None,
+    existing_box: Box | None,
     pallets_by_id: dict[int, Pallet],
     pallets_by_identity: dict[tuple[int, str], Pallet],
 ) -> _PreviewPalletResolution:
+    if item.pallet_number is None:
+        current_pallet_id = (
+            existing_box.pallet_id if existing_box is not None else None
+        )
+        current_pallet = (
+            pallets_by_id.get(current_pallet_id)
+            if current_pallet_id is not None
+            else None
+        )
+        blocked_code: str | None = None
+        blocked_message: str | None = None
+        if current_pallet_id is None:
+            resolution = "unassigned"
+        elif current_pallet is None:
+            resolution = "blocked"
+            blocked_code = "current_pallet_not_found"
+            blocked_message = "current pallet assignment does not exist"
+        elif not current_pallet.is_active:
+            resolution = "blocked"
+            blocked_code = "current_pallet_archived"
+            blocked_message = "current pallet assignment is archived"
+        elif lot is None or current_pallet.lot_id != lot.id:
+            resolution = "blocked"
+            blocked_code = "current_pallet_lot_mismatch"
+            blocked_message = "current pallet assignment belongs to a different lot"
+        else:
+            resolution = "preserve_existing"
+        return _PreviewPalletResolution(
+            output=InboundCompletionTargetPalletOut(
+                resolution=resolution,
+                pallet_id=current_pallet_id,
+                pallet_number=(
+                    current_pallet.pallet_number
+                    if current_pallet is not None
+                    else None
+                ),
+            ),
+            pallet=current_pallet,
+            blocked_code=blocked_code,
+            blocked_message=blocked_message,
+            signature={
+                "resolution": resolution,
+                "exists": current_pallet is not None,
+                "id": current_pallet_id,
+                "lot_id": (
+                    current_pallet.lot_id if current_pallet is not None else None
+                ),
+                "number": (
+                    current_pallet.pallet_number
+                    if current_pallet is not None
+                    else None
+                ),
+                "normalized_number": (
+                    current_pallet.normalized_pallet_number
+                    if current_pallet is not None
+                    else None
+                ),
+                "version": (
+                    current_pallet.version if current_pallet is not None else None
+                ),
+                "is_active": (
+                    current_pallet.is_active if current_pallet is not None else None
+                ),
+                "archived_at": (
+                    current_pallet.archived_at.isoformat()
+                    if current_pallet is not None
+                    and current_pallet.archived_at is not None
+                    else None
+                ),
+            },
+        )
+
     normalized_number = normalize_pallet_number(item.pallet_number)
     pallet: Pallet | None = None
     blocked_code: str | None = None
@@ -2587,7 +2691,9 @@ def _classify_inbound_completion(
         else {}
     )
     normalized_pallet_numbers = {
-        normalize_pallet_number(item.pallet_number) for item in merged_rows
+        normalize_pallet_number(item.pallet_number)
+        for item in merged_rows
+        if item.pallet_number is not None
     }
     identity_pallets = (
         db.scalars(
@@ -2703,6 +2809,7 @@ def _classify_inbound_completion(
         target_pallet = _preview_pallet_resolution(
             item=item,
             lot=lot,
+            existing_box=box,
             pallets_by_id=pallets_by_id,
             pallets_by_identity=pallets_by_identity,
         )
@@ -2792,8 +2899,10 @@ def _classify_inbound_completion(
             {
                 "normalized_lot": normalized_lot,
                 "normalized_box_number": item.box_number,
-                "normalized_pallet_number": normalize_pallet_number(
-                    item.pallet_number
+                "normalized_pallet_number": (
+                    normalize_pallet_number(item.pallet_number)
+                    if item.pallet_number is not None
+                    else None
                 ),
                 "mapped_pallet_id": item.pallet_id,
                 "contents": sorted(
@@ -3097,23 +3206,33 @@ def complete_request(
                 start=1,
             ):
                 lot_record = lots_by_name[normalize_lot_name(item.lot)]
-                target_pallet = resolve_or_create_active_pallet(
-                    db,
-                    user=user,
-                    lot_id=lot_record.id,
-                    warehouse_id=request.warehouse_id,
-                    pallet_number=item.pallet_number,
-                    pallet_id=item.pallet_id,
-                    receipt_creation_authorized=True,
-                )
+                if item.pallet_id is not None and item.pallet_number is None:
+                    raise RequestConflictError("pallet_id requires pallet_number")
+                target_pallet: Pallet | None = None
+                if item.pallet_number is not None:
+                    target_pallet = resolve_or_create_active_pallet(
+                        db,
+                        user=user,
+                        lot_id=lot_record.id,
+                        warehouse_id=request.warehouse_id,
+                        pallet_number=item.pallet_number,
+                        pallet_id=item.pallet_id,
+                        receipt_creation_authorized=True,
+                    )
                 if preview_row.classification == "create":
                     box = create_box(
                         db,
                         user=user,
                         box_number=item.box_number,
                         lot_id=lot_record.id,
-                        pallet_number=target_pallet.pallet_number,
-                        pallet_id=target_pallet.id,
+                        pallet_number=(
+                            target_pallet.pallet_number
+                            if target_pallet is not None
+                            else None
+                        ),
+                        pallet_id=(
+                            target_pallet.id if target_pallet is not None else None
+                        ),
                         contents=item.contents,
                         warehouse_id=request.warehouse_id,
                         note=f"Received through request #{request.id}",
@@ -3121,7 +3240,10 @@ def complete_request(
                         commit=False,
                     )
                     created_box_ids.append(box.id)
-                    if affected_pallet_warehouse_ids is not None:
+                    if (
+                        affected_pallet_warehouse_ids is not None
+                        and target_pallet is not None
+                    ):
                         affected_pallet_warehouse_ids.setdefault(
                             target_pallet.id, set()
                         ).add(request.warehouse_id)
@@ -3158,9 +3280,15 @@ def complete_request(
                             affected_pallet_warehouse_ids.setdefault(
                                 source_pallet_id, set()
                             ).add(source_warehouse_id)
-                        affected_pallet_warehouse_ids.setdefault(
-                            target_pallet.id, set()
-                        ).add(request.warehouse_id)
+                        effective_pallet_id = (
+                            target_pallet.id
+                            if target_pallet is not None
+                            else source_pallet_id
+                        )
+                        if effective_pallet_id is not None:
+                            affected_pallet_warehouse_ids.setdefault(
+                                effective_pallet_id, set()
+                            ).add(request.warehouse_id)
                 db.add(
                     BoxRequestItem(
                         request_id=request.id,

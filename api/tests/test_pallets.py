@@ -19,6 +19,7 @@ from app.main import app
 from app.models import (
     Box,
     BoxRequestItem,
+    BoxRequestOrigin,
     BoxStatus,
     Lot,
     Pallet,
@@ -28,8 +29,13 @@ from app.models import (
     Warehouse,
 )
 from app.models.pallets import clean_pallet_number, normalize_pallet_number
+from app.schemas.boxes import BoxCreate, MappedImportItem
 from app.schemas.requests import BoxRequestItemOut, InboundBoxItem
-from app.services.requests import merge_inbound_items
+from app.services.requests import (
+    RequestRuleError,
+    create_completed_receipt,
+    merge_inbound_items,
+)
 from scripts.pallet_preflight import analyze_rows
 
 
@@ -83,11 +89,84 @@ def test_request_item_pallet_snapshot_is_nullable_immutable_and_output_only() ->
     assert output.pallet_id == 7
     assert output.pallet == "Pallet A-01"
     assert output.pallet_number == "Pallet A-01"
-    assert InboundBoxItem.model_fields["pallet_number"].is_required()
+    assert not InboundBoxItem.model_fields["pallet_number"].is_required()
     assert "pallet_id" in InboundBoxItem.model_fields
     assert "pallet" not in InboundBoxItem.model_fields
     with pytest.raises(ValueError, match="pallet snapshot is immutable"):
         item.pallet = "Pallet A-02"
+
+
+def test_unassigned_receipt_snapshot_is_null_null(session, make_user) -> None:
+    lot = _lot(session, "Unassigned Snapshot")
+    box = Box(
+        lot_id=lot.id,
+        box_number="001",
+        current_warehouse_id=1,
+        status=BoxStatus.received,
+    )
+    session.add(box)
+    session.commit()
+
+    receipt = create_completed_receipt(
+        session,
+        user=make_user(),
+        warehouse_id=1,
+        boxes=[box],
+        origin=BoxRequestOrigin.manual_entry,
+        note=None,
+    )
+    item = session.scalar(
+        select(BoxRequestItem).where(BoxRequestItem.request_id == receipt.id)
+    )
+
+    assert item is not None
+    assert (item.pallet_id, item.pallet) == (None, None)
+
+
+@pytest.mark.parametrize(
+    "model,payload",
+    [
+        (
+            BoxCreate,
+            {
+                "box_number": "1",
+                "lot": "Lot A",
+                "warehouse_id": 1,
+            },
+        ),
+        (
+            MappedImportItem,
+            {
+                "box_number": "1",
+                "lot": "Lot A",
+            },
+        ),
+        (
+            InboundBoxItem,
+            {
+                "box_number": "1",
+                "lot": "Lot A",
+            },
+        ),
+    ],
+)
+def test_receipt_contracts_canonicalize_optional_pallets(model, payload) -> None:
+    omitted = model.model_validate(payload)
+    blank = model.model_validate({**payload, "pallet_number": " \t "})
+    long_blank = model.model_validate({**payload, "pallet_number": " " * 100})
+    assigned = model.model_validate(
+        {**payload, "pallet_number": " Pallet\tA ", "pallet_id": 17}
+    )
+
+    assert omitted.pallet_number is None
+    assert blank.pallet_number is None
+    assert long_blank.pallet_number is None
+    assert assigned.pallet_number == "Pallet A"
+    assert assigned.pallet_id == 17
+    with pytest.raises(ValueError, match="pallet_id requires pallet_number"):
+        model.model_validate({**payload, "pallet_id": 17})
+    with pytest.raises(ValueError):
+        model.model_validate({**payload, "pallet_number": 17})
 
 
 def test_duplicate_inbound_rows_preserve_later_pallet_id() -> None:
@@ -111,6 +190,34 @@ def test_duplicate_inbound_rows_preserve_later_pallet_id() -> None:
     assert len(merged) == 1
     assert merged[0].pallet_id == 17
     assert merged[0].contents == "One | Two"
+
+
+def test_duplicate_inbound_rows_merge_when_all_unassigned() -> None:
+    merged = merge_inbound_items(
+        [
+            InboundBoxItem(lot="Lot A", box_number="1", contents="One"),
+            InboundBoxItem(lot="lot a", box_number="001", contents="Two"),
+        ]
+    )
+
+    assert len(merged) == 1
+    assert merged[0].pallet_number is None
+    assert merged[0].pallet_id is None
+    assert merged[0].contents == "One | Two"
+
+
+def test_duplicate_inbound_rows_reject_assigned_vs_unassigned() -> None:
+    with pytest.raises(RequestRuleError, match="Assigned vs Unassigned"):
+        merge_inbound_items(
+            [
+                InboundBoxItem(
+                    lot="Lot A",
+                    box_number="1",
+                    pallet_number="Pallet A",
+                ),
+                InboundBoxItem(lot="lot a", box_number="001"),
+            ]
+        )
 
 
 def test_create_scoped_uniqueness_and_legacy_nullable_boxes(
@@ -456,6 +563,39 @@ def test_preflight_reports_unassigned_and_impossible_assignments() -> None:
         }
     ]
     assert report["conflicts"]["inactive_pallet_assignments"][0]["box_id"] == 2
+
+
+def test_preflight_treats_unassigned_active_boxes_as_informational() -> None:
+    report = analyze_rows(
+        [
+            {
+                "id": 1,
+                "lot_id": 10,
+                "current_warehouse_id": 1,
+                "pallet_id": None,
+                "status": "received",
+                "archived_at": None,
+            },
+            {
+                "id": 2,
+                "lot_id": 10,
+                "current_warehouse_id": 1,
+                "pallet_id": None,
+                "status": "returned",
+                "archived_at": None,
+            },
+        ],
+        [],
+    )
+
+    assert report["safe"] is True
+    assert report["conflict_count"] == 0
+    assert report["informational_count"] == 1
+    assert report["informational"]["unassigned_active_boxes"] == {
+        "count": 1,
+        "box_ids": [1],
+    }
+    assert report["unassigned_box_ids"] == [1]
 
 
 def test_migration_metadata_offline_sql_and_single_head() -> None:

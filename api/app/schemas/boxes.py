@@ -5,6 +5,7 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.models.boxes import BoxEventType, BoxStatus
+from app.models.pallets import clean_optional_pallet_number
 from app.services.boxes import BoxRuleError, normalize_box_number
 
 
@@ -35,7 +36,7 @@ class BoxCreate(BaseModel):
     box_number: str = Field(min_length=1, max_length=64)
     lot: str | None = Field(default=None, min_length=1, max_length=64)
     lot_id: int | None = Field(default=None, ge=1)
-    pallet_number: str = Field(min_length=1, max_length=64)
+    pallet_number: str | None = Field(default=None, max_length=64)
     pallet_id: int | None = Field(default=None, ge=1)
     contents: str | None = Field(default=None, max_length=2000)
     warehouse_id: int = Field(ge=1)
@@ -53,10 +54,21 @@ class BoxCreate(BaseModel):
         except BoxRuleError as exc:
             raise ValueError(str(exc)) from exc
 
+    @field_validator("pallet_number", mode="before")
+    @classmethod
+    def _normalize_pallet_number(cls, value: object) -> object:
+        return (
+            clean_optional_pallet_number(value)
+            if value is None or isinstance(value, str)
+            else value
+        )
+
     @model_validator(mode="after")
-    def _one_lot_identity(self) -> BoxCreate:
+    def _valid_identities(self) -> BoxCreate:
         if (self.lot is None) == (self.lot_id is None):
             raise ValueError("provide exactly one of lot or lot_id")
+        if self.pallet_id is not None and self.pallet_number is None:
+            raise ValueError("pallet_id requires pallet_number")
         return self
 
 
@@ -158,9 +170,24 @@ class ImportSkip(BaseModel):
 class MappedImportItem(BaseModel):
     box_number: str = Field(min_length=1, max_length=64)
     lot: str = Field(min_length=1, max_length=64)
-    pallet_number: str = Field(min_length=1, max_length=64)
+    pallet_number: str | None = Field(default=None, max_length=64)
     pallet_id: int | None = Field(default=None, ge=1)
     contents: str | None = Field(default=None, max_length=2000)
+
+    @field_validator("pallet_number", mode="before")
+    @classmethod
+    def _normalize_pallet_number(cls, value: object) -> object:
+        return (
+            clean_optional_pallet_number(value)
+            if value is None or isinstance(value, str)
+            else value
+        )
+
+    @model_validator(mode="after")
+    def _pallet_id_requires_number(self) -> MappedImportItem:
+        if self.pallet_id is not None and self.pallet_number is None:
+            raise ValueError("pallet_id requires pallet_number")
+        return self
 
 
 class MappedImportRequest(BaseModel):

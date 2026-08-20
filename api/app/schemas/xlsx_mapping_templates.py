@@ -15,7 +15,7 @@ class XlsxColumnRef(BaseModel):
 
 class XlsxColumnMappings(BaseModel):
     box_number: XlsxColumnRef
-    pallet_number: XlsxColumnRef
+    pallet_number: XlsxColumnRef | None = None
     lot: XlsxColumnRef | None = None
     contents: XlsxColumnRef | None = None
 

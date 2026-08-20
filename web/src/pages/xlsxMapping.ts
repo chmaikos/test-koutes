@@ -48,7 +48,7 @@ export function xlsxColumnRef(
 }
 
 function resolveColumn(
-  ref: XlsxColumnRef | undefined,
+  ref: XlsxColumnRef | null | undefined,
   headers: string[],
   maxColumns: number,
   label: string,
@@ -146,7 +146,7 @@ export function xlsxTemplateInput(input: {
   filename: string;
   sheet: XlsxPreviewSheet;
   boxColumn: number;
-  palletColumn: number;
+  palletColumn?: number;
   lotSource: XlsxLotSource;
   lotColumn?: number;
   fixedLot: string;
@@ -164,7 +164,9 @@ export function xlsxTemplateInput(input: {
     headers,
     column_mappings: {
       box_number: xlsxColumnRef(input.boxColumn, headers),
-      pallet_number: xlsxColumnRef(input.palletColumn, headers),
+      ...(input.palletColumn !== undefined
+        ? { pallet_number: xlsxColumnRef(input.palletColumn, headers) }
+        : {}),
       ...(input.lotSource === "column" && input.lotColumn !== undefined
         ? { lot: xlsxColumnRef(input.lotColumn, headers) }
         : {}),
@@ -192,8 +194,8 @@ export function groupInboundItems(
     {
       lot: string;
       box_number: string;
-      pallet_number: string;
-      pallet_id?: number;
+      pallet_number: string | null;
+      pallet_id: number | null;
       contents: string[];
     }
   >();
@@ -201,35 +203,58 @@ export function groupInboundItems(
   for (const row of rows) {
     const lot = row.lot.trim().replace(/\s+/g, " ");
     const boxNumber = canonicalBoxNumber(row.box_number);
-    const key = `${lot.toLocaleLowerCase()}\u0000${boxNumber}`;
+    const key = `${lot.toLowerCase()}\u0000${boxNumber}`;
     const palletNumber = normalizePalletNumber(row.pallet_number);
+    const palletId = row.pallet_id ?? null;
+    if (palletId !== null && palletNumber === null) {
+      throw new Error(
+        `Box ${boxNumber} in lot ${lot} has a pallet ID without a pallet number.`,
+      );
+    }
+    if (
+      palletId !== null &&
+      (!Number.isInteger(palletId) || palletId < 1)
+    ) {
+      throw new Error(
+        `Box ${boxNumber} in lot ${lot} has an invalid pallet ID.`,
+      );
+    }
     let group = grouped.get(key);
     if (!group) {
       group = {
         lot,
         box_number: boxNumber,
         pallet_number: palletNumber,
-        pallet_id: row.pallet_id,
+        pallet_id: palletId,
         contents: [],
       };
       grouped.set(key, group);
     } else if (
       normalizePalletNumber(group.pallet_number) !== palletNumber ||
-      (group.pallet_id !== undefined &&
-        row.pallet_id !== undefined &&
-        group.pallet_id !== row.pallet_id)
+      (group.pallet_id !== null &&
+        palletId !== null &&
+        group.pallet_id !== palletId)
     ) {
-      throw new Error(
-        `Box ${boxNumber} in lot ${lot} is mapped to different pallets (${group.pallet_number} and ${palletNumber}).`,
-      );
-    } else if (group.pallet_id === undefined && row.pallet_id !== undefined) {
-      group.pallet_id = row.pallet_id;
+      const groupLabel = group.pallet_number ?? "Unassigned";
+      const rowLabel = palletNumber ?? "Unassigned";
+      const conflict =
+        (group.pallet_number === null) !== (palletNumber === null)
+          ? "an Assigned vs Unassigned pallet conflict"
+          : `different pallets (${groupLabel} and ${rowLabel})`;
+      throw new Error(`Box ${boxNumber} in lot ${lot} is mapped to ${conflict}.`);
+    } else if (group.pallet_id === null && palletId !== null) {
+      group.pallet_id = palletId;
     }
-    if (lot < group.lot) {
+    if (canonicalDisplayLessThan(lot, group.lot)) {
       group.lot = lot;
     }
-    const cleanedPalletNumber = row.pallet_number.trim().replace(/\s+/g, " ");
-    if (cleanedPalletNumber < group.pallet_number) {
+    const cleanedPalletNumber =
+      row.pallet_number?.trim().replace(/\s+/g, " ") || null;
+    if (
+      cleanedPalletNumber !== null &&
+      group.pallet_number !== null &&
+      canonicalDisplayLessThan(cleanedPalletNumber, group.pallet_number)
+    ) {
       group.pallet_number = cleanedPalletNumber;
     }
     const contents = row.contents?.trim();
@@ -249,14 +274,23 @@ export function groupInboundItems(
       lot: group.lot,
       box_number: group.box_number,
       pallet_number: group.pallet_number,
-      ...(group.pallet_id ? { pallet_id: group.pallet_id } : {}),
+      ...(group.pallet_id !== null ? { pallet_id: group.pallet_id } : {}),
       contents: contents || undefined,
     };
   });
 }
 
-function normalizePalletNumber(value: string): string {
-  return value.trim().replace(/\s+/g, " ").toLocaleUpperCase();
+function normalizePalletNumber(
+  value: string | null | undefined,
+): string | null {
+  const normalized = value?.trim().replace(/\s+/g, " ").toLowerCase();
+  return normalized || null;
+}
+
+function canonicalDisplayLessThan(left: string, right: string): boolean {
+  const leftFolded = left.toLowerCase();
+  const rightFolded = right.toLowerCase();
+  return leftFolded < rightFolded || (leftFolded === rightFolded && left < right);
 }
 
 export function tryGroupInboundItems(rows: InboundRequestItemInput[]): {
@@ -271,6 +305,54 @@ export function tryGroupInboundItems(rows: InboundRequestItemInput[]): {
       error: caught instanceof Error ? caught.message : "Pallet grouping failed.",
     };
   }
+}
+
+export function mapXlsxInboundRows(input: {
+  sheet: XlsxPreviewSheet;
+  selectedRows: Set<number>;
+  boxColumn: number;
+  palletColumn?: number;
+  lotSource: XlsxLotSource;
+  lotColumn?: number;
+  fixedLot: string;
+  contentsColumn?: number;
+}): { items: InboundRequestItemInput[]; error: string | null } {
+  const mapped: InboundRequestItemInput[] = [];
+  for (const row of input.sheet.rows) {
+    if (!input.selectedRows.has(row.row_number)) continue;
+    const boxNumber = (row.cells[input.boxColumn] ?? "").trim();
+    const lot =
+      input.lotSource === "fixed"
+        ? input.fixedLot.trim()
+        : (row.cells[input.lotColumn!] ?? "").trim();
+    if (!boxNumber || !lot) {
+      return {
+        items: [],
+        error: `Excel row ${row.row_number} is missing a mapped box number or lot.`,
+      };
+    }
+    if (!/^\d+$/.test(boxNumber)) {
+      return {
+        items: [],
+        error: `Excel row ${row.row_number} has a non-numeric mapped box number.`,
+      };
+    }
+    const palletNumber =
+      input.palletColumn === undefined
+        ? null
+        : (row.cells[input.palletColumn] ?? "").trim() || null;
+    const contents =
+      input.contentsColumn === undefined
+        ? undefined
+        : (row.cells[input.contentsColumn] ?? "").trim() || undefined;
+    mapped.push({
+      box_number: boxNumber,
+      lot,
+      pallet_number: palletNumber,
+      contents,
+    });
+  }
+  return tryGroupInboundItems(mapped);
 }
 
 export function deliveryVariance(ordered: number, actual: number): number {

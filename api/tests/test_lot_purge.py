@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from functools import partial
 
 import pytest
 from sqlalchemy import func, select
@@ -56,7 +55,7 @@ from app.services.lots import (
 )
 from app.services.requests import create_completed_receipt
 
-create_box = partial(_create_box, legacy_allow_unassigned=True)
+create_box = _create_box
 
 
 def _eligible_lot(session, make_user, *, receipt_count: int = 1):

@@ -2,7 +2,10 @@ import { useState } from "react";
 import { Upload } from "lucide-react";
 import { useImportMappedBoxes, useWarehouses } from "@/api/hooks";
 import type { ImportResult, InboundRequestItemInput } from "@/api/types";
-import { mappedImportPayload } from "@/pages/importResults";
+import {
+  mappedImportPayload,
+  palletAssignmentCounts,
+} from "@/pages/importResults";
 import { ExcelRowMapper } from "@/components/ExcelRowMapper";
 
 export function ImportBoxesDialog({
@@ -18,6 +21,7 @@ export function ImportBoxesDialog({
   const [mappedRows, setMappedRows] = useState<InboundRequestItemInput[]>([]);
   const [restoreArchived, setRestoreArchived] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const palletCounts = palletAssignmentCounts(mappedRows);
 
   return (
     <div className="modal-backdrop z-30">
@@ -26,8 +30,8 @@ export function ImportBoxesDialog({
         <p className="mt-1 text-sm text-slate-500">
           Choose the destination warehouse, then map any workbook layout just
           like an inbound delivery. All rows start included; exclude headers or
-          unrelated data. Pallet number is required. Repeated rows for the same
-          lot, box, and pallet are merged into one box.
+          unrelated data. Pallet assignment is optional. Repeated compatible
+          rows for the same lot and box are merged into one box.
         </p>
 
         <form
@@ -119,13 +123,16 @@ export function ImportBoxesDialog({
             <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3">
               <p className="text-sm font-medium text-emerald-900">
                 {mappedRows.length} unique box
-                {mappedRows.length === 1 ? "" : "es"} ready to import
+                {mappedRows.length === 1 ? "" : "es"} ready to import ·{" "}
+                {palletCounts.assigned} assigned · {palletCounts.unassigned}{" "}
+                Unassigned
               </p>
               <div className="mt-2 max-h-32 overflow-auto text-xs text-emerald-900">
                 {mappedRows.map((row) => (
                   <div key={`${row.lot}-${row.box_number}`}>
                     {row.lot} · {row.box_number}
-                    {" · Pallet "}{row.pallet_number}
+                    {" · Pallet "}
+                    {row.pallet_number || "Unassigned"}
                     {row.contents ? ` · ${row.contents}` : ""}
                   </div>
                 ))}

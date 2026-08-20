@@ -36,13 +36,14 @@ export function inboundCompletionItems(
 ): ReturnType<typeof tryGroupInboundItems> {
   return tryGroupInboundItems(
     rows.flatMap((row, index) =>
-      row.lot.trim() && row.box_number.trim() && row.pallet_number.trim()
+      row.lot.trim() && row.box_number.trim()
         ? [
             {
               lot: row.lot.trim().replace(/\s+/g, " "),
               box_number: row.box_number.trim(),
-              pallet_number: row.pallet_number.trim().replace(/\s+/g, " "),
-              ...(palletConfirmations[index]?.id
+              pallet_number:
+                row.pallet_number?.trim().replace(/\s+/g, " ") || null,
+              ...(row.pallet_number?.trim() && palletConfirmations[index]?.id
                 ? { pallet_id: palletConfirmations[index]!.id }
                 : {}),
               contents: row.contents?.trim() || undefined,
@@ -64,11 +65,15 @@ export function inboundCompletionFingerprint(input: {
     requestId: input.requestId,
     requestVersion: input.requestVersion,
     rows: input.rows.map((row, index) => ({
-      lot: row.lot,
-      boxNumber: row.box_number,
-      palletNumber: row.pallet_number,
-      palletId: row.pallet_id ?? null,
-      contents: row.contents ?? null,
+      lot: row.lot.trim().replace(/\s+/g, " "),
+      boxNumber: row.box_number.trim(),
+      palletNumber:
+        row.pallet_number?.trim().replace(/\s+/g, " ") || null,
+      palletId:
+        row.pallet_number?.trim()
+          ? (input.palletConfirmations[index]?.id ?? row.pallet_id ?? null)
+          : null,
+      contents: row.contents?.trim() || null,
       lotConfirmation: input.lotConfirmations[index]
         ? {
             id: input.lotConfirmations[index]!.id,
@@ -83,6 +88,19 @@ export function inboundCompletionFingerprint(input: {
         : null,
     })),
   });
+}
+
+export function inboundTargetPalletLabel(
+  row: InboundCompletionPreviewRow,
+): string {
+  const target = row.target_pallet_resolution;
+  if (target.resolution === "preserve_existing") {
+    return row.current_pallet_number
+      ? `Keep current pallet ${row.current_pallet_number}`
+      : "Remain Unassigned";
+  }
+  if (target.resolution === "unassigned") return "Unassigned";
+  return target.pallet_number ?? "Unassigned";
 }
 
 export function reviewedInboundCompletion(

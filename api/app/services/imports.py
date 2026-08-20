@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.boxes import Box
+from app.models.pallets import clean_optional_pallet_number
 from app.models.requests import BoxRequestOrigin
 from app.models.users import User
 from app.models.warehouses import Warehouse
@@ -114,7 +115,7 @@ def import_mapped_boxes(
     *,
     user: User,
     warehouse_id: int,
-    items: list[tuple[str, str, str, int | None, str | None]],
+    items: list[tuple[str, str, str | None, int | None, str | None]],
     restore_archived: bool = False,
 ) -> ImportOutcome:
     outcome = ImportOutcome()
@@ -139,6 +140,9 @@ def import_mapped_boxes(
                 )
             )
             continue
+        pallet_number = clean_optional_pallet_number(pallet_number)
+        if pallet_id is not None and pallet_number is None:
+            raise BoxRuleError("pallet_id requires pallet_number")
         canonical_rows.append(
             InboundBoxItem(
                 box_number=cleaned_number,
@@ -300,12 +304,6 @@ def import_boxes_xlsx(
             "(recognised headers: box_number, lot, contents, "
             "warehouse_id, warehouse)"
         )
-    if "pallet_number" not in headers:
-        raise BoxRuleError(
-            "missing required column 'pallet_number' "
-            "(recognised headers include pallet_number, pallet number, pallet)"
-        )
-
     # Pre-resolve warehouses so we don't hit the DB once per row.
     warehouses_by_id = {
         w.id: w
@@ -327,6 +325,7 @@ def import_boxes_xlsx(
         int, list[tuple[int, InboundBoxItem]]
     ] = {}
     pending_identity: dict[tuple[str, str], tuple[int, int]] = {}
+    blocked_identities: dict[tuple[str, str], str] = {}
 
     for offset, row in enumerate(rows_iter, start=2):  # row 1 was the header
         if offset - 1 > MAX_ROWS:
@@ -346,7 +345,9 @@ def import_boxes_xlsx(
 
         raw_box_number = _mapped_cell(headers, cells, "box_number")
         lot = _mapped_cell(headers, cells, "lot")
-        pallet_number = _mapped_cell(headers, cells, "pallet_number")
+        pallet_number = clean_optional_pallet_number(
+            _mapped_cell(headers, cells, "pallet_number")
+        )
         pallet_id_raw = _mapped_cell(headers, cells, "pallet_id")
         contents_raw = _mapped_cell(headers, cells, "contents")
         contents = contents_raw or None
@@ -390,15 +391,6 @@ def import_boxes_xlsx(
                 )
             )
             continue
-        if not pallet_number:
-            outcome.skipped.append(
-                ImportSkipEntry(
-                    row=offset,
-                    box_number=box_number,
-                    reason="pallet_number is empty",
-                )
-            )
-            continue
         pallet_id: int | None = None
         if pallet_id_raw:
             try:
@@ -421,6 +413,15 @@ def import_boxes_xlsx(
                     )
                 )
                 continue
+        if pallet_id is not None and pallet_number is None:
+            outcome.skipped.append(
+                ImportSkipEntry(
+                    row=offset,
+                    box_number=box_number,
+                    reason="pallet_id requires pallet_number",
+                )
+            )
+            continue
 
         warehouse_id: int | None = None
         if wh_id_raw:
@@ -479,17 +480,38 @@ def import_boxes_xlsx(
             contents=contents,
         )
         pair = (normalize_lot_name(lot), box_number)
+        blocked_reason = blocked_identities.get(pair)
+        if blocked_reason is not None:
+            outcome.skipped.append(
+                ImportSkipEntry(
+                    row=offset,
+                    box_number=box_number,
+                    reason=blocked_reason,
+                )
+            )
+            continue
         duplicate = pending_identity.get(pair)
         if duplicate is not None:
             existing_warehouse_id, existing_index = duplicate
             if existing_warehouse_id != warehouse_id:
-                outcome.skipped.append(
-                    ImportSkipEntry(
-                        row=offset,
-                        box_number=box_number,
-                        reason=(
-                            "duplicate (lot, box_number) rows specify different "
-                            "warehouses"
+                reason = (
+                    "duplicate (lot, box_number) rows specify different warehouses"
+                )
+                blocked_identities[pair] = reason
+                existing_offset, _existing_item = pending_by_warehouse[
+                    existing_warehouse_id
+                ][existing_index]
+                outcome.skipped.extend(
+                    (
+                        ImportSkipEntry(
+                            row=existing_offset,
+                            box_number=box_number,
+                            reason=reason,
+                        ),
+                        ImportSkipEntry(
+                            row=offset,
+                            box_number=box_number,
+                            reason=reason,
                         ),
                     )
                 )
@@ -500,11 +522,20 @@ def import_boxes_xlsx(
             try:
                 merged = merge_inbound_items([existing_item, item])[0]
             except RequestRuleError as exc:
-                outcome.skipped.append(
-                    ImportSkipEntry(
-                        row=offset,
-                        box_number=box_number,
-                        reason=str(exc),
+                reason = str(exc)
+                blocked_identities[pair] = reason
+                outcome.skipped.extend(
+                    (
+                        ImportSkipEntry(
+                            row=existing_offset,
+                            box_number=box_number,
+                            reason=reason,
+                        ),
+                        ImportSkipEntry(
+                            row=offset,
+                            box_number=box_number,
+                            reason=reason,
+                        ),
                     )
                 )
                 continue
@@ -518,6 +549,14 @@ def import_boxes_xlsx(
         pending_rows.append((offset, item))
 
     for warehouse_id, pending_rows in pending_by_warehouse.items():
+        pending_rows = [
+            (offset, item)
+            for offset, item in pending_rows
+            if (normalize_lot_name(item.lot), item.box_number)
+            not in blocked_identities
+        ]
+        if not pending_rows:
+            continue
         warehouse = warehouses_by_id[warehouse_id]
         if receipt_requires_review(
             warehouse,

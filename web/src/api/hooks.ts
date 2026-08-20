@@ -941,8 +941,8 @@ export function useCreateBox() {
       box_number: string;
       lot?: string;
       lot_id?: number;
-      pallet_number: string;
-      pallet_id?: number;
+      pallet_number?: string | null;
+      pallet_id?: number | null;
       contents?: string;
       warehouse_id: number;
       note?: string;

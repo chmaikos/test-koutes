@@ -11,11 +11,14 @@ Implementation must not begin until the following are agreed with the ERP owner:
   numeric `pallet_id`, the case-insensitive number scoped by canonical Lot, or
   an explicit cross-system mapping. A Pallet has no warehouse identifier or
   location; warehouse distribution must be derived from its Boxes. Never use
-  display text alone as a global key.
+  display text alone as a global key. Pallet assignment is optional: blank ERP
+  values must map to null ID/number without fabricating a placeholder Pallet,
+  while a supplied ID must be validated against its supplied number and Lot.
 - Snapshot semantics for request lines: immutable Lot/Pallet display values
   preserve what was received even after a later rename, Box relocation, merge
-  absorption, archival, or purge. Agree which canonical IDs remain resolvable and how an
-  absorbed Pallet points to its surviving target.
+  absorption, archival, or purge. Unassigned lines preserve null Pallet
+  snapshots. Agree which canonical IDs remain resolvable and how an absorbed
+  Pallet points to its surviving target.
 - Reference uniqueness, document versioning, cancellation, correction, and late-arrival rules.
 - Direction of authority for quantities, line discrepancies, completion, and reconciliation.
 - Idempotency keys, retry policy, replay handling, ordering guarantees, and dead-letter recovery.

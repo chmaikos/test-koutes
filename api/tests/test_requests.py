@@ -90,7 +90,6 @@ def _box(session: Session, user, number: str, status: BoxStatus = BoxStatus.rece
         box_number=number,
         lot="LOT-A",
         warehouse_id=1,
-        legacy_allow_unassigned=True,
     )
     if status != BoxStatus.received:
         box.status = status

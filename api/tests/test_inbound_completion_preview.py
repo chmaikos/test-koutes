@@ -25,7 +25,7 @@ from app.models import (
     UserRole,
     Warehouse,
 )
-from app.schemas.requests import InboundBoxItem
+from app.schemas.requests import InboundBoxItem, InboundCompletionPreviewOut
 from app.services.boxes import BoxRuleError
 from app.services.requests import merge_inbound_items, preview_inbound_completion
 
@@ -496,6 +496,166 @@ def test_preview_validates_target_pallets_without_creating_them(
     assert session.scalar(select(func.count(Pallet.id))) == pallet_count
 
 
+def test_preview_reports_unassigned_and_preserve_existing_targets(
+    client, session, make_user
+) -> None:
+    requester = make_user(UserRole.viewer)
+    lot = _lot(session, "Optional Pallets")
+    pallet = _pallet(session, lot, "Keep Me")
+    assigned = _box(session, lot, "1", warehouse_id=2, pallet=pallet)
+    unassigned = _box(session, lot, "2", warehouse_id=2)
+    request = _request(session, requester, quantity=3)
+    session.commit()
+    _as_user(requester)
+
+    response = _preview(
+        client,
+        request.id,
+        [
+            {"lot": "New Optional Lot", "box_number": "1"},
+            {"lot": lot.name, "box_number": assigned.box_number},
+            {"lot": lot.name, "box_number": unassigned.box_number},
+        ],
+    )
+
+    assert response.status_code == 200, response.text
+    validated = InboundCompletionPreviewOut.model_validate(response.json())
+    rows = {
+        (row.normalized_lot, row.normalized_box_number): row
+        for row in validated.rows
+    }
+    assert rows[("new optional lot", "001")].target_pallet_resolution.model_dump() == {
+        "resolution": "unassigned",
+        "pallet_id": None,
+        "pallet_number": None,
+    }
+    assert rows[("optional pallets", "001")].target_pallet_resolution.model_dump() == {
+        "resolution": "preserve_existing",
+        "pallet_id": pallet.id,
+        "pallet_number": pallet.pallet_number,
+    }
+    assert rows[("optional pallets", "002")].target_pallet_resolution.model_dump() == {
+        "resolution": "unassigned",
+        "pallet_id": None,
+        "pallet_number": None,
+    }
+
+
+def test_completion_mixes_unassigned_creation_and_preserved_relocations(
+    client, session, make_user
+) -> None:
+    requester = make_user(UserRole.viewer)
+    requester.warehouses = [session.get(Warehouse, 1)]
+    lot = _lot(session, "Optional Completion")
+    pallet = _pallet(session, lot, "Preserved")
+    assigned = _box(session, lot, "1", warehouse_id=2, pallet=pallet)
+    unassigned = _box(session, lot, "2", warehouse_id=3)
+    request = _request(session, requester, quantity=3)
+    session.commit()
+    rows = [
+        {"lot": lot.name, "box_number": assigned.box_number},
+        {"lot": lot.name, "box_number": unassigned.box_number},
+        {"lot": "New Unassigned", "box_number": "1"},
+    ]
+    _as_user(requester)
+
+    preview = _preview(client, request.id, rows)
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["summary"] == {
+        "created": 1,
+        "relocated": 2,
+        "blocked": 0,
+        "source_warehouse_counts": [
+            {"warehouse_id": 2, "warehouse_name": "Building 2", "count": 1},
+            {"warehouse_id": 3, "warehouse_name": "Building 3", "count": 1},
+        ],
+    }
+    completed = _complete(
+        client,
+        request,
+        rows,
+        idempotency_key="optional-pallet-mixed-completion",
+        signature=preview.json()["impact_signature"],
+        accept=True,
+    )
+
+    assert completed.status_code == 200, completed.text
+    session.expire_all()
+    assert session.get(Box, assigned.id).pallet_id == pallet.id
+    assert session.get(Box, unassigned.id).pallet_id is None
+    new_box = session.scalar(
+        select(Box).join(Lot).where(
+            Lot.normalized_name == "new unassigned",
+            Box.box_number == "001",
+        )
+    )
+    assert new_box is not None and new_box.pallet_id is None
+    assert session.scalar(
+        select(func.count(PalletEvent.id)).where(
+            PalletEvent.pallet_id == pallet.id,
+            PalletEvent.event_type.in_(
+                (
+                    PalletEventType.boxes_unassigned,
+                    PalletEventType.boxes_assigned,
+                )
+            ),
+        )
+    ) == 0
+    snapshots = session.scalars(
+        select(BoxRequestItem)
+        .where(BoxRequestItem.request_id == request.id)
+        .order_by(BoxRequestItem.position)
+    ).all()
+    by_box_id = {item.box_id: item for item in snapshots}
+    assert by_box_id[assigned.id].pallet_id == pallet.id
+    assert (by_box_id[unassigned.id].pallet_id, by_box_id[unassigned.id].pallet) == (
+        None,
+        None,
+    )
+    assert (by_box_id[new_box.id].pallet_id, by_box_id[new_box.id].pallet) == (
+        None,
+        None,
+    )
+    before_replay = _counts(session)
+    replay = _complete(
+        client,
+        request,
+        rows,
+        idempotency_key="optional-pallet-mixed-completion",
+    )
+    assert replay.status_code == 200, replay.text
+    assert _counts(session) == before_replay
+
+
+def test_omitted_mapping_signature_tracks_preserved_assignment(
+    client, session, make_user
+) -> None:
+    requester = make_user(UserRole.viewer)
+    lot = _lot(session, "Optional Signature")
+    box = _box(session, lot, "1", warehouse_id=2)
+    request = _request(session, requester, quantity=1)
+    session.commit()
+    rows = [{"lot": lot.name, "box_number": box.box_number}]
+    _as_user(requester)
+
+    first = _preview(client, request.id, rows)
+    pallet = _pallet(session, lot, "Added Later")
+    box.pallet_id = pallet.id
+    session.commit()
+    second = _preview(client, request.id, rows)
+
+    assert first.status_code == second.status_code == 200
+    assert first.json()["rows"][0]["target_pallet_resolution"]["resolution"] == (
+        "unassigned"
+    )
+    assert second.json()["rows"][0]["target_pallet_resolution"] == {
+        "resolution": "preserve_existing",
+        "pallet_id": pallet.id,
+        "pallet_number": pallet.pallet_number,
+    }
+    assert first.json()["impact_signature"] != second.json()["impact_signature"]
+
+
 def test_service_signature_tracks_inventory_and_request_version(
     session, make_user
 ) -> None:
@@ -954,22 +1114,13 @@ def test_relocation_rolls_back_after_partial_work(
     requester = make_user(UserRole.viewer)
     lot = _lot(session, "Rollback")
     source_pallet = _pallet(session, lot, "Source", warehouse_id=2)
-    target_pallet = _pallet(session, lot, "Target", warehouse_id=1)
     boxes = [
         _box(session, lot, str(index), warehouse_id=2, pallet=source_pallet)
         for index in (1, 2)
     ]
     request = _request(session, requester, quantity=2)
     session.commit()
-    rows = [
-        {
-            "lot": lot.name,
-            "box_number": box.box_number,
-            "pallet_number": target_pallet.pallet_number,
-            "pallet_id": target_pallet.id,
-        }
-        for box in boxes
-    ]
+    rows = [{"lot": lot.name, "box_number": box.box_number} for box in boxes]
     _as_user(requester)
     signature = _preview(client, request.id, rows).json()["impact_signature"]
     from app.services.boxes import _move_received_box_for_inbound_request as real_move

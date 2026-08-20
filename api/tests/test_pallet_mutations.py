@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
 from sqlalchemy import select
 
 from app.deps import get_current_user
@@ -22,7 +23,7 @@ from app.models import (
     UserRole,
     Warehouse,
 )
-from app.services.boxes import restore_archived_box
+from app.services.boxes import BoxConflictError, restore_archived_box
 
 
 def _lot(session, name: str) -> Lot:
@@ -289,10 +290,65 @@ def test_restore_preserves_same_lot_pallet_across_warehouses(session, make_user)
         lot_id=lot.id,
         warehouse_id=2,
         note="Restore elsewhere",
-        legacy_allow_unassigned=True,
     )
     assert restored is not None
     assert restored.pallet_id == pallet.id
+
+
+def test_restore_explicit_target_reassigns_with_audit(session, make_user) -> None:
+    admin = make_user(UserRole.admin)
+    lot = _lot(session, "Restore Reassign")
+    source = _pallet(session, lot, "Source")
+    target = _pallet(session, lot, "Target")
+    box = _box(session, lot, "001", pallet=source)
+    box.archived_at = datetime.now(UTC)
+    session.commit()
+
+    restored = restore_archived_box(
+        session,
+        user=admin,
+        box_number=box.box_number,
+        lot_id=lot.id,
+        warehouse_id=2,
+        pallet_number=target.pallet_number,
+        pallet_id=target.id,
+        note="Explicit restore reassignment",
+    )
+
+    assert restored is not None
+    assert restored.pallet_id == target.id
+    event_types = session.scalars(
+        select(PalletEvent.event_type).where(
+            PalletEvent.pallet_id.in_([source.id, target.id])
+        )
+    ).all()
+    assert PalletEventType.boxes_unassigned in event_types
+    assert PalletEventType.boxes_assigned in event_types
+
+
+def test_restore_omission_rejects_invalid_current_assignment(
+    session, make_user
+) -> None:
+    admin = make_user(UserRole.admin)
+    lot = _lot(session, "Restore Invalid")
+    pallet = _pallet(session, lot, "Archived")
+    pallet.is_active = False
+    pallet.archived_at = datetime.now(UTC)
+    box = _box(session, lot, "001", pallet=pallet)
+    box.archived_at = datetime.now(UTC)
+    session.commit()
+
+    with pytest.raises(BoxConflictError, match="current pallet.*archived"):
+        restore_archived_box(
+            session,
+            user=admin,
+            box_number=box.box_number,
+            lot_id=lot.id,
+            warehouse_id=2,
+        )
+    session.refresh(box)
+    assert box.archived_at is not None
+    assert box.pallet_id == pallet.id
 
 
 def test_assigned_box_delete_archives_to_preserve_history(client, session) -> None:
@@ -331,3 +387,9 @@ def test_admin_integrity_report_groups_anomalies(client, session) -> None:
     assert valid_multi_warehouse.id not in report["cross_lot"]["box_ids"]
     assert inactive_box.id in report["inactive_pallet_assignments"]["box_ids"]
     assert unassigned.id in report["unassigned_active_boxes"]["box_ids"]
+    assert report["informational"]["unassigned_active_boxes"] == report[
+        "unassigned_active_boxes"
+    ]
+    assert report["informational_count"] == 1
+    assert report["conflict_count"] == 2
+    assert report["safe"] is False

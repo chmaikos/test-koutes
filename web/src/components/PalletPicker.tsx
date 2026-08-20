@@ -36,7 +36,7 @@ export function PalletPicker({
   required?: boolean;
   disabled?: boolean;
   label?: string;
-  numberValue?: string;
+  numberValue?: string | null;
   onNumberChange?: (value: string) => void;
 }) {
   const listId = useId();
@@ -105,6 +105,15 @@ export function PalletPicker({
     setError(null);
   }
 
+  function leaveUnassigned() {
+    setQuery("");
+    setDebounced("");
+    onNumberChange?.("");
+    onChange(null);
+    setOpen(false);
+    setError(null);
+  }
+
   async function createAndSelect() {
     if (!lotId || !warehouseId || !query.trim()) return;
     setError(null);
@@ -158,7 +167,9 @@ export function PalletPicker({
             placeholder={
               !lotId
                 ? "Choose lot first"
-                : "Search or enter pallet number"
+                : required
+                  ? "Search or enter pallet number"
+                  : "Optional — leave blank if unassigned"
             }
             value={query}
             onFocus={() => setOpen(true)}
@@ -188,6 +199,18 @@ export function PalletPicker({
           role="listbox"
           className="absolute z-40 mt-1 max-h-64 w-full overflow-auto rounded-lg border border-slate-200 bg-white p-1 shadow-lg"
         >
+          {!required && (
+            <button
+              type="button"
+              role="option"
+              aria-selected={!value && !query.trim()}
+              className="w-full rounded px-3 py-2 text-left text-sm font-medium text-brand-700 hover:bg-brand-50"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={leaveUnassigned}
+            >
+              Leave Unassigned
+            </button>
+          )}
           {options.isLoading && (
             <p className="px-3 py-2 text-sm text-slate-500">Searching…</p>
           )}
@@ -230,6 +253,7 @@ export function PalletPicker({
         </div>
       )}
       <p className="mt-1 text-xs text-slate-500">
+        {!required && "Leave blank to receive this box as Unassigned. "}
         Pallets span warehouses through their boxes. The same pallet can be
         selected for receipts at different warehouses.
       </p>

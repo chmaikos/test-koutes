@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from functools import partial
-
 import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -25,9 +23,7 @@ from app.services.boxes import (
     BoxConflictError,
     reassign_box_lot,
 )
-from app.services.boxes import (
-    create_box as _create_box,
-)
+from app.services.boxes import create_box as _create_box
 from app.services.lots import (
     LotAccessError,
     LotConflictError,
@@ -37,7 +33,7 @@ from app.services.lots import (
 from app.services.requests import create_completed_receipt
 from scripts.lot_migration_preflight import analyze_box_rows
 
-create_box = partial(_create_box, legacy_allow_unassigned=True)
+create_box = _create_box
 
 
 def test_lot_name_normalization() -> None:

@@ -51,6 +51,7 @@ import {
   RequestStatusBadge,
 } from "@/components/RequestStatusBadge";
 import { requestPermissions } from "@/pages/requestPermissions";
+import { normalizePalletNumber } from "@/pages/pallets";
 import {
   RequestCoordinationPanel,
   RequestDiscussionPanel,
@@ -73,6 +74,7 @@ import {
   inboundCompletionFields,
   inboundCompletionFingerprint,
   inboundCompletionItems,
+  inboundTargetPalletLabel,
   invalidateInboundCompletion,
   isStaleInboundImpactConflict,
   reviewedInboundCompletion,
@@ -1618,7 +1620,7 @@ function CompletionDialog({
       ? Array.from({ length: request.quantity }, () => ({
           lot: "",
           box_number: "",
-          pallet_number: "",
+          pallet_number: null,
           contents: "",
         }))
       : [],
@@ -1650,16 +1652,17 @@ function CompletionDialog({
     rows.every(
       (row, index) =>
         !!rowLots[index] &&
-        rowLots[index]?.name.trim().toLocaleLowerCase() ===
-          row.lot.trim().replace(/\s+/g, " ").toLocaleLowerCase(),
+        rowLots[index]?.name.trim().toLowerCase() ===
+          row.lot.trim().replace(/\s+/g, " ").toLowerCase(),
     );
   const allPalletsConfirmed =
     !inbound ||
     rows.every(
       (row, index) =>
-        !!rowPallets[index] &&
-        rowPallets[index]?.pallet_number.trim().toLocaleUpperCase() ===
-          row.pallet_number.trim().replace(/\s+/g, " ").toLocaleUpperCase(),
+        !row.pallet_number?.trim() ||
+        (!!rowPallets[index] &&
+          normalizePalletNumber(rowPallets[index]?.pallet_number ?? "") ===
+            normalizePalletNumber(row.pallet_number)),
     );
   const allRowsComplete =
     inbound &&
@@ -1667,8 +1670,7 @@ function CompletionDialog({
     rows.every(
       (row) =>
         row.box_number.trim().length > 0 &&
-        row.lot.trim().length > 0 &&
-        row.pallet_number.trim().length > 0,
+        row.lot.trim().length > 0,
     );
   const impactFingerprint = inboundCompletionFingerprint({
     requestId: request.id,
@@ -1875,7 +1877,6 @@ function CompletionDialog({
                       canCreate={
                         me.data?.role === "admin" || me.data?.role === "operator"
                       }
-                      required
                       label="Pallet"
                     />
                     <label className="block">
@@ -1900,7 +1901,12 @@ function CompletionDialog({
                 onClick={() =>
                   setRows((current) => [
                     ...current,
-                    { lot: "", box_number: "", pallet_number: "", contents: "" },
+                    {
+                      lot: "",
+                      box_number: "",
+                      pallet_number: null,
+                      contents: "",
+                    },
                   ])
                 }
               >
@@ -1920,9 +1926,9 @@ function CompletionDialog({
             )}
             {!allPalletsConfirmed && (
               <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
-                Select an existing pallet for every row, or create one in the
-                selected lot. Pallets may contain boxes from multiple
-                warehouses. Pallet assignment is required.
+                Select or create each entered pallet, or clear the field to
+                leave that box Unassigned. Pallets may contain boxes from
+                multiple warehouses.
               </p>
             )}
             {groupedRows.error && (
@@ -1946,7 +1952,8 @@ function CompletionDialog({
               </button>
               {!readyToReview && (
                 <span className="text-xs text-slate-500">
-                  Complete valid rows and confirm every lot and pallet first.
+                  Complete valid rows, confirm every lot, and confirm any
+                  entered pallet first.
                 </span>
               )}
             </div>
@@ -2206,7 +2213,7 @@ function InboundImpactPreview({
               lot {row.lot}
               {" → "}
               box warehouse {row.target_warehouse_name} · pallet{" "}
-              {row.target_pallet_resolution.pallet_number}
+              {inboundTargetPalletLabel(row)}
               {row.target_pallet_resolution.resolution === "will_create"
                 ? " (new pallet)"
                 : ""}
@@ -2230,7 +2237,7 @@ function InboundImpactPreview({
                   {" → "}
                   {row.target_warehouse_name}
                   {" · target pallet "}
-                  {row.target_pallet_resolution.pallet_number}
+                  {inboundTargetPalletLabel(row)}
                 </span>
               </li>
             ))}

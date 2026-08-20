@@ -31,7 +31,11 @@ def analyze_rows(
         box_id = int(box["id"])
         pallet_id = box["pallet_id"]
         if pallet_id is None:
-            unassigned_box_ids.append(box_id)
+            if (
+                box.get("archived_at") is None
+                and box.get("status") != "returned"
+            ):
+                unassigned_box_ids.append(box_id)
             continue
         pallet = pallets.get(int(pallet_id))
         if pallet is None:
@@ -81,10 +85,21 @@ def analyze_rows(
         "duplicate_identities": duplicate_identities,
         "invalid_parent_pallet_ids": sorted(invalid_parent_pallet_ids),
     }
+    conflict_count = sum(len(values) for values in conflicts.values())
+    informational = {
+        "unassigned_active_boxes": {
+            "count": len(unassigned_box_ids),
+            "box_ids": sorted(unassigned_box_ids),
+        }
+    }
     return {
-        "safe": not any(conflicts.values()),
+        "safe": conflict_count == 0,
+        "conflict_count": conflict_count,
+        "informational_count": len(unassigned_box_ids),
+        "informational": informational,
         "box_count": len(box_rows),
         "pallet_count": len(pallet_rows),
+        # Backwards-compatible fields retained for existing script consumers.
         "unassigned_box_count": len(unassigned_box_ids),
         "unassigned_box_ids": sorted(unassigned_box_ids),
         "warehouse_distribution": [
@@ -105,7 +120,7 @@ def _render_text(report: Mapping[str, Any]) -> str:
     lines = [
         f"Boxes: {report['box_count']}",
         f"Pallets: {report['pallet_count']}",
-        f"Unassigned boxes: {report['unassigned_box_count']} "
+        f"INFO unassigned active boxes: {report['unassigned_box_count']} "
         f"{report['unassigned_box_ids']}",
         f"Pallet warehouse distribution: {report['warehouse_distribution']}",
     ]
@@ -137,7 +152,13 @@ def main() -> int:
                 connection.execute(
                     text(
                         """
-                        SELECT id, lot_id, current_warehouse_id, pallet_id
+                        SELECT
+                            id,
+                            lot_id,
+                            current_warehouse_id,
+                            pallet_id,
+                            status,
+                            archived_at
                         FROM boxes
                         ORDER BY id
                         """

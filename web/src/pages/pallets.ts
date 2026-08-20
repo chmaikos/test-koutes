@@ -76,6 +76,19 @@ export function palletScopeKey(lotId: number | undefined): string {
   return `${lotId ?? "none"}`;
 }
 
+export function isValidPalletPickerValue(
+  numberValue: string | null | undefined,
+  selection: { id?: number; pallet_number: string } | null,
+  required = false,
+): boolean {
+  const normalized = normalizePalletNumber(numberValue ?? "");
+  if (!normalized) return !required;
+  return (
+    selection !== null &&
+    normalizePalletNumber(selection.pallet_number) === normalized
+  );
+}
+
 export function palletPickerOptionFilters(
   lotId: number | undefined,
   search: string,

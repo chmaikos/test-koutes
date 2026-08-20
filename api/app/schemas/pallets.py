@@ -102,11 +102,20 @@ class PalletIntegrityGroup(BaseModel):
     box_ids: list[int]
 
 
+class PalletIntegrityInformational(BaseModel):
+    unassigned_active_boxes: PalletIntegrityGroup
+
+
 class PalletIntegrityOut(BaseModel):
+    safe: bool
+    conflict_count: int
+    informational_count: int
     orphaned_pallet_ids: PalletIntegrityGroup
     cross_lot: PalletIntegrityGroup
     inactive_pallet_assignments: PalletIntegrityGroup
+    # Backwards-compatible alias retained for existing API consumers.
     unassigned_active_boxes: PalletIntegrityGroup
+    informational: PalletIntegrityInformational
 
 
 class PalletEventOut(BaseModel):

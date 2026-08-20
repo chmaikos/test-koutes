@@ -1084,8 +1084,8 @@ def mutate_pallet_boxes(
     )
 
 
-def pallet_integrity_report(db: Session) -> dict[str, dict[str, object]]:
-    """Return read-only pallet assignment anomalies for administrators."""
+def pallet_integrity_report(db: Session) -> dict[str, object]:
+    """Return pallet conflicts plus explicitly informational assignment counts."""
     active_boxes = Box.archived_at.is_(None)
     rows = {
         "orphaned_pallet_ids": db.scalars(
@@ -1116,9 +1116,27 @@ def pallet_integrity_report(db: Session) -> dict[str, dict[str, object]]:
             .order_by(Box.id)
         ).all(),
     }
-    return {
+    groups = {
         name: {"count": len(ids), "box_ids": [int(box_id) for box_id in ids]}
         for name, ids in rows.items()
+    }
+    conflict_count = sum(
+        len(rows[name])
+        for name in (
+            "orphaned_pallet_ids",
+            "cross_lot",
+            "inactive_pallet_assignments",
+        )
+    )
+    informational = groups["unassigned_active_boxes"]
+    return {
+        "safe": conflict_count == 0,
+        "conflict_count": conflict_count,
+        "informational_count": len(rows["unassigned_active_boxes"]),
+        **groups,
+        "informational": {
+            "unassigned_active_boxes": informational,
+        },
     }
 
 

@@ -6,6 +6,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.models.boxes import BoxStatus
+from app.models.pallets import clean_optional_pallet_number
 from app.models.requests import (
     BoxRequestDirection,
     BoxRequestDiscrepancyType,
@@ -148,7 +149,7 @@ class RequestCommentCreate(RequestAction):
 class InboundBoxItem(BaseModel):
     lot: str = Field(min_length=1, max_length=64)
     box_number: str = Field(min_length=1, max_length=64)
-    pallet_number: str = Field(min_length=1, max_length=64)
+    pallet_number: str | None = Field(default=None, max_length=64)
     pallet_id: int | None = Field(default=None, ge=1)
     contents: str | None = Field(default=None, max_length=2000)
 
@@ -160,9 +161,30 @@ class InboundBoxItem(BaseModel):
         except BoxRuleError as exc:
             raise ValueError(str(exc)) from exc
 
+    @field_validator("pallet_number", mode="before")
+    @classmethod
+    def normalize_pallet(cls, value: object) -> object:
+        return (
+            clean_optional_pallet_number(value)
+            if value is None or isinstance(value, str)
+            else value
+        )
+
+    @model_validator(mode="after")
+    def pallet_id_requires_number(self) -> InboundBoxItem:
+        if self.pallet_id is not None and self.pallet_number is None:
+            raise ValueError("pallet_id requires pallet_number")
+        return self
+
 
 InboundCompletionClassification = Literal["create", "relocate", "blocked"]
-InboundTargetPalletResolution = Literal["existing", "will_create", "blocked"]
+InboundTargetPalletResolution = Literal[
+    "existing",
+    "will_create",
+    "unassigned",
+    "preserve_existing",
+    "blocked",
+]
 
 
 class InboundCompletionPreviewRequest(BaseModel):
@@ -172,7 +194,7 @@ class InboundCompletionPreviewRequest(BaseModel):
 class InboundCompletionTargetPalletOut(BaseModel):
     resolution: InboundTargetPalletResolution
     pallet_id: int | None
-    pallet_number: str
+    pallet_number: str | None
 
 
 class InboundCompletionSourceWarehouseCount(BaseModel):
@@ -187,7 +209,7 @@ class InboundCompletionPreviewRow(BaseModel):
     box_number: str
     normalized_lot: str
     normalized_box_number: str
-    mapped_pallet_number: str
+    mapped_pallet_number: str | None
     mapped_pallet_id: int | None
     existing_box_id: int | None
     current_status: BoxStatus | None

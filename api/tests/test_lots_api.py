@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import io
 from datetime import UTC, datetime
-from functools import partial
 
 from openpyxl import load_workbook
 from sqlalchemy import event, select
@@ -26,7 +25,7 @@ from app.services.boxes import create_box as _create_box
 from app.services.lots import list_lot_summaries
 from app.services.requests import create_staged_receipt
 
-create_box = partial(_create_box, legacy_allow_unassigned=True)
+create_box = _create_box
 
 
 def _restrict_to(session, user, *warehouse_ids: int) -> None:

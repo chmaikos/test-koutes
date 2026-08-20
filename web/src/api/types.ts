@@ -1494,8 +1494,8 @@ export interface NotificationPage {
 export interface InboundRequestItemInput {
   lot: string;
   box_number: string;
-  pallet_number: string;
-  pallet_id?: number;
+  pallet_number?: string | null;
+  pallet_id?: number | null;
   contents?: string;
 }
 
@@ -1507,6 +1507,8 @@ export type InboundCompletionClassification =
 export type InboundTargetPalletResolution =
   | "existing"
   | "will_create"
+  | "unassigned"
+  | "preserve_existing"
   | "blocked";
 
 export interface InboundCompletionPreviewRequest {
@@ -1516,7 +1518,7 @@ export interface InboundCompletionPreviewRequest {
 export interface InboundCompletionTargetPallet {
   resolution: InboundTargetPalletResolution;
   pallet_id: number | null;
-  pallet_number: string;
+  pallet_number: string | null;
 }
 
 export interface InboundCompletionSourceWarehouseCount {
@@ -1531,7 +1533,7 @@ export interface InboundCompletionPreviewRow {
   box_number: string;
   normalized_lot: string;
   normalized_box_number: string;
-  mapped_pallet_number: string;
+  mapped_pallet_number: string | null;
   mapped_pallet_id: number | null;
   existing_box_id: number | null;
   current_status: BoxStatus | null;
@@ -1609,7 +1611,7 @@ export interface XlsxColumnRef {
 
 export interface XlsxColumnMappings {
   box_number: XlsxColumnRef;
-  pallet_number: XlsxColumnRef;
+  pallet_number?: XlsxColumnRef | null;
   lot?: XlsxColumnRef;
   contents?: XlsxColumnRef;
 }

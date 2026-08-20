@@ -20,6 +20,7 @@ import type {
 } from "@/api/types";
 import {
   deliveryVariance,
+  mapXlsxInboundRows,
   resolveXlsxTemplate,
   tryGroupInboundItems,
   xlsxTemplateInput,
@@ -53,6 +54,9 @@ export function ExcelRowMapper({
   const [sheetName, setSheetName] = useState("");
   const [boxColumn, setBoxColumn] = useState<number | undefined>();
   const [palletColumn, setPalletColumn] = useState<number | undefined>();
+  const [palletMappingChoice, setPalletMappingChoice] = useState<
+    "unselected" | "none" | "column"
+  >("unselected");
   const [lotSource, setLotSource] = useState<"fixed" | "column">("fixed");
   const [lotColumn, setLotColumn] = useState<number | undefined>();
   const [fixedLot, setFixedLot] = useState("");
@@ -93,8 +97,8 @@ export function ExcelRowMapper({
           box_number:
             boxColumn === undefined ? "" : (row.cells[boxColumn] ?? "").trim(),
           pallet_number:
-            palletColumn === undefined
-              ? ""
+            palletMappingChoice !== "column" || palletColumn === undefined
+              ? null
               : (row.cells[palletColumn] ?? "").trim(),
           lot:
             lotSource === "fixed"
@@ -110,7 +114,7 @@ export function ExcelRowMapper({
     : [];
   const selectedGrouping = tryGroupInboundItems(
     selectedMappedRows.filter(
-      (row) => row.box_number && row.lot && row.pallet_number,
+      (row) => row.box_number && row.lot,
     ),
   );
   const groupedSelectionCount = selectedGrouping.items.length;
@@ -119,6 +123,7 @@ export function ExcelRowMapper({
     setSheetName(nextSheet?.name ?? "");
     setBoxColumn(undefined);
     setPalletColumn(undefined);
+    setPalletMappingChoice("unselected");
     setLotSource("fixed");
     setLotColumn(undefined);
     setFixedLot("");
@@ -190,6 +195,13 @@ export function ExcelRowMapper({
     const resolved = resolveXlsxTemplate(selectedTemplate, sheet);
     setBoxColumn(resolved.boxColumn);
     setPalletColumn(resolved.palletColumn);
+    setPalletMappingChoice(
+      selectedTemplate.column_mappings.pallet_number
+        ? resolved.palletColumn === undefined
+          ? "unselected"
+          : "column"
+        : "none",
+    );
     setLotSource(resolved.lotSource);
     setLotColumn(resolved.lotColumn);
     setFixedLot(resolved.fixedLot);
@@ -209,8 +221,13 @@ export function ExcelRowMapper({
   }
 
   function currentTemplatePayload(name: string) {
-    if (!sheet || boxColumn === undefined || palletColumn === undefined) {
-      throw new Error("Choose the box and pallet number columns before saving a template.");
+    if (!sheet || boxColumn === undefined) {
+      throw new Error("Choose the box number column before saving a template.");
+    }
+    if (palletMappingChoice === "unselected") {
+      throw new Error(
+        "Choose a pallet column or explicitly choose to leave new boxes Unassigned.",
+      );
     }
     if (lotSource === "fixed" && !fixedLot.trim()) {
       throw new Error("Enter the fixed lot before saving a template.");
@@ -226,7 +243,8 @@ export function ExcelRowMapper({
       filename: preview.data?.filename ?? file?.name ?? "",
       sheet,
       boxColumn,
-      palletColumn,
+      palletColumn:
+        palletMappingChoice === "column" ? palletColumn : undefined,
       lotSource,
       lotColumn,
       fixedLot,
@@ -316,8 +334,13 @@ export function ExcelRowMapper({
       setError("Choose the column containing the box number.");
       return;
     }
-    if (palletColumn === undefined) {
-      setError("Choose the required column containing the pallet number.");
+    if (
+      palletMappingChoice === "unselected" ||
+      (palletMappingChoice === "column" && palletColumn === undefined)
+    ) {
+      setError(
+        "Choose a pallet column or explicitly choose to leave new boxes Unassigned.",
+      );
       return;
     }
     if (lotSource === "fixed" && !fixedLot.trim()) {
@@ -334,12 +357,16 @@ export function ExcelRowMapper({
       setError("Choose the column containing the lot.");
       return;
     }
-    if (
-      palletColumn === boxColumn ||
-      (lotSource === "column" &&
-        (lotColumn === boxColumn || lotColumn === palletColumn))
-    ) {
-      setError("Box number, pallet number, and lot must use different columns.");
+    const selectedColumns = [
+      boxColumn,
+      ...(lotSource === "column" && lotColumn != null ? [lotColumn] : []),
+      ...(contentsColumn == null ? [] : [contentsColumn]),
+      ...(palletMappingChoice === "column" && palletColumn != null
+        ? [palletColumn]
+        : []),
+    ];
+    if (new Set(selectedColumns).size !== selectedColumns.length) {
+      setError("Each mapped field must use a different column.");
       return;
     }
     if (selectedRows.size === 0) {
@@ -347,39 +374,17 @@ export function ExcelRowMapper({
       return;
     }
 
-    const mapped: InboundRequestItemInput[] = [];
-    for (const row of sheet.rows) {
-      if (!selectedRows.has(row.row_number)) continue;
-      const boxNumber = (row.cells[boxColumn] ?? "").trim();
-      const palletNumber = (row.cells[palletColumn] ?? "").trim();
-      const lot =
-        lotSource === "fixed"
-          ? fixedLot.trim()
-          : (row.cells[lotColumn!] ?? "").trim();
-      if (!boxNumber || !lot || !palletNumber) {
-        setError(
-          `Excel row ${row.row_number} is missing a mapped box number, pallet number, or lot.`,
-        );
-        return;
-      }
-      if (!/^\d+$/.test(boxNumber)) {
-        setError(
-          `Excel row ${row.row_number} has a non-numeric mapped box number.`,
-        );
-        return;
-      }
-      const contents =
-        contentsColumn === undefined
-          ? ""
-          : (row.cells[contentsColumn] ?? "").trim();
-      mapped.push({
-        box_number: boxNumber,
-        lot,
-        pallet_number: palletNumber,
-        contents: contents || undefined,
-      });
-    }
-    const groupedResult = tryGroupInboundItems(mapped);
+    const groupedResult = mapXlsxInboundRows({
+      sheet,
+      selectedRows,
+      boxColumn,
+      palletColumn:
+        palletMappingChoice === "column" ? palletColumn : undefined,
+      lotSource,
+      lotColumn,
+      fixedLot,
+      contentsColumn,
+    });
     if (groupedResult.error) {
       setError(groupedResult.error);
       return;
@@ -610,12 +615,21 @@ export function ExcelRowMapper({
               required
               onChange={setBoxColumn}
             />
-            <ColumnSelect
-              label="Pallet number column"
+            <PalletColumnSelect
               sheet={sheet}
               value={palletColumn}
-              required
-              onChange={setPalletColumn}
+              choice={palletMappingChoice}
+              onChange={(choice, column) => {
+                setPalletMappingChoice(choice);
+                setPalletColumn(column);
+                if (choice !== "unselected") {
+                  setMappingWarnings((warnings) =>
+                    warnings.filter(
+                      (warning) => !warning.startsWith("Pallet number column"),
+                    ),
+                  );
+                }
+              }}
             />
             <label className="block">
               <span className="text-xs text-slate-500">Lot source</span>
@@ -837,6 +851,62 @@ function mergeTemplateOptions(
     if (!merged.has(template.id)) merged.set(template.id, template);
   }
   return [...merged.values()];
+}
+
+function PalletColumnSelect({
+  sheet,
+  value,
+  choice,
+  onChange,
+}: {
+  sheet: XlsxPreviewSheet;
+  value: number | undefined;
+  choice: "unselected" | "none" | "column";
+  onChange: (
+    choice: "unselected" | "none" | "column",
+    value: number | undefined,
+  ) => void;
+}) {
+  const selectValue =
+    choice === "none" ? "none" : choice === "column" ? String(value) : "";
+  return (
+    <label className="block">
+      <span className="text-xs text-slate-500">
+        Pallet number column (optional)
+      </span>
+      <select
+        className="input"
+        value={selectValue}
+        onChange={(event) => {
+          if (event.target.value === "") {
+            onChange("unselected", undefined);
+          } else if (event.target.value === "none") {
+            onChange("none", undefined);
+          } else {
+            onChange("column", Number(event.target.value));
+          }
+        }}
+      >
+        <option value="">Choose a column or Unassigned</option>
+        <option value="none">
+          Do not import pallet / leave new boxes Unassigned
+        </option>
+        {Array.from({ length: sheet.max_columns }, (_, index) => {
+          const examples = sheet.rows
+            .map((row) => row.cells[index])
+            .filter(Boolean)
+            .slice(0, 3)
+            .join(" · ");
+          return (
+            <option key={index} value={index}>
+              {excelColumnName(index)}
+              {examples ? ` — ${examples.slice(0, 70)}` : ""}
+            </option>
+          );
+        })}
+      </select>
+    </label>
+  );
 }
 
 function ColumnSelect({

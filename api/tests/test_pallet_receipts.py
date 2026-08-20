@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import csv
 from datetime import UTC, datetime
 from io import BytesIO
 
-from openpyxl import Workbook
+import pytest
+from openpyxl import Workbook, load_workbook
 from sqlalchemy import select
 
 from app.models.boxes import Box, BoxStatus
 from app.models.lots import Lot
-from app.models.pallets import Pallet
+from app.models.pallets import Pallet, PalletEvent
 from app.models.requests import (
     BoxRequestEvent,
     BoxRequestEventType,
@@ -16,6 +18,7 @@ from app.models.requests import (
 )
 from app.models.users import UserRole
 from app.models.warehouses import ReceiptMode, Warehouse
+from app.services.boxes import BoxRuleError, create_box
 from app.services.requests import create_completed_receipt
 
 
@@ -36,15 +39,27 @@ def _manual_payload(
     }
 
 
-def test_manual_receipt_requires_resolves_and_reuses_pallet(client, session) -> None:
+def test_manual_receipt_supports_unassigned_and_reuses_explicit_pallet(
+    client, session
+) -> None:
+    pallet_event_count = len(session.scalars(select(PalletEvent)).all())
     missing = client.post(
         "/api/boxes",
         json={"box_number": "1", "lot": "PALLET-RECEIPT", "warehouse_id": 1},
     )
-    assert missing.status_code == 422
+    assert missing.status_code == 201, missing.text
+    assert missing.json()["pallet_id"] is None
+    assert missing.json()["pallet_number"] is None
+    assert len(session.scalars(select(Pallet)).all()) == 0
+    assert len(session.scalars(select(PalletEvent)).all()) == pallet_event_count
+    unassigned_receipt = client.get(
+        f"/api/requests/{missing.json()['receipt_request_id']}"
+    ).json()
+    assert unassigned_receipt["items"][0]["pallet_id"] is None
+    assert unassigned_receipt["items"][0]["pallet"] is None
 
-    first = client.post("/api/boxes", json=_manual_payload("1"))
-    second = client.post("/api/boxes", json=_manual_payload("2", pallet=" pallet-a "))
+    first = client.post("/api/boxes", json=_manual_payload("2"))
+    second = client.post("/api/boxes", json=_manual_payload("3", pallet=" pallet-a "))
     assert first.status_code == second.status_code == 201
     assert first.json()["pallet_id"] == second.json()["pallet_id"]
     assert first.json()["pallet_number"] == "PALLET-A"
@@ -60,6 +75,66 @@ def test_manual_receipt_requires_resolves_and_reuses_pallet(client, session) -> 
         {"pallet_id": first.json()["pallet_id"], "pallet_number": "PALLET-A"}
     ]
     assert source["has_unassigned_boxes"] is False
+
+
+def test_receipt_schemas_canonicalize_whitespace_before_length_validation(
+    client,
+) -> None:
+    manual = client.post(
+        "/api/boxes",
+        json={
+            "box_number": "1",
+            "lot": "LONG-BLANK-PALLET",
+            "pallet_number": " " * 100,
+            "warehouse_id": 1,
+        },
+    )
+    assert manual.status_code == 201, manual.text
+    assert (manual.json()["pallet_id"], manual.json()["pallet_number"]) == (
+        None,
+        None,
+    )
+
+    mapped = client.post(
+        "/api/boxes/import-mapped",
+        json={
+            "warehouse_id": 1,
+            "items": [
+                {
+                    "box_number": "2",
+                    "lot": "LONG-BLANK-PALLET",
+                    "pallet_number": "\t" * 100,
+                }
+            ],
+        },
+    )
+    assert mapped.status_code == 200, mapped.text
+    assert mapped.json()["created"][0]["pallet_id"] is None
+
+
+def test_box_service_canonicalizes_blank_and_rejects_id_without_number(
+    session, make_user
+) -> None:
+    user = make_user(UserRole.operator)
+    unassigned = create_box(
+        session,
+        user=user,
+        box_number="1",
+        lot="SERVICE-OPTIONAL",
+        warehouse_id=1,
+        pallet_number=" \t ",
+    )
+    assert unassigned.pallet_id is None
+
+    with pytest.raises(BoxRuleError, match="pallet_id requires pallet_number"):
+        create_box(
+            session,
+            user=user,
+            box_number="2",
+            lot="SERVICE-OPTIONAL",
+            warehouse_id=1,
+            pallet_id=999,
+        )
 
 
 def test_same_pallet_number_is_reused_in_another_warehouse(client) -> None:
@@ -119,7 +194,39 @@ def test_mapped_import_merges_contents_and_rejects_pallet_conflict(client) -> No
     assert "different pallet values" in conflict.json()["detail"]
 
 
-def test_raw_xlsx_import_requires_pallet_column(client) -> None:
+def test_mapped_import_supports_mixed_assigned_and_unassigned(client) -> None:
+    response = client.post(
+        "/api/boxes/import-mapped",
+        json={
+            "warehouse_id": 1,
+            "items": [
+                {
+                    "box_number": "1",
+                    "lot": "MAPPED-MIXED",
+                    "pallet_number": "PALLET-M",
+                },
+                {
+                    "box_number": "2",
+                    "lot": "MAPPED-MIXED",
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    created = {box["box_number"]: box for box in response.json()["created"]}
+    assert created["001"]["pallet_id"] is not None
+    assert created["002"]["pallet_id"] is None
+    receipt = client.get(
+        f"/api/requests/{response.json()['receipt_request_ids'][0]}"
+    ).json()
+    snapshots = {item["box_number"]: item for item in receipt["items"]}
+    assert snapshots["001"]["pallet_id"] == created["001"]["pallet_id"]
+    assert snapshots["002"]["pallet_id"] is None
+    assert snapshots["002"]["pallet"] is None
+
+
+def test_raw_xlsx_import_without_pallet_column_creates_unassigned(client) -> None:
     workbook = Workbook()
     sheet = workbook.active
     sheet.append(["box_number", "lot", "warehouse_id"])
@@ -136,8 +243,102 @@ def test_raw_xlsx_import_requires_pallet_column(client) -> None:
             )
         },
     )
-    assert response.status_code == 400
-    assert "missing required column 'pallet_number'" in response.json()["detail"]
+    assert response.status_code == 200, response.text
+    assert response.json()["skipped"] == []
+    created = response.json()["created"]
+    assert len(created) == 1
+    assert created[0]["pallet_id"] is None
+    assert created[0]["pallet_number"] is None
+    receipt = client.get(
+        f"/api/requests/{response.json()['receipt_request_ids'][0]}"
+    ).json()
+    assert receipt["items"][0]["pallet_id"] is None
+    assert receipt["items"][0]["pallet"] is None
+
+
+def test_raw_xlsx_import_supports_mixed_blank_pallet_cells(client) -> None:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["box_number", "lot", "pallet_number", "warehouse_id"])
+    sheet.append(["1", "RAW-MIXED", "PALLET-R", 1])
+    sheet.append(["2", "RAW-MIXED", "   ", 1])
+    payload = BytesIO()
+    workbook.save(payload)
+
+    response = client.post(
+        "/api/boxes/import",
+        files={
+            "file": (
+                "mixed-pallets.xlsx",
+                payload.getvalue(),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    created = {box["box_number"]: box for box in response.json()["created"]}
+    assert created["001"]["pallet_number"] == "PALLET-R"
+    assert created["002"]["pallet_id"] is None
+    assert created["002"]["pallet_number"] is None
+
+
+def test_raw_xlsx_rejects_pallet_id_with_whitespace_only_number(client) -> None:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(
+        ["box_number", "lot", "pallet_number", "pallet_id", "warehouse_id"]
+    )
+    sheet.append(["1", "RAW-PALLET-ID", "   ", 42, 1])
+    payload = BytesIO()
+    workbook.save(payload)
+
+    response = client.post(
+        "/api/boxes/import",
+        files={
+            "file": (
+                "blank-pallet-number.xlsx",
+                payload.getvalue(),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["created"] == []
+    assert response.json()["skipped"][0]["reason"] == (
+        "pallet_id requires pallet_number"
+    )
+
+
+def test_raw_xlsx_duplicate_pallet_conflict_blocks_every_duplicate(client) -> None:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["box_number", "lot", "pallet_number", "warehouse_id"])
+    sheet.append(["1", "RAW-CONFLICT", "PALLET-A", 1])
+    sheet.append(["001", "raw-conflict", "   ", 1])
+    sheet.append(["1", "RAW-CONFLICT", "PALLET-A", 1])
+    payload = BytesIO()
+    workbook.save(payload)
+
+    response = client.post(
+        "/api/boxes/import",
+        files={
+            "file": (
+                "conflicting-pallets.xlsx",
+                payload.getvalue(),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["created"] == []
+    assert [entry["row"] for entry in response.json()["skipped"]] == [2, 3, 4]
+    assert all(
+        "Assigned vs Unassigned" in entry["reason"]
+        for entry in response.json()["skipped"]
+    )
 
 
 def test_staged_snapshot_survives_pallet_rename_and_finalizes(client, session) -> None:
@@ -174,6 +375,87 @@ def test_staged_snapshot_survives_pallet_rename_and_finalizes(client, session) -
     assert box is not None
     assert box.pallet_id == item["pallet_id"]
     assert box.pallet.pallet_number == "PALLET-AFTER"
+
+
+def test_manual_unassigned_receipt_stages_and_finalizes(client, session) -> None:
+    warehouse = session.get(Warehouse, 1)
+    assert warehouse is not None
+    warehouse.receipt_mode = ReceiptMode.admin_review
+    session.commit()
+
+    staged = client.post(
+        "/api/boxes",
+        json={
+            "box_number": "1",
+            "lot": "STAGED-UNASSIGNED",
+            "warehouse_id": 1,
+        },
+    )
+    assert staged.status_code == 201, staged.text
+    request_id = staged.json()["staged_receipt_id"]
+    request = client.get(f"/api/requests/{request_id}").json()
+    assert (request["items"][0]["pallet_id"], request["items"][0]["pallet"]) == (
+        None,
+        None,
+    )
+
+    finalized = client.post(
+        f"/api/requests/{request_id}/approve",
+        json={"expected_version": request["version"]},
+    )
+    assert finalized.status_code == 200, finalized.text
+    box = session.get(Box, finalized.json()["items"][0]["box_id"])
+    assert box is not None and box.pallet_id is None
+
+
+def test_mixed_staged_receipt_finalizes_assigned_and_unassigned(
+    client, session
+) -> None:
+    warehouse = session.get(Warehouse, 1)
+    assert warehouse is not None
+    warehouse.receipt_mode = ReceiptMode.admin_review
+    session.commit()
+
+    staged = client.post(
+        "/api/boxes/import-mapped",
+        json={
+            "warehouse_id": 1,
+            "items": [
+                {
+                    "box_number": "1",
+                    "lot": "STAGED-MIXED",
+                    "pallet_number": "PALLET-S",
+                },
+                {
+                    "box_number": "2",
+                    "lot": "STAGED-MIXED",
+                },
+            ],
+        },
+    )
+    assert staged.status_code == 200, staged.text
+    assert staged.json()["created"] == []
+    assert len(staged.json()["staged_receipt_ids"]) == 1
+    request_id = staged.json()["staged_receipt_ids"][0]
+    request = client.get(f"/api/requests/{request_id}").json()
+    snapshots = {item["box_number"]: item for item in request["items"]}
+    assert snapshots["001"]["pallet_id"] is not None
+    assert (snapshots["002"]["pallet_id"], snapshots["002"]["pallet"]) == (
+        None,
+        None,
+    )
+
+    finalized = client.post(
+        f"/api/requests/{request_id}/approve",
+        json={"expected_version": request["version"]},
+    )
+    assert finalized.status_code == 200, finalized.text
+    boxes = {
+        item["box_number"]: session.get(Box, item["box_id"])
+        for item in finalized.json()["items"]
+    }
+    assert boxes["001"] is not None and boxes["001"].pallet_id is not None
+    assert boxes["002"] is not None and boxes["002"].pallet_id is None
 
 
 def test_legacy_unassigned_box_remains_returnable_and_snapshots_null(
@@ -227,6 +509,57 @@ def test_legacy_unassigned_box_remains_returnable_and_snapshots_null(
     assert created.status_code == 201, created.text
     assert created.json()["items"][0]["pallet_id"] is None
     assert created.json()["items"][0]["pallet"] is None
+
+
+def test_unassigned_exports_are_blank_and_xlsx_reimports(client) -> None:
+    created = client.post(
+        "/api/boxes",
+        json={
+            "box_number": "1",
+            "lot": "EXPORT-UNASSIGNED",
+            "warehouse_id": 1,
+        },
+    )
+    assert created.status_code == 201, created.text
+
+    csv_response = client.get("/api/exports/boxes.csv")
+    rows = list(
+        csv.DictReader(csv_response.content.decode("utf-8-sig").splitlines())
+    )
+    exported = next(row for row in rows if row["Box Number"] == "001")
+    assert exported["Pallet ID"] == ""
+    assert exported["Pallet Number"] == ""
+
+    xlsx_response = client.get("/api/exports/boxes.xlsx")
+    workbook = load_workbook(BytesIO(xlsx_response.content))
+    sheet = workbook.active
+    assert sheet is not None
+    headers = [cell.value for cell in sheet[1]]
+    box_column = headers.index("Box Number") + 1
+    lot_column = headers.index("Lot") + 1
+    pallet_id_column = headers.index("Pallet ID") + 1
+    pallet_number_column = headers.index("Pallet Number") + 1
+    assert sheet.cell(2, pallet_id_column).value is None
+    assert sheet.cell(2, pallet_number_column).value is None
+    sheet.cell(2, box_column, "2")
+    sheet.cell(2, lot_column, "EXPORT-ROUNDTRIP")
+    payload = BytesIO()
+    workbook.save(payload)
+
+    imported = client.post(
+        "/api/boxes/import",
+        files={
+            "file": (
+                "roundtrip.xlsx",
+                payload.getvalue(),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+    assert imported.status_code == 200, imported.text
+    assert imported.json()["skipped"] == []
+    assert imported.json()["created"][0]["pallet_id"] is None
+    assert imported.json()["created"][0]["pallet_number"] is None
 
 
 def test_request_reporting_search_export_and_long_contents_include_pallet(

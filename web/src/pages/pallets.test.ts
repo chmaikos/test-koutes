@@ -7,6 +7,7 @@ import {
   canAdministerPallet,
   canManagePalletBoxes,
   exactPalletMatch,
+  isValidPalletPickerValue,
   normalizePalletNumber,
   palletCandidateFilters,
   palletOptionSelection,
@@ -18,6 +19,7 @@ import {
   parsePalletSearchParams,
   unassignedPalletLabel,
 } from "@/pages/pallets";
+import { manualReceiptPayload } from "@/pages/manualReceipt";
 
 const option: PalletOption = {
   id: 7,
@@ -69,6 +71,44 @@ describe("pallet list and picker helpers", () => {
       search: " PAL ",
       include_inactive: false,
     });
+  });
+
+  it("accepts blank optional picker state but rejects unmatched text", () => {
+    expect(isValidPalletPickerValue("", null)).toBe(true);
+    expect(isValidPalletPickerValue("", null, true)).toBe(false);
+    expect(isValidPalletPickerValue("PAL 01", null)).toBe(false);
+    expect(
+      isValidPalletPickerValue(" pal   01 ", {
+        id: 7,
+        pallet_number: "PAL 01",
+      }),
+    ).toBe(true);
+  });
+
+  it("omits pallet fields for manual Unassigned receipts", () => {
+    expect(
+      manualReceiptPayload({
+        boxNumber: "1",
+        lotId: 2,
+        pallet: null,
+        contents: " Notes ",
+        warehouseId: 3,
+      }),
+    ).toEqual({
+      box_number: "001",
+      lot_id: 2,
+      contents: "Notes",
+      warehouse_id: 3,
+    });
+    expect(
+      manualReceiptPayload({
+        boxNumber: "2",
+        lotId: 2,
+        pallet: { id: 7, pallet_number: "PAL 01" },
+        contents: "",
+        warehouseId: 3,
+      }),
+    ).toMatchObject({ pallet_id: 7, pallet_number: "PAL 01" });
   });
 
   it("uses an explicit unassigned fallback and role controls", () => {

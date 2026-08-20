@@ -47,6 +47,8 @@ import {
   hasRequiredOverrideReason,
 } from "@/pages/boxIntegrity";
 import { importResultTitle } from "@/pages/importResults";
+import { manualReceiptPayload } from "@/pages/manualReceipt";
+import { isValidPalletPickerValue } from "@/pages/pallets";
 
 // Whitelist for the page-size selector. The API enforces a 1..200
 // range; we expose the four common buckets so operators can quickly
@@ -1316,28 +1318,26 @@ function CreateBoxModal({ onClose }: { onClose: () => void }) {
           onSubmit={async (e) => {
             e.preventDefault();
             setError(null);
-            if (!warehouseId || !lot || !pallet || !palletNumber.trim()) {
-              setError("Pick a warehouse, lot, and pallet.");
+            if (!warehouseId || !lot) {
+              setError("Pick a warehouse and lot.");
+              return;
+            }
+            if (!isValidPalletPickerValue(palletNumber, pallet)) {
+              setError(
+                "Select or create the entered pallet, or clear it to leave the box Unassigned.",
+              );
               return;
             }
             try {
-              const trimmedContents = contents.trim();
-              const trimmedNumber = boxNumber.trim();
-              // Mirror the server-side rule: numeric only, zero-padded to
-              // a minimum of 3 digits. Server stays authoritative; this
-              // just keeps the optimistic UI in sync with what the API
-              // will ultimately persist.
-              const normalizedNumber = /^[0-9]+$/.test(trimmedNumber)
-                ? trimmedNumber.padStart(3, "0")
-                : trimmedNumber;
-              await create.mutateAsync({
-                box_number: normalizedNumber,
-                lot_id: lot!.id,
-                pallet_id: pallet.id,
-                pallet_number: pallet.pallet_number,
-                contents: trimmedContents || undefined,
-                warehouse_id: Number(warehouseId),
-              });
+              await create.mutateAsync(
+                manualReceiptPayload({
+                  boxNumber,
+                  lotId: lot.id,
+                  pallet,
+                  contents,
+                  warehouseId: Number(warehouseId),
+                }),
+              );
               onClose();
             } catch (err: unknown) {
               const detail =
@@ -1391,10 +1391,12 @@ function CreateBoxModal({ onClose }: { onClose: () => void }) {
             lotId={lot?.id}
             warehouseId={warehouseId || undefined}
             canCreate
-            required
             disabled={!warehouseId || !lot || create.isPending}
             label={lot ? "Pallet" : "Pallet (choose lot first)"}
           />
+          <p className="-mt-2 text-xs text-slate-500">
+            Pallet assignment is optional and can be added later.
+          </p>
           <label className="block">
             <span className="text-xs text-slate-500">Warehouse</span>
             <select
@@ -1426,7 +1428,7 @@ function CreateBoxModal({ onClose }: { onClose: () => void }) {
             <button
               type="submit"
               className="btn-primary"
-              disabled={create.isPending || !lot || !warehouseId || !pallet}
+              disabled={create.isPending || !lot || !warehouseId}
             >
               {create.isPending ? "Saving..." : "Receive"}
             </button>

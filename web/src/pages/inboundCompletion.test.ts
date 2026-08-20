@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import requestDetailSource from "@/pages/RequestDetailPage.tsx?raw";
 import type {
   InboundCompletionPreview,
+  InboundCompletionPreviewRow,
   InboundRequestItemInput,
 } from "@/api/types";
 import {
@@ -11,6 +12,7 @@ import {
   inboundCompletionFields,
   inboundCompletionFingerprint,
   inboundCompletionItems,
+  inboundTargetPalletLabel,
   invalidateInboundCompletion,
   isStaleInboundImpactConflict,
   reviewedInboundCompletion,
@@ -108,6 +110,25 @@ describe("inbound completion canonical payload", () => {
       }).error,
     ).toMatch(/different pallets/i);
   });
+
+  it("keeps blank pallet rows as canonical null without confirmation", () => {
+    expect(
+      inboundCompletionItems(
+        [{ lot: " Lot B ", box_number: "2", pallet_number: "   " }],
+        {},
+      ),
+    ).toEqual({
+      error: null,
+      items: [
+        {
+          lot: "Lot B",
+          box_number: "002",
+          pallet_number: null,
+          contents: undefined,
+        },
+      ],
+    });
+  });
 });
 
 describe("inbound impact fingerprint and state", () => {
@@ -161,6 +182,72 @@ describe("inbound impact fingerprint and state", () => {
       acceptRelocations: false,
       notice: "Inventory changed; review again",
     });
+  });
+
+  it("fingerprints blank and null pallet values identically", () => {
+    const base = {
+      requestId: 1,
+      requestVersion: 1,
+      lotConfirmations: { 0: { id: 2, name: "Lot" } },
+      palletConfirmations: {},
+    };
+    expect(
+      inboundCompletionFingerprint({
+        ...base,
+        rows: [{ lot: "Lot", box_number: "1", pallet_number: "" }],
+      }),
+    ).toBe(
+      inboundCompletionFingerprint({
+        ...base,
+        rows: [{ lot: "Lot", box_number: "1", pallet_number: null }],
+      }),
+    );
+  });
+});
+
+describe("inbound pallet target labels", () => {
+  const row = {
+    current_pallet_number: null,
+    target_pallet_resolution: {
+      resolution: "unassigned",
+      pallet_id: null,
+      pallet_number: null,
+    },
+  } as InboundCompletionPreviewRow;
+
+  it("renders unassigned, preserved, and explicit target resolutions", () => {
+    expect(inboundTargetPalletLabel(row)).toBe("Unassigned");
+    expect(
+      inboundTargetPalletLabel({
+        ...row,
+        current_pallet_number: "PAL-1",
+        target_pallet_resolution: {
+          resolution: "preserve_existing",
+          pallet_id: 2,
+          pallet_number: "PAL-1",
+        },
+      }),
+    ).toBe("Keep current pallet PAL-1");
+    expect(
+      inboundTargetPalletLabel({
+        ...row,
+        target_pallet_resolution: {
+          resolution: "preserve_existing",
+          pallet_id: null,
+          pallet_number: null,
+        },
+      }),
+    ).toBe("Remain Unassigned");
+    expect(
+      inboundTargetPalletLabel({
+        ...row,
+        target_pallet_resolution: {
+          resolution: "existing",
+          pallet_id: 3,
+          pallet_number: "PAL-2",
+        },
+      }),
+    ).toBe("PAL-2");
   });
 });
 

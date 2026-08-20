@@ -3,6 +3,7 @@ import type { ImportResult } from "@/api/types";
 import {
   importResultTitle,
   mappedImportPayload,
+  palletAssignmentCounts,
 } from "@/pages/importResults";
 
 describe("archived box import options", () => {
@@ -26,7 +27,17 @@ describe("archived box import options", () => {
       receipt_request_ids: [10],
     } as unknown as ImportResult;
     expect(importResultTitle(result)).toBe(
-      "Import result · 2 created · 1 restored · 1 receipt batch",
+      "Import result · 2 created · 1 restored · 0 assigned · 3 Unassigned · 1 receipt batch",
     );
+  });
+
+  it("summarizes assigned and Unassigned rows", () => {
+    expect(
+      palletAssignmentCounts([
+        { pallet_id: 1, pallet_number: "PAL-1" },
+        { pallet_number: null },
+        {},
+      ]),
+    ).toEqual({ assigned: 1, unassigned: 2 });
   });
 });

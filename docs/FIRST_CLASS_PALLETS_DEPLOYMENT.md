@@ -15,9 +15,9 @@ forward correction for its original `current_warehouse_id` contract.
 
 ## Release contract
 
-- Legacy rows may keep `pallet_id = NULL` and appear as **Unassigned**.
-- The matching API requires a Pallet for every new manual, XLSX, staged,
-  direct-inbound, and request-completion receipt.
+- Any receipt may keep `pallet_id = NULL` and appear as **Unassigned**. This
+  applies to manual, mapped/legacy XLSX, staged, direct-inbound, and
+  request-completion receipts; no placeholder Pallet is created.
 - A Box can reference only an active Pallet in the same Lot. Warehouse moves,
   force/bulk corrections, returns, inbound relocation, and restoration preserve
   that Pallet; Lot reassignment detaches or explicitly reassigns it.
@@ -88,15 +88,16 @@ forward correction for its original `current_warehouse_id` contract.
      --database-url "$DATABASE_URL"
    ```
 
-7. Review every reported group: legacy Unassigned Boxes, missing references,
+7. Review every reported group: Unassigned Boxes, missing references,
    Lot mismatches, inactive assignments, duplicate normalized Pallet numbers,
    invalid merged-Lot parents, and each Pallet's Box-derived warehouse
    distribution. A multi-warehouse distribution is valid after `0033`. The
    script never changes data. Exit code `0` means no integrity conflicts;
    legacy Unassigned inventory remains valid.
 8. Deploy/restart the matching API, then the matching web build. Smoke-test
-   manual receipt, XLSX mapping, existing-Box inbound relocation, Pallet
-   list/detail across multiple warehouses, Box movement with preserved Pallet,
+   assigned and Unassigned manual receipt, XLSX mapping with omitted and mixed
+   blank Pallet cells, existing-Box inbound relocation with preserved and
+   explicit target assignments, Pallet list/detail across multiple warehouses,
    return completion, Lot merge, and CSV/XLSX export before reopening writes.
 
 Do not deploy the new web/API against a database below
@@ -177,8 +178,13 @@ deploy only the matching old API/web build.
 - Preflight reports no mismatched, inactive, duplicate, or missing-reference
   assignments and reports Box-derived warehouse sets without treating
   multi-warehouse Pallets as conflicts.
-- Legacy null assignments remain visible as **Unassigned**.
-- New receipt paths reject a missing Pallet.
+- Null assignments remain visible as **Unassigned** and are informational, not
+  integrity conflicts.
+- Every new receipt path accepts an omitted/blank Pallet and stores null
+  Pallet ID/number snapshots without creating a Pallet or Pallet event.
+- Assigned receipts still reject missing/mismatched IDs, inactive or
+  cross-Lot Pallets, and duplicate rows with assigned-versus-Unassigned or
+  differing assignments.
 - Pallet options are Lot-scoped and reusable across receipt warehouses.
 - The legacy Pallet move endpoint returns HTTP 410 and performs no mutation.
 - API tests, Ruff, frontend tests/lint/typecheck/build, and `git diff --check`
