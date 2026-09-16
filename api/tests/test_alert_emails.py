@@ -7,6 +7,9 @@ recipient resolution, and the dispatcher live in their own files.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import cast
+
+import pytest
 
 from app.models.alerts import Alert, AlertType
 from app.models.warehouses import Warehouse
@@ -54,12 +57,6 @@ def test_triggered_max_capacity_subject_includes_summary():
     assert "over capacity" in e.subject.lower()
 
 
-def test_resolved_overrides_severity():
-    e = render(kind=EmailKind.resolved, alert=_alert(), warehouse=_warehouse())
-    assert "[RESOLVED]" in e.subject
-    assert "Resolved" in e.html
-
-
 def test_test_email_clearly_labelled():
     e = render(kind=EmailKind.test, alert=_alert(), warehouse=_warehouse())
     assert "[TEST]" in e.subject
@@ -68,16 +65,8 @@ def test_test_email_clearly_labelled():
     assert "test" in e.text.lower()
 
 
-def test_reminder_uses_reminder_severity_for_low_inventory():
-    e = render(kind=EmailKind.reminder, alert=_alert(), warehouse=_warehouse())
-    assert "[REMINDER]" in e.subject
-    assert "Reminder" in e.html
-
-
-def test_escalated_uses_escalated_severity():
-    e = render(kind=EmailKind.escalated, alert=_alert(), warehouse=_warehouse())
-    assert "[ESCALATED]" in e.subject
-    assert "Escalated" in e.html
+def test_only_triggered_and_test_kinds_are_public():
+    assert {kind.value for kind in EmailKind} == {"triggered", "test"}
 
 
 def test_near_capacity_uses_heads_up_severity():
@@ -87,12 +76,24 @@ def test_near_capacity_uses_heads_up_severity():
     assert "Heads up" in e.html
 
 
-def test_box_stuck_summary_phrasing():
-    a = _alert(AlertType.box_stuck, value=3, threshold=30)
-    e = render(kind=EmailKind.triggered, alert=a, warehouse=_warehouse())
-    assert "[ATTENTION]" in e.subject
-    assert "stuck" in e.subject.lower()
-    assert "3" in e.text
+@pytest.mark.parametrize("retired_kind", ["reminder", "escalated", "resolved"])
+def test_retired_email_kinds_are_rejected(retired_kind):
+    with pytest.raises(ValueError, match="unsupported alert email kind"):
+        render(
+            kind=cast(EmailKind, retired_kind),
+            alert=_alert(),
+            warehouse=_warehouse(),
+        )
+
+
+@pytest.mark.parametrize("kind", list(EmailKind))
+def test_legacy_box_stuck_is_rejected_for_all_active_kinds(kind):
+    with pytest.raises(ValueError, match="legacy box_stuck"):
+        render(
+            kind=kind,
+            alert=_alert(AlertType.box_stuck, value=3, threshold=30),
+            warehouse=_warehouse(),
+        )
 
 
 def test_recent_events_render_in_html_and_text():

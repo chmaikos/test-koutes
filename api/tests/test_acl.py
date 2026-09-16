@@ -315,12 +315,17 @@ def test_test_email_endpoint_is_admin_only(
 
 def test_admin_test_email_records_test_kind_audit_row(client, session, monkeypatch):
     """Admins can hit the test-email path; the audit row uses ``kind=test``
-    so the reminder/escalation cadence is unaffected."""
+    and leaves automatic opening retry state untouched."""
     from datetime import UTC, datetime
 
     from sqlalchemy import select
 
-    from app.models.alerts import Alert, AlertNotification, AlertType
+    from app.models.alerts import (
+        Alert,
+        AlertNotification,
+        AlertNotificationKind,
+        AlertType,
+    )
     from app.services import alerts as alerts_service
 
     monkeypatch.setattr(
@@ -339,6 +344,19 @@ def test_admin_test_email_records_test_kind_audit_row(client, session, monkeypat
     session.add(a)
     session.commit()
     session.refresh(a)
+    session.add_all(
+        [
+            AlertNotification(
+                alert_id=a.id,
+                kind=AlertNotificationKind.triggered,
+                recipients="ops@example.com",
+                ok=False,
+                error="transport down",
+            )
+            for _ in range(2)
+        ]
+    )
+    session.commit()
 
     resp = client.post(f"/api/alerts/{a.id}/test-email")
     assert resp.status_code == 200
@@ -350,8 +368,47 @@ def test_admin_test_email_records_test_kind_audit_row(client, session, monkeypat
     rows = session.scalars(
         select(AlertNotification).where(AlertNotification.alert_id == a.id)
     ).all()
-    assert len(rows) == 1
-    assert rows[0].kind.value == "test"
+    assert [row.kind for row in rows].count(AlertNotificationKind.triggered) == 2
+    assert [row.kind for row in rows].count(AlertNotificationKind.test) == 1
+    session.refresh(a)
+    assert a.notified_at is None
+    assert a.email_claimed_at is None
+
+
+def test_legacy_box_stuck_test_email_is_rejected(client, session, monkeypatch):
+    from datetime import UTC, datetime
+
+    from sqlalchemy import select
+
+    from app.models.alerts import Alert, AlertNotification, AlertType
+    from app.services import alerts as alerts_service
+
+    calls = []
+    monkeypatch.setattr(
+        alerts_service,
+        "send_alert_email",
+        lambda **kwargs: (calls.append(kwargs) or True, None),
+    )
+    alert = Alert(
+        warehouse_id=1,
+        type=AlertType.box_stuck,
+        threshold=30,
+        value=2,
+        triggered_at=datetime.now(UTC),
+        resolved_at=datetime.now(UTC),
+    )
+    session.add(alert)
+    session.commit()
+
+    response = client.post(f"/api/alerts/{alert.id}/test-email")
+
+    assert response.status_code == 400
+    assert calls == []
+    assert session.scalars(
+        select(AlertNotification).where(
+            AlertNotification.alert_id == alert.id
+        )
+    ).all() == []
 
 
 # ---------------------------------------------------------------------------
@@ -373,6 +430,7 @@ def test_alerts_recipients_endpoint_returns_per_warehouse_lists(client):
     body = resp.json()
     assert "warehouses" in body
     assert "escalation" in body
+    assert body["escalation"] == []
     assert {w["warehouse_id"] for w in body["warehouses"]} == {1, 2, 3}
 
 

@@ -7,8 +7,7 @@ Cover the routing rules in :mod:`app.services.alert_recipients`:
 * opt-out via ``email_alerts_enabled`` removes a user even when their ACL
   says they should be on the list,
 * inactive users never appear,
-* ALERT_EMAIL_TO is the final fallback when the resolved list is empty,
-* escalation_recipients only contains active admins.
+* ALERT_EMAIL_TO is the final fallback when the resolved list is empty.
 """
 from __future__ import annotations
 
@@ -17,10 +16,7 @@ import pytest
 from app.config import get_settings
 from app.models.users import UserRole
 from app.models.warehouses import Warehouse
-from app.services.alert_recipients import (
-    escalation_recipients,
-    primary_recipients,
-)
+from app.services.alert_recipients import primary_recipients
 
 
 @pytest.fixture(autouse=True)
@@ -147,34 +143,3 @@ def test_primary_dedupes_case_insensitively(session, monkeypatch):
     )
     result = primary_recipients(session, warehouse_id=1)
     assert result == ["Boss@Example.com"]
-
-
-def test_escalation_admins_only(session, monkeypatch):
-    monkeypatch.setenv("ALERT_EMAIL_TO", "")
-    get_settings.cache_clear()
-
-    _make_user(session, role=UserRole.admin, email="boss@example.com")
-    _make_user(session, role=UserRole.admin, email="boss2@example.com")
-    _make_user(
-        session,
-        role=UserRole.operator,
-        email="op@example.com",
-        warehouses=[1, 2, 3],
-    )
-
-    result = escalation_recipients(session)
-    assert set(result) == {"boss@example.com", "boss2@example.com"}
-
-
-def test_escalation_falls_back_when_no_admins(session, monkeypatch):
-    monkeypatch.setenv("ALERT_EMAIL_TO", "leadership@example.com")
-    get_settings.cache_clear()
-
-    _make_user(
-        session,
-        role=UserRole.operator,
-        email="op@example.com",
-        warehouses=[1, 2],
-    )
-
-    assert escalation_recipients(session) == ["leadership@example.com"]

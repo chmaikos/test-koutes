@@ -90,9 +90,10 @@ and threshold alerts (in-app + email via Microsoft Graph).
 - Request reconciliation, lifecycle analytics, and ACL-filtered CSV/XLSX
   exports cover discrepancies, documents, overrides, exceptions, SLA breaches,
   preparation, transport, acceptance, and throughput.
-- In-app request notifications, email preferences, durable Graph-email outbox,
-  and SSE refreshes cover lifecycle, coordination, exception, document, and
-  comment events.
+- In-app request notifications and SSE refreshes cover lifecycle,
+  coordination, exception, document, and comment events. The durable
+  Graph-email outbox is intentionally limited to request creation, approval,
+  and completion milestones.
 - Configurable staged-receipt governance supports administrator review,
   two-person thresholds, required documents, quarantine, release/rejection, and
   audited restoration of archived box identities.
@@ -106,7 +107,9 @@ and threshold alerts (in-app + email via Microsoft Graph).
   pallet ID/number, plus Lot summaries, Pallet summaries, reconciliation
   pallet snapshots, and productivity reports with employee averages and 90
   days of daily-entry detail.
-- Low-inventory and max-capacity alerts in-app and via Graph email.
+- Low-inventory, capacity, and leading-indicator alerts remain in-app. Each
+  newly opened incident may send one opening email via Graph, with at most five
+  delivery attempts and no reminder, escalation, or resolution email.
 - Admins can archive empty warehouses after open requests are closed. A
   warehouse used as either the source or target of blocking work cannot be
   archived. Archiving preserves inventory and audit history, deactivates the
@@ -394,8 +397,10 @@ real send attempt after rollout to potentially fail and then start working.
 
 ### 4. Configure recipients
 
-`ALERT_EMAIL_TO` is a comma-separated list. Use a distribution list so that
-the on-call rotation can be changed without a redeploy:
+Active users with access to the affected warehouse and all active admins are
+the primary recipients, provided their **Email alerts** preference is enabled.
+`ALERT_EMAIL_TO` is the comma-separated fallback used only when no eligible
+user address is available. A monitored distribution list is recommended:
 
 ```env
 ALERT_EMAIL_FROM=warehouse-alerts@example.com
@@ -408,9 +413,15 @@ Restart the API (`docker compose up -d --build api`) and trigger an alert:
 
 1. Sign in as **Admin** -> **Settings** -> raise *Low inventory threshold* on
    any warehouse to a value above its current stock and save.
-2. Within ~30 seconds the in-app *Alerts* panel should show a new entry.
-3. Check the inbox of an `ALERT_EMAIL_TO` recipient for a *"Warehouse alert"*
-   message.
+2. The in-app *Alerts* panel should show a new entry immediately.
+3. Within the next five-minute dispatch interval, check an eligible user's
+   inbox (or the `ALERT_EMAIL_TO` fallback) for the opening message.
+
+An alert incident sends only its opening email. A failed delivery is retried
+up to five transport attempts. Acknowledgment and resolution do not send
+email. If the condition resolves and later recurs, the recurrence is a new
+incident and may send a new opening email. The retired stuck-box alert type is
+kept only so historical records remain readable.
 
 Tail the API logs while you test — Graph errors are logged at WARNING level
 under the `warehouse.graph` logger, which is invaluable when consent or
@@ -424,7 +435,7 @@ docker compose logs -f api | grep warehouse.graph
 
 | Log line                                      | What it means                                                                |
 | --------------------------------------------- | ---------------------------------------------------------------------------- |
-| `graph not configured; skipping alert email`  | One of `ENTRA_*`, `ALERT_EMAIL_FROM`, `ALERT_EMAIL_TO` is empty in `.env`.   |
+| `graph not configured; skipping alert email`  | One of the required `ENTRA_*` values or `ALERT_EMAIL_FROM` is empty in `.env`. |
 | `graph token acquisition failed: ...`         | Wrong tenant ID, wrong client secret, or admin consent never granted.        |
 | `graph sendMail failed: 403 ...`              | `Mail.Send` (Application) is missing, or the access policy denies this mailbox. |
 | `graph sendMail failed: 404 ...`              | `ALERT_EMAIL_FROM` doesn't resolve to a mailbox in this tenant.              |
@@ -664,11 +675,17 @@ Request planning and receipt governance are configured per warehouse in
 - required ERP document, quarantine rules for imported/manual receipts, and
   optional two-person approval threshold.
 
-Users can independently enable or disable request email while retaining in-app
-notifications. Graph delivery uses the existing `ENTRA_*`,
-`ALERT_EMAIL_FROM`, and `PUBLIC_BASE_URL` settings; request mail is persisted in
-an outbox and retried by the scheduler. Object limits and RustFS credentials use
-the existing `DOCUMENT_MAX_BYTES` and `RUSTFS_*` settings.
+Users can independently enable or disable request email while retaining all
+in-app notifications. Request email is created only for technical kinds
+`staged`, `submitted`, `approved`, and `confirmation_received`: in user terms,
+staged receipt creation plus normal request creation, approval, and completion.
+Auto-completed synthetic receipts and all intermediate workflow activity are
+email-silent. Graph delivery uses the existing `ENTRA_*`, `ALERT_EMAIL_FROM`,
+and `PUBLIC_BASE_URL` settings; allowed mail is persisted in an outbox and
+retried up to five times by the scheduler. At dispatch, the recipient must
+still be active, opted in, and have a current email address. Object limits and
+RustFS credentials use the existing `DOCUMENT_MAX_BYTES` and `RUSTFS_*`
+settings.
 
 ## Request API
 

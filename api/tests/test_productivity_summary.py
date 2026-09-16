@@ -12,6 +12,7 @@ from decimal import Decimal
 import pytest
 
 from app.models.employees import Employee, ProductivityEntry
+from app.routers.dashboard import _today_in_app_tz
 from app.services.productivity import (
     daily_summary,
     employee_averages,
@@ -245,7 +246,7 @@ def test_active_employees_count_independent_of_entries(
 
 def test_dashboard_summary_includes_productivity(client, session, warehouse_with_employees):
     alice, *_ = warehouse_with_employees
-    today = date.today()
+    today = _today_in_app_tz()
     _add_entry(session, employee=alice, on=today, pages=80, hours=4)
     session.commit()
 

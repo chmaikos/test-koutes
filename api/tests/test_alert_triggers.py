@@ -1,8 +1,7 @@
 """Tests for evaluate_alerts (detect-only).
 
-Covers the four leading-indicator scenarios the dispatcher cares about:
-``low_inventory`` / ``max_capacity`` (existing) plus the new
-``near_capacity``, ``near_low_inventory``, and ``box_stuck`` types.
+Covers the active inventory and leading-indicator scenarios, plus the
+retirement of ``box_stuck`` detection.
 
 We seed the DB directly to avoid going through the API, then invoke the
 evaluator and inspect the rows it created.
@@ -12,7 +11,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.config import get_settings
 from app.models.alerts import Alert, AlertType
@@ -90,7 +89,6 @@ def _alerts_of_type(
 
 def test_near_capacity_fires_between_threshold_and_max(session, monkeypatch):
     monkeypatch.setenv("NEAR_CAPACITY_PERCENT", "80")
-    monkeypatch.setenv("BOX_STUCK_THRESHOLD_DAYS", "0")
     get_settings.cache_clear()
 
     _set_warehouse(session, 1, mn=0, mx=10)
@@ -125,7 +123,6 @@ def test_near_capacity_resolves_when_max_capacity_takes_over(
     session, monkeypatch
 ):
     monkeypatch.setenv("NEAR_CAPACITY_PERCENT", "80")
-    monkeypatch.setenv("BOX_STUCK_THRESHOLD_DAYS", "0")
     get_settings.cache_clear()
 
     _set_warehouse(session, 1, mn=0, mx=10)
@@ -158,7 +155,6 @@ def test_near_capacity_resolves_when_max_capacity_takes_over(
 
 def test_near_low_inventory_fires_within_buffer(session, monkeypatch):
     monkeypatch.setenv("NEAR_LOW_INVENTORY_BUFFER", "2")
-    monkeypatch.setenv("BOX_STUCK_THRESHOLD_DAYS", "0")
     get_settings.cache_clear()
 
     _set_warehouse(session, 1, mn=5, mx=100)
@@ -189,7 +185,6 @@ def test_near_low_inventory_resolves_when_dropping_below_min(
     session, monkeypatch
 ):
     monkeypatch.setenv("NEAR_LOW_INVENTORY_BUFFER", "2")
-    monkeypatch.setenv("BOX_STUCK_THRESHOLD_DAYS", "0")
     get_settings.cache_clear()
 
     _set_warehouse(session, 1, mn=5, mx=100)
@@ -214,74 +209,15 @@ def test_near_low_inventory_resolves_when_dropping_below_min(
 
 
 # ---------------------------------------------------------------------------
-# box_stuck
+# retired box_stuck
 # ---------------------------------------------------------------------------
 
 
-def test_box_stuck_counts_received_boxes_past_window(session, monkeypatch):
-    monkeypatch.setenv("BOX_STUCK_THRESHOLD_DAYS", "30")
-    get_settings.cache_clear()
-
-    _set_warehouse(session, 1, mn=0, mx=100)
-    long_ago = datetime.now(UTC) - timedelta(days=45)
-    recent = datetime.now(UTC) - timedelta(days=5)
-
-    _box(session, box_number="001", warehouse_id=1, received_at=long_ago)
-    _box(session, box_number="002", warehouse_id=1, received_at=long_ago)
-    _box(session, box_number="003", warehouse_id=1, received_at=recent)
-    # A processed-out box of the same age should NOT be counted as stuck.
-    _box(
-        session,
-        box_number="004",
-        warehouse_id=1,
-        status=BoxStatus.returned,
-        received_at=long_ago,
-    )
-
-    evaluate_alerts(session)
-
-    stuck = _alerts_of_type(
-        session, warehouse_id=1, alert_type=AlertType.box_stuck
-    )
-    assert len(stuck) == 1
-    assert stuck[0].value == 2  # the two long_ago + received boxes
-    assert stuck[0].threshold == 30
-
-
-def test_box_stuck_resolves_when_no_more_stuck_boxes(session, monkeypatch):
-    monkeypatch.setenv("BOX_STUCK_THRESHOLD_DAYS", "30")
-    get_settings.cache_clear()
-
-    _set_warehouse(session, 1, mn=0, mx=100)
-    long_ago = datetime.now(UTC) - timedelta(days=45)
-    box = _box(
-        session,
-        box_number="001",
-        warehouse_id=1,
-        received_at=long_ago,
-    )
-    evaluate_alerts(session)
-    assert _alerts_of_type(
-        session, warehouse_id=1, alert_type=AlertType.box_stuck
-    )
-
-    box.status = BoxStatus.ready_to_return
-    session.commit()
-
-    evaluate_alerts(session)
-    assert (
-        _alerts_of_type(session, warehouse_id=1, alert_type=AlertType.box_stuck)
-        == []
-    )
-
-
-def test_box_stuck_disabled_when_threshold_is_zero(session, monkeypatch):
-    monkeypatch.setenv("BOX_STUCK_THRESHOLD_DAYS", "0")
-    get_settings.cache_clear()
-
+def test_aged_received_boxes_never_open_box_stuck_alert(session):
     _set_warehouse(session, 1, mn=0, mx=100)
     long_ago = datetime.now(UTC) - timedelta(days=365)
     _box(session, box_number="001", warehouse_id=1, received_at=long_ago)
+    _box(session, box_number="002", warehouse_id=1, received_at=long_ago)
 
     evaluate_alerts(session)
 
@@ -289,3 +225,75 @@ def test_box_stuck_disabled_when_threshold_is_zero(session, monkeypatch):
         _alerts_of_type(session, warehouse_id=1, alert_type=AlertType.box_stuck)
         == []
     )
+
+
+def test_resolved_condition_recurrence_creates_new_incident(session):
+    _set_warehouse(session, 1, mn=1, mx=100)
+    evaluate_alerts(session)
+    first = _alerts_of_type(
+        session, warehouse_id=1, alert_type=AlertType.low_inventory
+    )[0]
+
+    box = _box(session, box_number="001", warehouse_id=1)
+    evaluate_alerts(session)
+    session.refresh(first)
+    assert first.resolved_at is not None
+
+    box.status = BoxStatus.returned
+    session.commit()
+    evaluate_alerts(session)
+
+    incidents = list(
+        session.scalars(
+            select(Alert)
+            .where(
+                Alert.warehouse_id == 1,
+                Alert.type == AlertType.low_inventory,
+            )
+            .order_by(Alert.id)
+        )
+    )
+    assert len(incidents) == 2
+    assert incidents[0].resolved_at is not None
+    assert incidents[1].resolved_at is None
+    assert incidents[0].id != incidents[1].id
+
+
+def test_duplicate_open_insert_reuses_canonical_without_breaking_transaction(
+    session, monkeypatch
+):
+    from app.services import alerts as alerts_service
+
+    _set_warehouse(session, 1, mn=1, mx=100)
+    canonical = Alert(
+        warehouse_id=1,
+        type=AlertType.low_inventory,
+        threshold=1,
+        value=99,
+        triggered_at=datetime.now(UTC),
+    )
+    session.add(canonical)
+    session.commit()
+
+    real_open_alert = alerts_service._open_alert
+    first_lookup = {"missed": False}
+
+    def _simulate_racing_lookup(db, warehouse_id, alert_type):
+        if (
+            warehouse_id == 1
+            and alert_type == AlertType.low_inventory
+            and not first_lookup["missed"]
+        ):
+            first_lookup["missed"] = True
+            return None
+        return real_open_alert(db, warehouse_id, alert_type)
+
+    monkeypatch.setattr(alerts_service, "_open_alert", _simulate_racing_lookup)
+    evaluate_alerts(session)
+
+    rows = _alerts_of_type(
+        session, warehouse_id=1, alert_type=AlertType.low_inventory
+    )
+    assert [row.id for row in rows] == [canonical.id]
+    assert rows[0].value == 0
+    assert session.scalar(select(func.count(Alert.id))) >= 1

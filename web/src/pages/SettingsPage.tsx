@@ -62,8 +62,9 @@ function PersonalNotificationsSection() {
     <section className="card card-pad">
       <h2 className="font-semibold">Request notifications</h2>
       <p className="mt-1 text-xs text-slate-500">
-        In-app notifications always stay enabled. Email can be switched off
-        independently from warehouse alert email.
+        In-app notifications stay enabled for all request activity. Email is
+        limited to request creation, approval, and completion, and can be
+        switched off independently from warehouse alert email.
       </p>
       <label className="mt-4 flex items-center gap-3 text-sm">
         <input
@@ -72,7 +73,7 @@ function PersonalNotificationsSection() {
           disabled={!me.data || update.isPending}
           onChange={(event) => update.mutate(event.target.checked)}
         />
-        Email me about request workflow activity
+        Email me for request creation, approval, and completion
       </label>
     </section>
   );
@@ -1778,7 +1779,7 @@ function UsersSection() {
                         patch: { email_requests_enabled: e.target.checked },
                       })
                     }
-                    title="Receives request workflow email"
+                    title="Receives request creation, approval, and completion email"
                   />
                 </td>
                 <td className="px-4 py-2.5">
@@ -1949,7 +1950,7 @@ function UserCard({
               onPatch({ email_requests_enabled: e.target.checked })
             }
           />
-          <span>Request email</span>
+          <span>Request milestone email</span>
         </label>
       </div>
       <div>
@@ -1981,10 +1982,11 @@ function RecipientsPreview() {
           <h2 className="font-semibold">Alert email routing</h2>
         </div>
         <p className="text-xs text-slate-500">
-          Who would receive an alert email if one fired right now. Active
-          users with the warehouse ACL granted (plus all admins) get the
-          primary mail; admins always cover escalation. Toggle "Email
-          alerts" off above to opt a user out without removing their access.
+          Who would receive the single opening email if an alert fired now.
+          Active users with warehouse access, plus all admins, are included.
+          Toggle "Email alerts" off above to opt a user out without removing
+          access. Alerts do not send reminders, escalations, or resolution
+          emails.
         </p>
       </header>
       {isLoading && (
@@ -2008,15 +2010,6 @@ function RecipientsPreview() {
               <RecipientChips emails={w.primary} emptyHint="No recipients (alerts will fall back to ALERT_EMAIL_TO)" />
             </div>
           ))}
-          <div className="grid gap-3 bg-slate-50/60 px-5 py-3 sm:grid-cols-[14rem_1fr]">
-            <div className="text-sm font-medium text-slate-700">
-              Escalation (admins)
-            </div>
-            <RecipientChips
-              emails={data.escalation}
-              emptyHint="No active admins with email alerts enabled"
-            />
-          </div>
         </div>
       )}
     </section>

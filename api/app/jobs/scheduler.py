@@ -99,11 +99,9 @@ def build_scheduler() -> AsyncIOScheduler:
         max_instances=1,
         coalesce=True,
     )
-    # Email dispatch runs less often: it makes outbound HTTP calls to
-    # Graph and exists primarily to deliver triggered/reminder/escalation
-    # mail without slowing down the request that opened the alert. 5 min
-    # is a good compromise between latency and not flooding Graph when a
-    # tenant has hundreds of warehouses.
+    # Opening-email dispatch runs less often so Graph calls never slow down
+    # the request that opened an incident. Durable claims coordinate this
+    # job across multiple API processes.
     scheduler.add_job(
         _dispatch_tick,
         trigger="interval",

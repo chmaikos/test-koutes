@@ -4,10 +4,8 @@ import {
   ArrowLeft,
   Bell,
   CheckCircle2,
-  Clock,
   Mail,
   Send,
-  ShieldAlert,
   XCircle,
 } from "lucide-react";
 import { useState } from "react";
@@ -21,33 +19,22 @@ import type {
   Alert,
   AlertNotification,
   AlertNotificationKind,
-  AlertType,
 } from "@/api/types";
 import { useHasRole } from "@/components/RoleGate";
-
-const ALERT_TYPE_LABEL: Record<AlertType, string> = {
-  low_inventory: "Low inventory",
-  max_capacity: "Max capacity",
-  near_capacity: "Near capacity",
-  near_low_inventory: "Near low inventory",
-  box_stuck: "Boxes stuck",
-};
-
-const NOTIFICATION_KIND_LABEL: Record<AlertNotificationKind, string> = {
-  triggered: "Triggered email",
-  reminder: "Reminder email",
-  escalated: "Escalated to admins",
-  resolved: "Resolved email",
-  test: "Test email",
-};
+import {
+  ALERT_TYPE_LABEL,
+  canSendAlertTestEmail,
+  formatAlertValueThreshold,
+  NOTIFICATION_KIND_LABEL,
+} from "@/pages/alertPresentation";
 
 const NOTIFICATION_KIND_ICON: Record<
   AlertNotificationKind,
   typeof Bell
 > = {
   triggered: AlertTriangle,
-  reminder: Clock,
-  escalated: ShieldAlert,
+  reminder: Mail,
+  escalated: Mail,
   resolved: CheckCircle2,
   test: Mail,
 };
@@ -117,7 +104,14 @@ export function AlertDetailPage() {
           <div className="flex items-center gap-2">{stateBadge}</div>
         </div>
 
-        <InventoryBar alert={alert} />
+        {alert.type === "box_stuck" ? (
+          <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
+            This historical alert type is retired. The application no longer
+            detects or emails stuck-box incidents.
+          </div>
+        ) : (
+          <InventoryBar alert={alert} />
+        )}
 
         <div className="grid gap-3 text-sm sm:grid-cols-2">
           <Field label="Triggered">
@@ -131,11 +125,6 @@ export function AlertDetailPage() {
           <Field label="Acknowledged">
             {alert.acknowledged_at
               ? new Date(alert.acknowledged_at).toLocaleString()
-              : "—"}
-          </Field>
-          <Field label="Escalated">
-            {alert.escalated_at
-              ? new Date(alert.escalated_at).toLocaleString()
               : "—"}
           </Field>
           <Field label="Resolved">
@@ -159,7 +148,7 @@ export function AlertDetailPage() {
               Acknowledge
             </button>
           )}
-          {isAdmin && (
+          {isAdmin && canSendAlertTestEmail(alert.type) && (
             <button
               type="button"
               className="btn-secondary text-sm"
@@ -196,8 +185,9 @@ export function AlertDetailPage() {
         <header className="border-b border-slate-100 px-5 py-3">
           <h2 className="font-semibold">Notification log</h2>
           <p className="text-xs text-slate-500">
-            Every email attempt for this alert. Failed sends are kept so the
-            dispatcher can retry and so the failure reason is auditable.
+            Opening and test email attempts are retained for audit. Older
+            reminder, escalation, and resolution records remain visible as
+            legacy history.
           </p>
         </header>
         {notifications.length === 0 ? (
@@ -224,13 +214,6 @@ function renderStateBadge(alert: Alert) {
       </span>
     );
   }
-  if (alert.escalated_at) {
-    return (
-      <span className="badge bg-rose-100 text-rose-700">
-        <ShieldAlert className="h-3 w-3" /> Escalated
-      </span>
-    );
-  }
   if (alert.acknowledged_at) {
     return (
       <span className="badge bg-slate-200 text-slate-700">Acknowledged</span>
@@ -244,10 +227,7 @@ function renderStateBadge(alert: Alert) {
 }
 
 function formatValueThreshold(alert: Alert): string {
-  if (alert.type === "box_stuck") {
-    return `${alert.value} stuck box(es); threshold ${alert.threshold} day(s)`;
-  }
-  return `${alert.value} / ${alert.threshold}`;
+  return formatAlertValueThreshold(alert.type, alert.value, alert.threshold);
 }
 
 function InventoryBar({ alert }: { alert: Alert }) {
@@ -270,8 +250,6 @@ function InventoryBar({ alert }: { alert: Alert }) {
         return "bg-rose-400";
       case "near_low_inventory":
         return "bg-amber-400";
-      case "box_stuck":
-        return "bg-sky-500";
       default:
         return "bg-slate-400";
     }

@@ -12,6 +12,7 @@ from sqlalchemy import (
     Integer,
     Text,
     func,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -25,21 +26,15 @@ class AlertType(str, enum.Enum):
     # but hasn't crossed it yet. Useful as a heads-up to operators.
     near_capacity = "near_capacity"
     near_low_inventory = "near_low_inventory"
-    # One stuck-box alert per warehouse -- ``value`` is the count of boxes
-    # that have been in 'received' for longer than the configured window;
-    # ``threshold`` is that window in days.
+    # Preserved for historical rows only. New incidents are never evaluated.
     box_stuck = "box_stuck"
 
 
 class AlertNotificationKind(str, enum.Enum):
     """Why an alert email was sent.
 
-    ``triggered`` is the very first email when an alert opens. ``reminder``
-    is what the dispatcher sends when an open alert hasn't been resolved
-    in time. ``escalated`` is sent once when the alert is past the
-    escalation deadline. ``resolved`` is the final close-out. ``test`` is
-    the manual admin-only "send me a sample" send and is excluded from any
-    cadence/idempotency logic.
+    Only ``triggered`` and admin-initiated ``test`` are active. The other
+    values remain readable for historical audit rows.
     """
 
     triggered = "triggered"
@@ -51,6 +46,16 @@ class AlertNotificationKind(str, enum.Enum):
 
 class Alert(Base):
     __tablename__ = "alerts"
+    __table_args__ = (
+        Index(
+            "uq_alerts_open_warehouse_type",
+            "warehouse_id",
+            "type",
+            unique=True,
+            postgresql_where=text("resolved_at IS NULL"),
+            sqlite_where=text("resolved_at IS NULL"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     warehouse_id: Mapped[int] = mapped_column(
@@ -65,14 +70,17 @@ class Alert(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Short-lived durable claim for opening-email dispatch. A timestamp,
+    # rather than a boolean, lets another scheduler recover abandoned work.
+    email_claimed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     acknowledged_by_user_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL")
     )
-    # Stamped once when the alert is escalated past the configured deadline
-    # without resolution. Used by the dispatcher to ensure each alert is only
-    # escalated a single time (the audit table provides the full history).
+    # Compatibility field for historical escalation state; no longer written.
     escalated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 

@@ -38,10 +38,9 @@ _TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "templates" / "email"
 
 
 class EmailKind(str, enum.Enum):
+    """Active runtime alert-email variants."""
+
     triggered = "triggered"
-    reminder = "reminder"
-    resolved = "resolved"
-    escalated = "escalated"
     test = "test"
 
 
@@ -67,39 +66,22 @@ class _Severity:
 # on a CSS framework -- email clients strip <link> and most <style> blocks.
 _SEV_ACTION = _Severity("Action required", "[ACTION]", "#dc2626", "#ffffff", "#dc2626")
 _SEV_HEADS_UP = _Severity("Heads up", "[HEADS UP]", "#f59e0b", "#1e293b", "#f59e0b")
-_SEV_ATTENTION = _Severity("Attention", "[ATTENTION]", "#0284c7", "#ffffff", "#0284c7")
-_SEV_REMINDER = _Severity("Reminder", "[REMINDER]", "#ea580c", "#ffffff", "#ea580c")
-_SEV_ESCALATED = _Severity("Escalated", "[ESCALATED]", "#991b1b", "#ffffff", "#991b1b")
-_SEV_RESOLVED = _Severity("Resolved", "[RESOLVED]", "#16a34a", "#ffffff", "#16a34a")
 _SEV_TEST = _Severity("Test", "[TEST]", "#475569", "#ffffff", "#475569")
 
 
 def _base_severity_for_type(alert_type: AlertType) -> _Severity:
-    """Severity used for the *triggered* mail of each alert type.
-
-    Reminder/escalated/resolved overlay their own severity on top of this;
-    near_/box_stuck variants land in HEADS UP / ATTENTION instead of ACTION
-    so operators can tell a leading indicator from a fire.
-    """
+    """Severity used for opening mail of each active alert type."""
     name = alert_type.value
     if name in ("low_inventory", "max_capacity"):
         return _SEV_ACTION
     if name in ("near_capacity", "near_low_inventory"):
         return _SEV_HEADS_UP
-    if name == "box_stuck":
-        return _SEV_ATTENTION
     return _SEV_ACTION  # defensive default for any future enum value
 
 
 def _severity_for(kind: EmailKind, alert_type: AlertType) -> _Severity:
     if kind == EmailKind.test:
         return _SEV_TEST
-    if kind == EmailKind.resolved:
-        return _SEV_RESOLVED
-    if kind == EmailKind.escalated:
-        return _SEV_ESCALATED
-    if kind == EmailKind.reminder:
-        return _SEV_REMINDER
     return _base_severity_for_type(alert_type)
 
 
@@ -108,12 +90,9 @@ _TYPE_HEADLINE: dict[str, str] = {
     "max_capacity": "{warehouse} is at or over capacity",
     "near_capacity": "{warehouse} is nearing capacity",
     "near_low_inventory": "{warehouse} is approaching minimum inventory",
-    "box_stuck": "Boxes are stuck in {warehouse}",
 }
 
 # A short imperative sentence telling the recipient what is expected of them.
-# Tier 4 alert types are listed even though they are not yet emitted by the
-# evaluator; that way the renderer is ready when those values arrive.
 _TYPE_ACTION: dict[str, str] = {
     "low_inventory": (
         "Receive new boxes to bring this warehouse above the minimum, "
@@ -131,10 +110,6 @@ _TYPE_ACTION: dict[str, str] = {
         "Inventory is close to the minimum. Schedule a top-up before the "
         "low-inventory alert fires."
     ),
-    "box_stuck": (
-        "These boxes have been in 'received' for too long. "
-        "Process or return them, or contact the owner."
-    ),
 }
 
 
@@ -150,8 +125,6 @@ def _summary_line(alert: Alert) -> str:
         return f"{alert.value}/{alert.threshold} ({pct}%)"
     if name == "near_low_inventory":
         return f"{alert.value} (minimum {alert.threshold})"
-    if name == "box_stuck":
-        return f"{alert.value} stuck box(es)"
     return f"{alert.value}/{alert.threshold}"
 
 
@@ -264,6 +237,13 @@ def _get_env() -> Environment:
 # ---------------------------------------------------------------------------
 
 
+def _validate_render_request(kind: EmailKind, alert: Alert) -> None:
+    if not isinstance(kind, EmailKind):
+        raise ValueError("unsupported alert email kind")
+    if alert.type == AlertType.box_stuck:
+        raise ValueError("legacy box_stuck alerts cannot render email")
+
+
 def _build_subject(
     *,
     kind: EmailKind,
@@ -281,8 +261,6 @@ def _build_subject(
         body = f"{warehouse.name} nearing capacity ({summary})"
     elif name == "near_low_inventory":
         body = f"{warehouse.name} near minimum inventory ({summary})"
-    elif name == "box_stuck":
-        body = f"{summary} stuck in {warehouse.name}"
     else:
         body = f"{warehouse.name} alert ({summary})"
     return f"{severity.prefix} {body}"
@@ -364,6 +342,7 @@ def render(
     Pure: no DB, no IO. ``recent_events`` is expected as a list of dicts
     (see :func:`_recent_events_for_warehouse`).
     """
+    _validate_render_request(kind, alert)
     env = _get_env()
     context = _build_context(
         kind=kind,
@@ -393,6 +372,7 @@ def render_for_alert(
     Returns ``None`` if the alert's warehouse no longer exists -- callers
     should treat that as "skip this email"; the alert row itself remains.
     """
+    _validate_render_request(kind, alert)
     warehouse = db.get(Warehouse, alert.warehouse_id)
     if warehouse is None:
         logger.warning(

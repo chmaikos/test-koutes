@@ -1,54 +1,16 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { AlertTriangle, CheckCircle2, Clock } from "lucide-react";
+import { CheckCircle2 } from "lucide-react";
 import {
   useAcknowledgeAlert,
   useAlerts,
   useWarehouses,
 } from "@/api/hooks";
-import type { AlertType } from "@/api/types";
 import { useHasRole } from "@/components/RoleGate";
-
-interface TypeStyle {
-  label: string;
-  icon: typeof AlertTriangle;
-  iconClass: string;
-}
-
-const ALERT_TYPE_STYLES: Record<AlertType, TypeStyle> = {
-  low_inventory: {
-    label: "Low inventory",
-    icon: AlertTriangle,
-    iconClass: "text-rose-500",
-  },
-  max_capacity: {
-    label: "Max capacity",
-    icon: AlertTriangle,
-    iconClass: "text-rose-500",
-  },
-  near_capacity: {
-    label: "Near capacity",
-    icon: AlertTriangle,
-    iconClass: "text-amber-500",
-  },
-  near_low_inventory: {
-    label: "Near low inventory",
-    icon: AlertTriangle,
-    iconClass: "text-amber-500",
-  },
-  box_stuck: {
-    label: "Boxes stuck",
-    icon: Clock,
-    iconClass: "text-sky-600",
-  },
-};
-
-function formatValueThreshold(type: AlertType, value: number, threshold: number): string {
-  if (type === "box_stuck") {
-    return `${value} stuck (>${threshold}d)`;
-  }
-  return `${value} / ${threshold}`;
-}
+import {
+  ALERT_TYPE_STYLES,
+  formatAlertValueThreshold,
+} from "@/pages/alertPresentation";
 
 export function AlertsPage() {
   const [onlyOpen, setOnlyOpen] = useState(true);
@@ -63,7 +25,7 @@ export function AlertsPage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Alerts</h1>
           <p className="text-sm text-slate-500">
-            Inventory thresholds, leading indicators, and stuck-box checks.
+            Inventory thresholds and leading indicators.
           </p>
         </div>
         <label className="inline-flex items-center gap-2 text-sm">
@@ -126,7 +88,7 @@ export function AlertsPage() {
                       </span>
                     </td>
                     <td className="px-4 py-2.5">
-                      {formatValueThreshold(a.type, a.value, a.threshold)}
+                      {formatAlertValueThreshold(a.type, a.value, a.threshold)}
                     </td>
                     <td className="px-4 py-2.5 text-slate-500">
                       {new Date(a.triggered_at).toLocaleString()}
@@ -186,7 +148,7 @@ export function AlertsPage() {
                 <dl className="mt-2 grid grid-cols-[6.5rem_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
                   <dt className="text-slate-500">Value / limit</dt>
                   <dd className="text-slate-800">
-                    {formatValueThreshold(a.type, a.value, a.threshold)}
+                    {formatAlertValueThreshold(a.type, a.value, a.threshold)}
                   </dd>
                   <dt className="text-slate-500">Triggered</dt>
                   <dd className="text-slate-500">
@@ -223,9 +185,6 @@ function AlertStateBadge({
         <CheckCircle2 className="h-3 w-3" /> Resolved
       </span>
     );
-  }
-  if (alert.escalated_at) {
-    return <span className="badge bg-rose-100 text-rose-700">Escalated</span>;
   }
   if (alert.acknowledged_at) {
     return (

@@ -7,7 +7,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 
 from app.deps import CurrentUser, DbSession, require_admin, require_operator
-from app.models.alerts import Alert, AlertNotification, AlertNotificationKind
+from app.models.alerts import (
+    Alert,
+    AlertNotification,
+    AlertNotificationKind,
+    AlertType,
+)
 from app.models.warehouses import Warehouse
 from app.schemas.alerts import (
     AlertDetailOut,
@@ -19,10 +24,7 @@ from app.schemas.alerts import (
 )
 from app.services.acl import apply_warehouse_filter, can_access
 from app.services.alert_email import EmailKind, render_for_alert
-from app.services.alert_recipients import (
-    escalation_recipients,
-    primary_recipients,
-)
+from app.services.alert_recipients import primary_recipients
 from app.services.alerts import dispatch_notification
 
 router = APIRouter(prefix="/alerts", tags=["alerts"])
@@ -50,9 +52,8 @@ def list_recipients(
 ) -> AlertRecipientsOut:
     """Per-warehouse preview of who would be emailed if an alert opened now.
 
-    Admin-only because it surfaces user emails. The escalation list is
-    rendered alongside the primary list so admins can verify their own
-    opt-out doesn't leave the safety net empty.
+    Admin-only because it surfaces user emails. The compatibility
+    ``escalation`` field is always empty under the opening-only policy.
     """
     warehouses = db.scalars(
         select(Warehouse)
@@ -69,7 +70,7 @@ def list_recipients(
     ]
     return AlertRecipientsOut(
         warehouses=rows,
-        escalation=escalation_recipients(db),
+        escalation=[],
     )
 
 
@@ -122,12 +123,17 @@ def send_test_email(
     """Re-render the current alert email and send it to the caller.
 
     Admin-only and recorded as ``kind=test`` so it doesn't perturb the
-    reminder/escalation cadence. Useful for sanity-checking that Graph
-    is configured and that the rendered HTML looks right.
+    opening retry state. Useful for sanity-checking that Graph is configured
+    and that the rendered HTML looks right.
     """
     alert = db.get(Alert, alert_id)
     if alert is None:
         raise HTTPException(status_code=404, detail="alert not found")
+    if alert.type == AlertType.box_stuck:
+        raise HTTPException(
+            status_code=400,
+            detail="legacy box_stuck alerts cannot send email",
+        )
     # Even admins can use the test endpoint only against alerts they
     # could otherwise see -- in the multi-tenant future this protects us
     # from leaking warehouse names through the rendered subject.

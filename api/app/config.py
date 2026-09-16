@@ -54,12 +54,6 @@ class Settings(BaseSettings):
     # the recipient's network -- the CTA button is hidden when unset.
     public_base_url: str = Field(default="", alias="PUBLIC_BASE_URL")
 
-    # Alert lifecycle cadence -- how long an alert can stay open before we
-    # nag the recipients (reminder) and before we escalate to admins. Set
-    # either to 0 to disable that stage entirely.
-    alert_reminder_hours: int = Field(default=24, alias="ALERT_REMINDER_HOURS")
-    alert_escalation_hours: int = Field(default=48, alias="ALERT_ESCALATION_HOURS")
-
     # Leading-indicator thresholds for the "near_*" alert types. The
     # near_capacity alert fires when inventory >= ceil(max * pct/100) but
     # below the hard cap; near_low_inventory fires when inventory is within
@@ -68,13 +62,6 @@ class Settings(BaseSettings):
     near_low_inventory_buffer: int = Field(
         default=10, alias="NEAR_LOW_INVENTORY_BUFFER"
     )
-    # A box that has been in 'received' state for at least this many days
-    # is considered stuck; we open one box_stuck alert per warehouse with
-    # ``value`` = the number of stuck boxes. 0 disables this trigger.
-    box_stuck_threshold_days: int = Field(
-        default=30, alias="BOX_STUCK_THRESHOLD_DAYS"
-    )
-
     # Local-time configuration used by the productivity feature.
     # ``app_timezone`` defines the wall-clock day boundary for "daily"
     # productivity numbers; an unknown zone silently falls back to UTC

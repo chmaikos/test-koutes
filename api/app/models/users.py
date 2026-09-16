@@ -79,9 +79,8 @@ class User(Base):
     must_change_credentials: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False
     )
-    # Per-user opt-out: when False, this user is excluded from every alert
-    # email recipient list (primary, escalation, and test). Defaults to True
-    # so the existing "everyone with ACL gets emails" behaviour is preserved.
+    # Per-user opt-out from automatic alert opening emails. Manual test mail
+    # is explicitly requested by the signed-in admin and remains separate.
     email_alerts_enabled: Mapped[bool] = mapped_column(
         Boolean, default=True, nullable=False
     )

@@ -1,19 +1,7 @@
-"""Resolve the email recipient list for an alert notification.
+"""Resolve primary recipients for an alert opening email.
 
-Two routing strategies live here:
-
-* :func:`primary_recipients` builds the list for ``triggered`` and
-  ``reminder`` mails. Anyone with an explicit per-warehouse ACL row plus
-  every active admin (admins always see every warehouse) is a candidate;
-  users with ``email_alerts_enabled = False`` opt themselves out.
-* :func:`escalation_recipients` builds the list for ``escalated`` mails:
-  active admins only. The intent is that an unresolved alert past the
-  escalation deadline becomes a leadership problem, regardless of the
-  warehouse ACL.
-
-Both functions fall back to ``ALERT_EMAIL_TO`` when the resolved list comes
-back empty -- keeps a freshly bootstrapped tenant (no users, no ACL) from
-silently dropping alerts on the floor.
+Users with warehouse access and active admins are eligible, subject to
+``email_alerts_enabled``. A static fallback covers an empty tenant.
 """
 from __future__ import annotations
 
@@ -81,21 +69,6 @@ def primary_recipients(db: Session, warehouse_id: int) -> list[str]:
     ).all()
 
     addresses = _normalise([u.email for u in acl_users] + [u.email for u in admins])
-    if not addresses:
-        return _fallback()
-    return addresses
-
-
-def escalation_recipients(db: Session) -> list[str]:
-    """Active admins only -- used for the one-shot escalated mail."""
-    admins = db.scalars(
-        select(User).where(
-            User.role == UserRole.admin,
-            User.is_active.is_(True),
-            User.email_alerts_enabled.is_(True),
-        )
-    ).all()
-    addresses = _normalise([u.email for u in admins])
     if not addresses:
         return _fallback()
     return addresses
