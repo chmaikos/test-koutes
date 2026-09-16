@@ -27,6 +27,10 @@ import {
 } from "@/api/hooks";
 import type { Employee, Role, User, Warehouse } from "@/api/types";
 import { ImportEmployeesDialog } from "@/components/ImportEmployeesDialog";
+import {
+  USER_CONFIGURATION_COLUMNS,
+  type UserConfigurationColumnKey,
+} from "@/pages/userConfiguration";
 import { warehouseArchiveError } from "@/pages/warehouseArchive";
 
 const EMPLOYEES_PAGE_SIZE = 25;
@@ -1750,113 +1754,27 @@ function UsersSection() {
         <table className="w-full text-sm">
           <thead className="bg-slate-50 text-xs uppercase tracking-wider text-slate-500">
             <tr>
-              <th className="px-4 py-2.5 text-left">User</th>
-              <th className="px-4 py-2.5 text-left">Role</th>
-              <th className="px-4 py-2.5 text-left">Override</th>
-              <th className="px-4 py-2.5 text-left">Active</th>
-              <th className="px-4 py-2.5 text-left">Email alerts</th>
-              <th className="px-4 py-2.5 text-left">Request email</th>
-              <th className="px-4 py-2.5 text-left">Warehouses</th>
-              <th className="px-4 py-2.5 text-left">Last login</th>
+              {USER_CONFIGURATION_COLUMNS.map((column) => (
+                <th key={column.key} className="px-4 py-2.5 text-left">
+                  {column.label}
+                </th>
+              ))}
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
             {data?.map((u) => (
               <tr key={u.id} className="hover:bg-slate-50">
-                <td className="px-4 py-2.5">
-                  <div className="font-medium">
-                    {u.display_name || u.email}
-                  </div>
-                  <div className="text-xs text-slate-500">{u.email}</div>
-                </td>
-                <td className="px-4 py-2.5">
-                  <input
-                    type="checkbox"
-                    checked={u.email_requests_enabled}
-                    onChange={(e) =>
-                      update.mutate({
-                        id: u.id,
-                        patch: { email_requests_enabled: e.target.checked },
-                      })
-                    }
-                    title="Receives request creation, approval, and completion email"
-                  />
-                </td>
-                <td className="px-4 py-2.5">
-                  <select
-                    className="input inline-block w-auto"
-                    value={u.role}
-                    onChange={(e) =>
-                      update.mutate({
-                        id: u.id,
-                        patch: {
-                          role: e.target.value as Role,
-                          role_override: true,
-                        },
-                      })
-                    }
-                  >
-                    <option value="viewer">Viewer</option>
-                    <option value="warehouse_mover">Warehouse mover</option>
-                    <option value="operator">Operator</option>
-                    <option value="admin">Admin</option>
-                  </select>
-                </td>
-                <td className="px-4 py-2.5">
-                  <input
-                    type="checkbox"
-                    checked={u.role_override}
-                    onChange={(e) =>
-                      update.mutate({
-                        id: u.id,
-                        patch: { role_override: e.target.checked },
-                      })
-                    }
-                  />
-                </td>
-                <td className="px-4 py-2.5">
-                  <input
-                    type="checkbox"
-                    checked={u.is_active}
-                    onChange={(e) =>
-                      update.mutate({
-                        id: u.id,
-                        patch: { is_active: e.target.checked },
-                      })
-                    }
-                  />
-                </td>
-                <td className="px-4 py-2.5">
-                  <input
-                    type="checkbox"
-                    checked={u.email_alerts_enabled}
-                    onChange={(e) =>
-                      update.mutate({
-                        id: u.id,
-                        patch: { email_alerts_enabled: e.target.checked },
-                      })
-                    }
-                    title={
-                      u.email_alerts_enabled
-                        ? "Receives alert emails for accessible warehouses"
-                        : "Opted out of alert emails"
-                    }
-                  />
-                </td>
-                <td className="px-4 py-2.5">
-                  <WarehouseAccessCell
+                {USER_CONFIGURATION_COLUMNS.map((column) => (
+                  <DesktopUserCell
+                    key={column.key}
+                    column={column.key}
                     user={u}
                     warehouses={warehouses ?? []}
-                    onChange={(warehouse_ids) =>
-                      update.mutate({ id: u.id, patch: { warehouse_ids } })
+                    onPatch={(patch) =>
+                      update.mutate({ id: u.id, patch })
                     }
                   />
-                </td>
-                <td className="px-4 py-2.5 text-slate-500">
-                  {u.last_login_at
-                    ? new Date(u.last_login_at).toLocaleString()
-                    : "—"}
-                </td>
+                ))}
               </tr>
             ))}
           </tbody>
@@ -1876,6 +1794,135 @@ function UsersSection() {
   );
 }
 
+type UserPatch = {
+  role?: Role;
+  role_override?: boolean;
+  is_active?: boolean;
+  email_alerts_enabled?: boolean;
+  email_requests_enabled?: boolean;
+  warehouse_ids?: number[];
+};
+
+function DesktopUserCell({
+  column,
+  user,
+  warehouses,
+  onPatch,
+}: {
+  column: UserConfigurationColumnKey;
+  user: User;
+  warehouses: Warehouse[];
+  onPatch: (patch: UserPatch) => void;
+}) {
+  const userLabel = user.display_name || user.email;
+  switch (column) {
+    case "identity":
+      return (
+        <td className="px-4 py-2.5">
+          <div className="font-medium">{userLabel}</div>
+          <div className="text-xs text-slate-500">{user.email}</div>
+        </td>
+      );
+    case "role":
+      return (
+        <td className="px-4 py-2.5">
+          <select
+            className="input inline-block w-auto"
+            value={user.role}
+            aria-label={`Role for ${userLabel}`}
+            onChange={(event) =>
+              onPatch({
+                role: event.target.value as Role,
+                role_override: true,
+              })
+            }
+          >
+            <option value="viewer">Viewer</option>
+            <option value="warehouse_mover">Warehouse mover</option>
+            <option value="operator">Operator</option>
+            <option value="admin">Admin</option>
+          </select>
+        </td>
+      );
+    case "override":
+      return (
+        <td className="px-4 py-2.5">
+          <input
+            type="checkbox"
+            checked={user.role_override}
+            aria-label={`Override Entra role for ${userLabel}`}
+            title="Keep this role instead of syncing it from Entra"
+            onChange={(event) =>
+              onPatch({ role_override: event.target.checked })
+            }
+          />
+        </td>
+      );
+    case "active":
+      return (
+        <td className="px-4 py-2.5">
+          <input
+            type="checkbox"
+            checked={user.is_active}
+            aria-label={`Active account for ${userLabel}`}
+            title={user.is_active ? "User can sign in" : "User is inactive"}
+            onChange={(event) => onPatch({ is_active: event.target.checked })}
+          />
+        </td>
+      );
+    case "alertEmail":
+      return (
+        <td className="px-4 py-2.5">
+          <input
+            type="checkbox"
+            checked={user.email_alerts_enabled}
+            aria-label={`Alert emails for ${userLabel}`}
+            title={
+              user.email_alerts_enabled
+                ? "Receives alert emails for accessible warehouses"
+                : "Opted out of alert emails"
+            }
+            onChange={(event) =>
+              onPatch({ email_alerts_enabled: event.target.checked })
+            }
+          />
+        </td>
+      );
+    case "requestEmail":
+      return (
+        <td className="px-4 py-2.5">
+          <input
+            type="checkbox"
+            checked={user.email_requests_enabled}
+            aria-label={`Request milestone emails for ${userLabel}`}
+            title="Receives request creation, approval, and completion email"
+            onChange={(event) =>
+              onPatch({ email_requests_enabled: event.target.checked })
+            }
+          />
+        </td>
+      );
+    case "warehouses":
+      return (
+        <td className="px-4 py-2.5">
+          <WarehouseAccessCell
+            user={user}
+            warehouses={warehouses}
+            onChange={(warehouse_ids) => onPatch({ warehouse_ids })}
+          />
+        </td>
+      );
+    case "lastLogin":
+      return (
+        <td className="px-4 py-2.5 text-slate-500">
+          {user.last_login_at
+            ? new Date(user.last_login_at).toLocaleString()
+            : "—"}
+        </td>
+      );
+  }
+}
+
 function UserCard({
   user,
   warehouses,
@@ -1883,14 +1930,7 @@ function UserCard({
 }: {
   user: User;
   warehouses: Warehouse[];
-  onPatch: (patch: {
-    role?: Role;
-    role_override?: boolean;
-    is_active?: boolean;
-    email_alerts_enabled?: boolean;
-    email_requests_enabled?: boolean;
-    warehouse_ids?: number[];
-  }) => void;
+  onPatch: (patch: UserPatch) => void;
 }) {
   return (
     <div className="space-y-3 px-4 py-3">
@@ -1905,6 +1945,7 @@ function UserCard({
         <select
           className="input"
           value={user.role}
+          aria-label={`Role for ${user.display_name || user.email}`}
           onChange={(e) =>
             onPatch({ role: e.target.value as Role, role_override: true })
           }
@@ -1920,6 +1961,10 @@ function UserCard({
           <input
             type="checkbox"
             checked={user.role_override}
+            aria-label={`Override Entra role for ${
+              user.display_name || user.email
+            }`}
+            title="Keep this role instead of syncing it from Entra"
             onChange={(e) => onPatch({ role_override: e.target.checked })}
           />
           <span>Override Entra role</span>
@@ -1928,6 +1973,8 @@ function UserCard({
           <input
             type="checkbox"
             checked={user.is_active}
+            aria-label={`Active account for ${user.display_name || user.email}`}
+            title={user.is_active ? "User can sign in" : "User is inactive"}
             onChange={(e) => onPatch({ is_active: e.target.checked })}
           />
           <span>Active</span>
@@ -1936,6 +1983,14 @@ function UserCard({
           <input
             type="checkbox"
             checked={user.email_alerts_enabled}
+            aria-label={`Alert emails for ${
+              user.display_name || user.email
+            }`}
+            title={
+              user.email_alerts_enabled
+                ? "Receives alert emails for accessible warehouses"
+                : "Opted out of alert emails"
+            }
             onChange={(e) =>
               onPatch({ email_alerts_enabled: e.target.checked })
             }
@@ -1946,6 +2001,10 @@ function UserCard({
           <input
             type="checkbox"
             checked={user.email_requests_enabled}
+            aria-label={`Request milestone emails for ${
+              user.display_name || user.email
+            }`}
+            title="Receives request creation, approval, and completion email"
             onChange={(e) =>
               onPatch({ email_requests_enabled: e.target.checked })
             }
@@ -2075,6 +2134,10 @@ function WarehouseAccessCell({
               <input
                 type="checkbox"
                 checked={checked}
+                aria-label={`${checked ? "Remove" : "Grant"} ${w.name} access for ${
+                  user.display_name || user.email
+                }`}
+                title={`${checked ? "Remove" : "Grant"} access to ${w.name}`}
                 onChange={(e) => {
                   const next = new Set(granted);
                   if (e.target.checked) {
