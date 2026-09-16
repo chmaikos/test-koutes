@@ -67,6 +67,9 @@ import {
 import { requestWarehouseRoute } from "@/pages/requestWarehouses";
 import {
   EMPTY_INBOUND_COMPLETION_REVIEW,
+  type MappedInboundAcceptance,
+  acceptsMappedLot,
+  acceptsMappedPallet,
   canSubmitInboundCompletion,
   currentInboundCompletionPreview,
   inboundBlockedMessage,
@@ -77,6 +80,7 @@ import {
   inboundTargetPalletLabel,
   invalidateInboundCompletion,
   isStaleInboundImpactConflict,
+  mappedInboundAcceptance,
   reviewedInboundCompletion,
   setInboundRelocationAcceptance,
 } from "@/pages/inboundCompletion";
@@ -1628,6 +1632,8 @@ function CompletionDialog({
   const [showExcelMapper, setShowExcelMapper] = useState(false);
   const [rowLots, setRowLots] = useState<Record<number, LotSelection | null>>({});
   const [rowPallets, setRowPallets] = useState<Record<number, PalletSelection | null>>({});
+  const [mappedAcceptance, setMappedAcceptance] =
+    useState<MappedInboundAcceptance>(() => mappedInboundAcceptance([]));
   const [discrepancyReason, setDiscrepancyReason] = useState("");
   const [lineDiscrepancies, setLineDiscrepancies] = useState<
     RequestDiscrepancyInput[]
@@ -1651,15 +1657,17 @@ function CompletionDialog({
     !inbound ||
     rows.every(
       (row, index) =>
-        !!rowLots[index] &&
-        rowLots[index]?.name.trim().toLowerCase() ===
-          row.lot.trim().replace(/\s+/g, " ").toLowerCase(),
+        acceptsMappedLot(row, mappedAcceptance) ||
+        (!!rowLots[index] &&
+          rowLots[index]?.name.trim().toLowerCase() ===
+            row.lot.trim().replace(/\s+/g, " ").toLowerCase()),
     );
   const allPalletsConfirmed =
     !inbound ||
     rows.every(
       (row, index) =>
         !row.pallet_number?.trim() ||
+        acceptsMappedPallet(row, mappedAcceptance) ||
         (!!rowPallets[index] &&
           normalizePalletNumber(rowPallets[index]?.pallet_number ?? "") ===
             normalizePalletNumber(row.pallet_number)),
@@ -1800,6 +1808,7 @@ function CompletionDialog({
                   quantity={request.quantity}
                   onApply={(mappedRows) => {
                     setRows(mappedRows);
+                    setMappedAcceptance(mappedInboundAcceptance(mappedRows));
                     setRowLots({});
                     setRowPallets({});
                     setShowExcelMapper(false);
@@ -1807,6 +1816,14 @@ function CompletionDialog({
                 />
               )}
             </div>
+            {mappedAcceptance.lots.size > 0 && (
+              <p className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
+                Lot values and any mapped pallet values from the spreadsheet
+                are accepted automatically. Review inventory impact to
+                validate existing identities and any new records before
+                completion.
+              </p>
+            )}
             <div className="space-y-3">
               {rows.map((row, index) => (
                 <fieldset
@@ -1847,6 +1864,10 @@ function CompletionDialog({
                     <LotPicker
                       value={rowLots[index] ?? null}
                       nameValue={row.lot}
+                      acceptedNameOnly={acceptsMappedLot(
+                        row,
+                        mappedAcceptance,
+                      )}
                       onNameChange={(name) => updateRow(index, "lot", name)}
                       onChange={(selection) =>
                         setRowLots((current) => ({
@@ -1863,6 +1884,10 @@ function CompletionDialog({
                     <PalletPicker
                       value={rowPallets[index] ?? null}
                       numberValue={row.pallet_number}
+                      acceptedNumberOnly={acceptsMappedPallet(
+                        row,
+                        mappedAcceptance,
+                      )}
                       onNumberChange={(number) =>
                         updateRow(index, "pallet_number", number)
                       }
@@ -1919,16 +1944,16 @@ function CompletionDialog({
             />
             {!allLotsConfirmed && (
               <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
-                Select an existing lot for every row, or use the explicit
-                “Create new lot” confirmation in the lot picker. Spreadsheet
-                names are preserved until you confirm them.
+                Select or create each manually entered or edited lot.
+                Unchanged spreadsheet-mapped lot values are accepted
+                automatically.
               </p>
             )}
             {!allPalletsConfirmed && (
               <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
-                Select or create each entered pallet, or clear the field to
-                leave that box Unassigned. Pallets may contain boxes from
-                multiple warehouses.
+                Select or create each manually entered or edited pallet, or
+                clear the field to leave that box Unassigned. Unchanged
+                spreadsheet-mapped pallet values are accepted automatically.
               </p>
             )}
             {groupedRows.error && (

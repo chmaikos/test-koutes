@@ -27,6 +27,7 @@ export function PalletPicker({
   label = "Pallet",
   numberValue,
   onNumberChange,
+  acceptedNumberOnly = false,
 }: {
   value: PalletSelection | null;
   onChange: (value: PalletSelection | null) => void;
@@ -38,6 +39,7 @@ export function PalletPicker({
   label?: string;
   numberValue?: string | null;
   onNumberChange?: (value: string) => void;
+  acceptedNumberOnly?: boolean;
 }) {
   const listId = useId();
   const [query, setQuery] = useState(
@@ -76,14 +78,17 @@ export function PalletPicker({
   useEffect(() => {
     if (previousScope.current === scope) return;
     previousScope.current = scope;
-    setQuery("");
-    setDebounced("");
+    const preservedMappedNumber =
+      acceptedNumberOnly && numberValue?.trim() ? numberValue : "";
+    setQuery(preservedMappedNumber);
+    setDebounced(preservedMappedNumber);
     setOpen(false);
     setError(null);
     onChange(null);
-    onNumberChange?.("");
+    if (!preservedMappedNumber) onNumberChange?.("");
     // Pallet identity is scoped by lot. A receipt warehouse change must not
-    // clear a valid pallet selection.
+    // clear a valid pallet selection, and accepting a mapped lot must not
+    // clear its spreadsheet-mapped pallet number.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scope]);
 
@@ -149,7 +154,8 @@ export function PalletPicker({
     }
   }
 
-  const unavailable = disabled || !lotId;
+  const hasUnscopedNumber = !lotId && !!numberValue?.trim();
+  const unavailable = disabled || (!lotId && !hasUnscopedNumber);
   return (
     <div className="relative">
       <label className="block">
@@ -165,19 +171,21 @@ export function PalletPicker({
             aria-controls={listId}
             autoComplete="off"
             placeholder={
-              !lotId
+              !lotId && !hasUnscopedNumber
                 ? "Choose lot first"
                 : required
                   ? "Search or enter pallet number"
                   : "Optional — leave blank if unassigned"
             }
             value={query}
-            onFocus={() => setOpen(true)}
+            onFocus={() => {
+              if (lotId) setOpen(true);
+            }}
             onChange={(event) => {
               const next = event.target.value;
               setQuery(next);
               onNumberChange?.(next);
-              setOpen(true);
+              setOpen(!!lotId);
               setError(null);
               if (
                 value &&
@@ -188,8 +196,15 @@ export function PalletPicker({
               }
             }}
           />
-          {value && (
-            <Check className="pointer-events-none absolute right-2 top-2.5 h-4 w-4 text-emerald-600" />
+          {(value || acceptedNumberOnly) && (
+            <Check
+              className="pointer-events-none absolute right-2 top-2.5 h-4 w-4 text-emerald-600"
+              aria-label={
+                value
+                  ? `Selected pallet ${value.pallet_number}`
+                  : `Accepted mapped pallet ${query}`
+              }
+            />
           )}
         </div>
       </label>
@@ -253,7 +268,11 @@ export function PalletPicker({
         </div>
       )}
       <p className="mt-1 text-xs text-slate-500">
-        {!required && "Leave blank to receive this box as Unassigned. "}
+        {acceptedNumberOnly && !value
+          ? "Accepted from the spreadsheet; inventory review will resolve it. "
+          : !required
+            ? "Leave blank to receive this box as Unassigned. "
+            : ""}
         Pallets span warehouses through their boxes. The same pallet can be
         selected for receipts at different warehouses.
       </p>

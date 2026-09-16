@@ -23,6 +23,7 @@ export function LotPicker({
   disabled = false,
   nameValue,
   onNameChange,
+  acceptedNameOnly = false,
 }: {
   value: LotSelection | null;
   onChange: (selection: LotSelection | null) => void;
@@ -32,6 +33,7 @@ export function LotPicker({
   disabled?: boolean;
   nameValue?: string;
   onNameChange?: (name: string) => void;
+  acceptedNameOnly?: boolean;
 }) {
   const listId = useId();
   const [query, setQuery] = useState(nameValue ?? value?.name ?? "");
@@ -146,10 +148,14 @@ export function LotPicker({
               }
             }}
           />
-          {value && (
+          {(value || acceptedNameOnly) && (
             <Check
               className="pointer-events-none absolute right-2 top-2.5 h-4 w-4 text-emerald-600"
-              aria-label={`Selected lot ${value.name}`}
+              aria-label={
+                value
+                  ? `Selected lot ${value.name}`
+                  : `Accepted mapped lot ${query}`
+              }
             />
           )}
         </div>

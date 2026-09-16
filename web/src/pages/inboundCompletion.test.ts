@@ -6,6 +6,8 @@ import type {
   InboundRequestItemInput,
 } from "@/api/types";
 import {
+  acceptsMappedLot,
+  acceptsMappedPallet,
   canSubmitInboundCompletion,
   currentInboundCompletionPreview,
   inboundCompletionCounts,
@@ -15,6 +17,7 @@ import {
   inboundTargetPalletLabel,
   invalidateInboundCompletion,
   isStaleInboundImpactConflict,
+  mappedInboundAcceptance,
   reviewedInboundCompletion,
   setInboundRelocationAcceptance,
 } from "@/pages/inboundCompletion";
@@ -128,6 +131,60 @@ describe("inbound completion canonical payload", () => {
         },
       ],
     });
+  });
+});
+
+describe("spreadsheet mapping acceptance", () => {
+  it("wires mapper output into lot and pallet acceptance", () => {
+    expect(requestDetailSource).toContain(
+      "setMappedAcceptance(mappedInboundAcceptance(mappedRows))",
+    );
+    expect(requestDetailSource).toContain(
+      "acceptedNameOnly={acceptsMappedLot(",
+    );
+    expect(requestDetailSource).toContain(
+      "acceptedNumberOnly={acceptsMappedPallet(",
+    );
+  });
+
+  it("automatically accepts mapped lot and pallet identities", () => {
+    const acceptance = mappedInboundAcceptance(rows);
+
+    expect(
+      acceptsMappedLot(
+        { lot: "LOT   A", box_number: "3", pallet_number: "target" },
+        acceptance,
+      ),
+    ).toBe(true);
+    expect(
+      acceptsMappedPallet(
+        { lot: "lot a", box_number: "3", pallet_number: " TARGET " },
+        acceptance,
+      ),
+    ).toBe(true);
+  });
+
+  it("requires confirmation after a mapped identity is edited", () => {
+    const acceptance = mappedInboundAcceptance(rows);
+
+    expect(
+      acceptsMappedLot(
+        { lot: "Lot B", box_number: "3", pallet_number: "target" },
+        acceptance,
+      ),
+    ).toBe(false);
+    expect(
+      acceptsMappedPallet(
+        { lot: "Lot A", box_number: "3", pallet_number: "OTHER" },
+        acceptance,
+      ),
+    ).toBe(false);
+    expect(
+      acceptsMappedPallet(
+        { lot: "Lot A", box_number: "3", pallet_number: null },
+        acceptance,
+      ),
+    ).toBe(false);
   });
 });
 

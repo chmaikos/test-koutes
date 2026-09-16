@@ -4,6 +4,8 @@ import type {
   InboundRequestItemInput,
   ReviewedInboundCompletionFields,
 } from "@/api/types";
+import { normalizeLotName } from "@/pages/lots";
+import { normalizePalletNumber } from "@/pages/pallets";
 import { tryGroupInboundItems } from "@/pages/xlsxMapping";
 
 interface LotConfirmation {
@@ -14,6 +16,47 @@ interface LotConfirmation {
 interface PalletConfirmation {
   id: number;
   pallet_number: string;
+}
+
+export interface MappedInboundAcceptance {
+  lots: ReadonlySet<string>;
+  pallets: ReadonlySet<string>;
+}
+
+export function mappedInboundAcceptance(
+  rows: InboundRequestItemInput[],
+): MappedInboundAcceptance {
+  return {
+    lots: new Set(
+      rows.flatMap((row) => {
+        const lot = normalizeLotName(row.lot);
+        return lot ? [lot] : [];
+      }),
+    ),
+    pallets: new Set(
+      rows.flatMap((row) => {
+        const lot = normalizeLotName(row.lot);
+        const pallet = normalizePalletNumber(row.pallet_number ?? "");
+        return lot && pallet ? [`${lot}\u0000${pallet}`] : [];
+      }),
+    ),
+  };
+}
+
+export function acceptsMappedLot(
+  row: InboundRequestItemInput,
+  acceptance: MappedInboundAcceptance,
+): boolean {
+  return acceptance.lots.has(normalizeLotName(row.lot));
+}
+
+export function acceptsMappedPallet(
+  row: InboundRequestItemInput,
+  acceptance: MappedInboundAcceptance,
+): boolean {
+  const lot = normalizeLotName(row.lot);
+  const pallet = normalizePalletNumber(row.pallet_number ?? "");
+  return !!lot && !!pallet && acceptance.pallets.has(`${lot}\u0000${pallet}`);
 }
 
 export interface InboundCompletionReviewState {
