@@ -161,6 +161,19 @@ def _candidate_detail(candidate: LotMergeCandidate) -> dict[str, object]:
         pallet_actions=candidate.pallet_actions,
         pallet_action_count=candidate.pallet_action_count,
         pallet_actions_truncated=candidate.pallet_actions_truncated,
+        file_reference_collisions=candidate.file_reference_collisions,
+        file_reference_collision_count=(
+            candidate.file_reference_collision_count
+        ),
+        file_reference_collisions_truncated=(
+            candidate.file_reference_collisions_truncated
+        ),
+        active_file_reference_collision_count=(
+            candidate.active_file_reference_collision_count
+        ),
+        archived_file_reference_collision_count=(
+            candidate.archived_file_reference_collision_count
+        ),
         merge_allowed_with_archived_overwrite=(
             candidate.merge_allowed_with_archived_overwrite
         ),
@@ -445,6 +458,9 @@ async def force_purge(
         skipped_object_count=result.skipped_object_count,
         object_cleanup_status=cleanup_status,
         object_cleanup_failure_count=cleanup_failure_count,
+        file_count=result.file_count,
+        file_event_count=result.file_event_count,
+        detached_file_snapshot_count=result.detached_file_snapshot_count,
     )
 
 
@@ -563,6 +579,9 @@ async def purge(
         object_key_count=result.object_key_count,
         object_cleanup_status=cleanup_status,
         object_cleanup_failures=cleanup_failures,
+        file_count=result.file_count,
+        file_event_count=result.file_event_count,
+        detached_file_snapshot_count=result.detached_file_snapshot_count,
     )
 
 
@@ -852,6 +871,11 @@ async def merge(
         moved_pallet_count=result.moved_pallet_count,
         absorbed_pallet_ids=result.absorbed_pallet_ids,
         moved_pallet_ids=result.moved_pallet_ids,
+        moved_file_count=result.moved_file_count,
+        overwritten_archived_file_count=(
+            result.overwritten_archived_file_count
+        ),
+        deleted_file_event_count=result.deleted_file_event_count,
     )
 
 

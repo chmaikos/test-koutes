@@ -442,12 +442,15 @@ def test_all_operational_inbound_foreign_keys_are_explicitly_accounted_for():
     }
     assert inbound["boxes"] == {
         ("box_events", "box_id", "CASCADE"),
+        ("box_files", "box_id", "RESTRICT"),
+        ("box_files", "lot_id", "RESTRICT"),
         ("box_request_items", "box_id", "RESTRICT"),
         ("box_request_discrepancies", "box_id", "SET NULL"),
     }
     assert inbound["lots"] == {
         ("lots", "merged_into_lot_id", "RESTRICT"),
         ("boxes", "lot_id", "RESTRICT"),
+        ("box_files", "lot_id", "RESTRICT"),
         ("lot_events", "lot_id", "RESTRICT"),
         ("box_request_items", "lot_id", "RESTRICT"),
         ("pallets", "lot_id", "RESTRICT"),

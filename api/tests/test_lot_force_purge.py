@@ -11,6 +11,9 @@ from app.events import bus
 from app.main import app
 from app.models import (
     Box,
+    BoxFile,
+    BoxFileEvent,
+    BoxFileEventType,
     BoxRequest,
     BoxRequestAttachment,
     BoxRequestComment,
@@ -25,6 +28,8 @@ from app.models import (
     BoxRequestException,
     BoxRequestExceptionKind,
     BoxRequestItem,
+    BoxRequestItemFileSnapshot,
+    BoxRequestItemFileSnapshotKind,
     BoxRequestOrigin,
     BoxRequestStatus,
     InAppNotification,
@@ -497,6 +502,28 @@ def test_force_purge_surgically_rewrites_mixed_request(
         note="mixed execution",
     )
     selected_item, sibling_item = sorted(request.items, key=lambda item: item.position)
+    tracked_file = BoxFile(
+        lot_id=selected.lot_id,
+        box_id=selected.id,
+        reference="PURGE-FILE",
+        position=1,
+    )
+    session.add(tracked_file)
+    session.flush()
+    file_event = BoxFileEvent(
+        file_id=tracked_file.id,
+        event_type=BoxFileEventType.created,
+        before_snapshot=None,
+        after_snapshot={"id": tracked_file.id, "reference": tracked_file.reference},
+    )
+    surviving_snapshot = BoxRequestItemFileSnapshot(
+        request_item_id=sibling_item.id,
+        file_id=tracked_file.id,
+        reference=tracked_file.reference,
+        position=1,
+        snapshot_kind=BoxRequestItemFileSnapshotKind.tracked_file,
+    )
+    session.add_all([file_event, surviving_snapshot])
     selected_discrepancy = BoxRequestDiscrepancy(
         request_id=request.id,
         request_item_id=selected_item.id,
@@ -593,6 +620,9 @@ def test_force_purge_surgically_rewrites_mixed_request(
     request_id = request.id
     sibling_item_id = sibling_item.id
     sibling_box_id = sibling.id
+    tracked_file_id = tracked_file.id
+    file_event_id = file_event.id
+    surviving_snapshot_id = surviving_snapshot.id
     preserved_artifacts = (
         (BoxRequestDocument, document.id, document.object_key),
         (BoxRequestAttachment, attachment.id, attachment.object_key),
@@ -603,6 +633,9 @@ def test_force_purge_surgically_rewrites_mixed_request(
     )
 
     preview = analyze_lot_force_purge_impact(session, lot_id=lot_id)
+    assert preview.file_count == 1
+    assert preview.file_event_count == 1
+    assert preview.linked_file_snapshot_count == 1
     assert preview.object_cleanup.deletable_keys == [selected_photo_key]
     assert preview.object_cleanup.shared_skipped_keys == [shared_photo_key]
     result = _execute_force_purge(
@@ -615,6 +648,12 @@ def test_force_purge_surgically_rewrites_mixed_request(
 
     assert session.get(Lot, lot_id) is None
     assert session.get(Box, selected_box_id) is None
+    assert session.get(BoxFile, tracked_file_id) is None
+    assert session.get(BoxFileEvent, file_event_id) is None
+    assert (
+        session.get(BoxRequestItemFileSnapshot, surviving_snapshot_id).file_id
+        is None
+    )
     assert session.get(Box, sibling.id) is not None
     preserved = session.get(BoxRequest, request_id)
     assert preserved is not None
@@ -664,6 +703,9 @@ def test_force_purge_surgically_rewrites_mixed_request(
     assert audit.object_keys == [selected_photo_key]
     assert audit.object_key_count == 1
     assert audit.event_metadata["deleted_counts"]["boxes"] == 1
+    assert audit.event_metadata["deleted_counts"]["box_files"] == 1
+    assert audit.event_metadata["deleted_counts"]["box_file_events"] == 1
+    assert audit.event_metadata["file_snapshots"][0]["id"] == tracked_file_id
     assert audit.event_metadata["request_rewrites"][0]["before"]["item_count"] == 2
     assert audit.event_metadata["request_rewrites"][0]["after"]["item_count"] == 1
     assert audit.event_metadata["request_rewrites"][0][

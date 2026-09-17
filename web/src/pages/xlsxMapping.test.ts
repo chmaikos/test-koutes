@@ -47,6 +47,45 @@ describe("Excel inbound row grouping", () => {
     ).toHaveLength(2);
   });
 
+  it("groups repeated spreadsheet rows into multiple structured files", () => {
+    expect(
+      groupInboundItems([
+        {
+          lot: "PR100",
+          box_number: "1",
+          files: [{ reference: " F-2 ", description: "Second" }],
+        },
+        {
+          lot: "pr100",
+          box_number: "001",
+          files: [{ reference: "F-1", barcode: "BC-1" }],
+        },
+        {
+          lot: "PR100",
+          box_number: "1",
+          files: [{ reference: "F-1", barcode: "BC-1" }],
+        },
+      ]),
+    ).toEqual([
+      {
+        lot: "PR100",
+        box_number: "001",
+        pallet_number: null,
+        contents: undefined,
+        files: [
+          { reference: "F-1", description: undefined, barcode: "BC-1" },
+          { reference: "F-2", description: "Second", barcode: undefined },
+        ],
+      },
+    ]);
+    expect(() =>
+      groupInboundItems([
+        { lot: "PR100", box_number: "1", files: [{ reference: "F-1" }] },
+        { lot: "PR100", box_number: "2", files: [{ reference: "f-1" }] },
+      ]),
+    ).toThrow(/targets two boxes/);
+  });
+
   it("rejects the same lot and box mapped to different pallets", () => {
     expect(() =>
       groupInboundItems([
@@ -185,6 +224,7 @@ function template(
       box_number: { index: 0, header: "Αριθμός Κιβωτίου" },
       pallet_number: { index: 1, header: "Παλέτα" },
       lot: { index: 2, header: "Παρτίδα" },
+      file_reference: { index: 3, header: "Περιεχόμενα" },
       contents: { index: 3, header: "Περιεχόμενα" },
     },
     lot_source: "column",
@@ -197,6 +237,7 @@ function template(
     updated_at: "2026-08-10T00:00:00Z",
     is_owner: true,
     is_shared: false,
+    is_legacy_incomplete: false,
     ...overrides,
   };
 }
@@ -221,6 +262,7 @@ describe("saved Excel mapping templates", () => {
           box_number: { index: 12, header: "Missing box field" },
           pallet_number: { index: 1, header: "Παλέτα" },
           lot: { index: 2, header: "Παρτίδα" },
+          file_reference: { index: 3, header: "Περιεχόμενα" },
           contents: { index: 20, header: "" },
         },
       }),
@@ -245,6 +287,7 @@ describe("saved Excel mapping templates", () => {
         lotSource: "fixed",
         fixedLot: " PR200 ",
         contentsColumn: 3,
+        fileReferenceColumn: 3,
         rowStart: 2,
         includeRowsByDefault: false,
       });
@@ -267,6 +310,7 @@ describe("saved Excel mapping templates", () => {
       boxColumn: 0,
       lotSource: "fixed",
       fixedLot: "PR200",
+      fileReferenceColumn: 3,
       rowStart: 2,
       includeRowsByDefault: true,
     });

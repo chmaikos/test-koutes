@@ -100,13 +100,17 @@ export function PalletDetailPage() {
             </div>
           )}
         </div>
-        <dl className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+        <dl className="grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
           <Metric label="Boxes" value={summary.box_count} />
+          <Metric label="Active Files" value={summary.active_file_count} />
           <Metric label="Eligible" value={summary.eligible_box_count} />
           <Metric label="Completed" value={summary.completed_box_count} />
           <Metric label="Quarantined" value={summary.status_counts.quarantined} />
           <Metric label="Completion" value={palletCompletionLabel(summary.completion_percent)} />
         </dl>
+        <Link className="text-sm text-brand-700 hover:underline" to={`/files?lot_id=${summary.lot_id}&pallet_id=${summary.id}&activity=all`}>
+          Browse {summary.active_file_count} active and {summary.archived_file_count} archived physical Files
+        </Link>
         <div><h2 className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">Status distribution</h2><LotStatusBar counts={summary.status_counts} /></div>
         {summary.archive_reason && <p className="rounded-lg bg-amber-50 p-3 text-sm text-amber-900">Archive reason: {summary.archive_reason}</p>}
         {summary.absorbed_into_pallet_id !== null && <p className="rounded-lg bg-slate-100 p-3 text-sm text-slate-700">This pallet was absorbed during a lot merge and cannot be restored. Its surviving pallet is <Link className="text-brand-700 hover:underline" to={`/pallets/${summary.absorbed_into_pallet_id}`}>#{summary.absorbed_into_pallet_id}</Link>.</p>}
@@ -132,7 +136,7 @@ export function PalletDetailPage() {
           </div>
         </header>
         <div className="overflow-x-auto">
-          <table className="w-full text-sm"><thead className="bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500"><tr><th className="px-4 py-2.5">Box</th><th className="px-4 py-2.5">Status</th><th className="px-4 py-2.5">Warehouse</th><th className="px-4 py-2.5">Item descriptions</th><th className="px-4 py-2.5">Updated</th></tr></thead><tbody className="divide-y">{boxes.data?.items.map((box) => <tr key={box.id}><td className="px-4 py-3"><Link className="font-mono text-brand-700 hover:underline" to={`/boxes/${box.id}`}>{box.box_number}</Link></td><td className="px-4 py-3"><StatusBadge status={box.status} /></td><td className="px-4 py-3">{warehouses.data?.find((warehouse) => warehouse.id === box.current_warehouse_id)?.name ?? `#${box.current_warehouse_id}`}</td><td className="max-w-80 truncate px-4 py-3">{box.contents || "—"}</td><td className="px-4 py-3 text-slate-500">{new Date(box.updated_at).toLocaleString()}</td></tr>)}</tbody></table>
+          <table className="w-full text-sm"><thead className="bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500"><tr><th className="px-4 py-2.5">Box</th><th className="px-4 py-2.5">Status</th><th className="px-4 py-2.5">Warehouse</th><th className="px-4 py-2.5">Physical Files</th><th className="px-4 py-2.5">Updated</th></tr></thead><tbody className="divide-y">{boxes.data?.items.map((box) => <tr key={box.id}><td className="px-4 py-3"><Link className="font-mono text-brand-700 hover:underline" to={`/boxes/${box.id}`}>{box.box_number}</Link></td><td className="px-4 py-3"><StatusBadge status={box.status} /></td><td className="px-4 py-3">{warehouses.data?.find((warehouse) => warehouse.id === box.current_warehouse_id)?.name ?? `#${box.current_warehouse_id}`}</td><td className="px-4 py-3"><Link className="text-brand-700 hover:underline" to={`/files?box_id=${box.id}&activity=all`}>{box.active_file_count} active · {box.archived_file_count} archived</Link></td><td className="px-4 py-3 text-slate-500">{new Date(box.updated_at).toLocaleString()}</td></tr>)}</tbody></table>
           {!boxes.isLoading && boxes.data?.items.length === 0 && <p className="p-6 text-center text-sm text-slate-500">No contained boxes match.</p>}
         </div>
         {boxes.data && boxes.data.total > boxPageSize && (

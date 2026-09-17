@@ -23,6 +23,7 @@ from app.schemas.boxes import (
     MappedImportRequest,
 )
 from app.schemas.requests import (
+    InboundBoxItem,
     XlsxPreviewOut,
     XlsxPreviewRow,
     XlsxPreviewSheet,
@@ -83,12 +84,13 @@ async def import_mapped_box_rows(
             user=user,
             warehouse_id=payload.warehouse_id,
             items=[
-                (
-                    item.box_number,
-                    item.lot,
-                    item.pallet_number,
-                    item.pallet_id,
-                    item.contents,
+                InboundBoxItem(
+                    box_number=item.box_number,
+                    lot=item.lot,
+                    pallet_number=item.pallet_number,
+                    pallet_id=item.pallet_id,
+                    contents=item.contents,
+                    files=item.files,
                 )
                 for item in payload.items
             ],

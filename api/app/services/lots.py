@@ -17,12 +17,14 @@ from sqlalchemy import (
     literal,
     or_,
     select,
+    text,
     union_all,
     update,
 )
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.models.box_files import BoxFile, BoxFileEvent, BoxFileEventType
 from app.models.boxes import (
     ACTIVE_STATUSES,
     Box,
@@ -55,6 +57,7 @@ from app.models.requests import (
     BoxRequestEventType,
     BoxRequestException,
     BoxRequestItem,
+    BoxRequestItemFileSnapshot,
     BoxRequestOrigin,
     BoxRequestStatus,
 )
@@ -101,6 +104,19 @@ class LotArchivedBoxCollision:
     request_item_relink_count: int
     discrepancy_relink_count: int
     box_event_delete_count: int
+    file_delete_count: int
+    file_event_delete_count: int
+
+
+@dataclass(frozen=True)
+class LotFileReferenceCollision:
+    normalized_reference: str
+    source_file_ids: list[int]
+    target_file_ids: list[int]
+    active_file_ids: list[int]
+    archived_only: bool
+    survivor_file_id: int | None
+    removed_file_ids: list[int]
 
 
 @dataclass(frozen=True)
@@ -161,7 +177,16 @@ class LotMergeCandidate:
     pallet_actions: list[LotPalletMergeAction]
     pallet_action_count: int
     pallet_actions_truncated: bool
+    file_reference_collisions: list[LotFileReferenceCollision]
+    file_reference_collision_count: int
+    file_reference_collisions_truncated: bool
+    active_file_reference_collision_count: int
+    archived_file_reference_collision_count: int
     all_resolvable_archived_collisions: list[LotArchivedBoxCollision] = field(
+        default_factory=list,
+        repr=False,
+    )
+    all_archived_file_collisions: list[LotFileReferenceCollision] = field(
         default_factory=list,
         repr=False,
     )
@@ -211,6 +236,9 @@ class LotMergeResult:
     moved_pallet_ids: list[int] = field(default_factory=list)
     survivor_box_ids: list[int] = field(default_factory=list)
     removed_box_ids: list[int] = field(default_factory=list)
+    moved_file_count: int = 0
+    overwritten_archived_file_count: int = 0
+    deleted_file_event_count: int = 0
 
 
 LotProgressState = Literal["active", "in_progress", "complete", "no_eligible"]
@@ -228,6 +256,8 @@ class LotSummary:
     updated_at: datetime
     physical_box_count: int
     box_count: int
+    active_file_count: int
+    archived_file_count: int
     status_counts: dict[str, int]
     eligible_box_count: int
     completed_box_count: int
@@ -321,6 +351,11 @@ class LotPurgeEligibility:
     requests: list[LotPurgeRequestPreview]
     requests_truncated: bool
     object_key_count: int
+    file_count: int
+    active_file_count: int
+    archived_file_count: int
+    file_event_count: int
+    linked_file_snapshot_count: int
     graph_signature: str
     eligible: bool
     blockers: list[LotPurgeBlocker]
@@ -346,6 +381,9 @@ class LotPurgeResult:
     object_cleanup_status: LotPurgeCleanupStatus
     object_cleanup_failures: list[dict[str, object]]
     warehouse_ids: list[int]
+    file_count: int = 0
+    file_event_count: int = 0
+    detached_file_snapshot_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -366,6 +404,9 @@ class LotForcePurgeResult:
     object_cleanup_status: LotPurgeCleanupStatus
     object_cleanup_failures: list[dict[str, object]]
     warehouse_ids: list[int]
+    file_count: int = 0
+    file_event_count: int = 0
+    detached_file_snapshot_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -466,6 +507,11 @@ class LotForcePurgeImpactPlan:
     incoming_lineage_detachments: list[LotForcePurgeLineageDetach]
     incoming_lineage_detachment_count: int
     incoming_lineage_detachments_truncated: bool
+    file_count: int
+    active_file_count: int
+    archived_file_count: int
+    file_event_count: int
+    linked_file_snapshot_count: int
     object_cleanup: LotForcePurgeObjectCleanupPlan
     hard_blockers: list[LotForcePurgeBlocker]
     overridden_blockers: list[LotForcePurgeBlocker]
@@ -480,6 +526,81 @@ def validate_lot_name(value: str) -> str:
     except (AttributeError, TypeError, ValueError) as exc:
         message = str(exc) or "lot is required"
         raise LotRuleError(message) from exc
+
+
+def _purge_file_counts(
+    db: Session,
+    *,
+    box_ids: list[int],
+    lock_for_update: bool = False,
+) -> dict[str, int]:
+    if not box_ids:
+        return {
+            "file_count": 0,
+            "active_file_count": 0,
+            "archived_file_count": 0,
+            "file_event_count": 0,
+            "linked_file_snapshot_count": 0,
+        }
+    file_stmt = (
+        select(BoxFile)
+        .where(BoxFile.box_id.in_(box_ids))
+        .order_by(BoxFile.id)
+    )
+    if lock_for_update:
+        file_stmt = file_stmt.with_for_update(of=BoxFile)
+    files = list(db.scalars(file_stmt).all())
+    file_ids = [file.id for file in files]
+    if lock_for_update and file_ids:
+        list(
+            db.scalars(
+                select(BoxFileEvent)
+                .where(BoxFileEvent.file_id.in_(file_ids))
+                .order_by(BoxFileEvent.id)
+                .with_for_update(of=BoxFileEvent)
+            ).all()
+        )
+        list(
+            db.scalars(
+                select(BoxRequestItemFileSnapshot)
+                .where(BoxRequestItemFileSnapshot.file_id.in_(file_ids))
+                .order_by(BoxRequestItemFileSnapshot.id)
+                .with_for_update(of=BoxRequestItemFileSnapshot)
+            ).all()
+        )
+    file_event_count = (
+        int(
+            db.scalar(
+                select(func.count(BoxFileEvent.id)).where(
+                    BoxFileEvent.file_id.in_(file_ids)
+                )
+            )
+            or 0
+        )
+        if file_ids
+        else 0
+    )
+    linked_snapshot_count = (
+        int(
+            db.scalar(
+                select(func.count(BoxRequestItemFileSnapshot.id)).where(
+                    BoxRequestItemFileSnapshot.file_id.in_(file_ids)
+                )
+            )
+            or 0
+        )
+        if file_ids
+        else 0
+    )
+    return {
+        "file_count": len(files),
+        "active_file_count": sum(file.archived_at is None for file in files),
+        "archived_file_count": sum(
+            file.archived_at is not None for file in files
+        ),
+        "file_event_count": file_event_count,
+        "linked_file_snapshot_count": linked_snapshot_count,
+    }
 
 
 def _active_lot_use_statement(lot_ids: list[int]):
@@ -1017,6 +1138,11 @@ def analyze_lot_force_purge_impact(
     )
     box_ids = [box.id for box in boxes]
     box_id_set = set(box_ids)
+    file_counts = _purge_file_counts(
+        db,
+        box_ids=box_ids,
+        lock_for_update=lock_for_update,
+    )
     removed_item_filter = BoxRequestItem.lot_id == lot_id
     if box_ids:
         removed_item_filter = or_(
@@ -1585,6 +1711,62 @@ def analyze_lot_force_purge_impact(
             ]
             for box in boxes
         ],
+        "files": (
+            graph_rows(
+                select(
+                    BoxFile.id,
+                    BoxFile.lot_id,
+                    BoxFile.box_id,
+                    BoxFile.normalized_reference,
+                    BoxFile.position,
+                    BoxFile.archived_at,
+                    BoxFile.version,
+                )
+                .where(BoxFile.box_id.in_(box_ids))
+                .order_by(BoxFile.id)
+            )
+            if box_ids
+            else []
+        ),
+        "file_events": (
+            graph_rows(
+                select(
+                    BoxFileEvent.id,
+                    BoxFileEvent.file_id,
+                    BoxFileEvent.event_type,
+                    BoxFileEvent.occurred_at,
+                )
+                .where(
+                    BoxFileEvent.file_id.in_(
+                        select(BoxFile.id).where(
+                            BoxFile.box_id.in_(box_ids)
+                        )
+                    )
+                )
+                .order_by(BoxFileEvent.id)
+            )
+            if box_ids
+            else []
+        ),
+        "file_snapshot_links": (
+            graph_rows(
+                select(
+                    BoxRequestItemFileSnapshot.id,
+                    BoxRequestItemFileSnapshot.request_item_id,
+                    BoxRequestItemFileSnapshot.file_id,
+                )
+                .where(
+                    BoxRequestItemFileSnapshot.file_id.in_(
+                        select(BoxFile.id).where(
+                            BoxFile.box_id.in_(box_ids)
+                        )
+                    )
+                )
+                .order_by(BoxRequestItemFileSnapshot.id)
+            )
+            if box_ids
+            else []
+        ),
         "pallets": [_pallet_signature_value(pallet) for pallet in pallets],
         "pallet_events": (
             graph_rows(
@@ -1839,6 +2021,7 @@ def analyze_lot_force_purge_impact(
         incoming_lineage_detachments_truncated=(
             len(lineage_detachments_all) > _PURGE_LIST_LIMIT
         ),
+        **file_counts,
         object_cleanup=object_cleanup,
         hard_blockers=hard_blockers,
         overridden_blockers=overridden_blockers,
@@ -1953,6 +2136,62 @@ def _purge_graph_signature(
             ]
             for box in boxes
         ],
+        "files": (
+            rows(
+                select(
+                    BoxFile.id,
+                    BoxFile.lot_id,
+                    BoxFile.box_id,
+                    BoxFile.normalized_reference,
+                    BoxFile.position,
+                    BoxFile.archived_at,
+                    BoxFile.version,
+                )
+                .where(BoxFile.box_id.in_(box_ids))
+                .order_by(BoxFile.id)
+            )
+            if box_ids
+            else []
+        ),
+        "file_events": (
+            rows(
+                select(
+                    BoxFileEvent.id,
+                    BoxFileEvent.file_id,
+                    BoxFileEvent.event_type,
+                    BoxFileEvent.occurred_at,
+                )
+                .where(
+                    BoxFileEvent.file_id.in_(
+                        select(BoxFile.id).where(
+                            BoxFile.box_id.in_(box_ids)
+                        )
+                    )
+                )
+                .order_by(BoxFileEvent.id)
+            )
+            if box_ids
+            else []
+        ),
+        "file_snapshot_links": (
+            rows(
+                select(
+                    BoxRequestItemFileSnapshot.id,
+                    BoxRequestItemFileSnapshot.request_item_id,
+                    BoxRequestItemFileSnapshot.file_id,
+                )
+                .where(
+                    BoxRequestItemFileSnapshot.file_id.in_(
+                        select(BoxFile.id).where(
+                            BoxFile.box_id.in_(box_ids)
+                        )
+                    )
+                )
+                .order_by(BoxRequestItemFileSnapshot.id)
+            )
+            if box_ids
+            else []
+        ),
         "pallets": [_pallet_signature_value(pallet) for pallet in pallets],
         "pallet_events": (
             rows(
@@ -2214,6 +2453,11 @@ def analyze_lot_purge_eligibility(
         ).all()
     )
     box_ids = [box.id for box in boxes]
+    file_counts = _purge_file_counts(
+        db,
+        box_ids=box_ids,
+        lock_for_update=lock_for_update,
+    )
     active_box_ids_all = [box.id for box in boxes if box.archived_at is None]
     archived_box_ids_all = [box.id for box in boxes if box.archived_at is not None]
     active_box_ids, active_truncated = _bounded_ids(active_box_ids_all)
@@ -2722,6 +2966,7 @@ def analyze_lot_purge_eligibility(
         requests=request_previews,
         requests_truncated=len(request_rows) > len(request_previews),
         object_key_count=len(object_keys),
+        **file_counts,
         graph_signature=graph_signature,
         eligible=not blockers,
         blockers=blockers,
@@ -2731,6 +2976,52 @@ def analyze_lot_purge_eligibility(
 def _delete_count(db: Session, statement) -> int:
     result = db.execute(statement.execution_options(synchronize_session=False))
     return int(result.rowcount or 0)
+
+
+def _delete_file_graph_for_boxes(
+    db: Session,
+    *,
+    box_ids: list[int],
+) -> dict[str, int]:
+    """Detach immutable snapshot links, then delete File history in FK order."""
+    if not box_ids:
+        return {
+            "box_request_item_file_snapshot_links_detached": 0,
+            "box_file_events": 0,
+            "box_files": 0,
+        }
+    file_ids = list(
+        db.scalars(
+            select(BoxFile.id)
+            .where(BoxFile.box_id.in_(box_ids))
+            .order_by(BoxFile.id)
+        ).all()
+    )
+    if not file_ids:
+        return {
+            "box_request_item_file_snapshot_links_detached": 0,
+            "box_file_events": 0,
+            "box_files": 0,
+        }
+    detached = db.execute(
+        update(BoxRequestItemFileSnapshot)
+        .where(BoxRequestItemFileSnapshot.file_id.in_(file_ids))
+        .values(file_id=None)
+        .execution_options(synchronize_session=False)
+    )
+    return {
+        "box_request_item_file_snapshot_links_detached": int(
+            detached.rowcount or 0
+        ),
+        "box_file_events": _delete_count(
+            db,
+            delete(BoxFileEvent).where(BoxFileEvent.file_id.in_(file_ids)),
+        ),
+        "box_files": _delete_count(
+            db,
+            delete(BoxFile).where(BoxFile.id.in_(file_ids)),
+        ),
+    }
 
 
 def _delete_purge_graph(
@@ -2800,6 +3091,9 @@ def _delete_purge_graph(
             delete(BoxRequest).where(BoxRequest.id.in_(request_ids)),
         )
     if box_ids:
+        deleted_counts.update(
+            _delete_file_graph_for_boxes(db, box_ids=box_ids)
+        )
         deleted_counts["box_events"] = _delete_count(
             db,
             delete(BoxEvent).where(BoxEvent.box_id.in_(box_ids)),
@@ -2957,6 +3251,17 @@ def _force_deleted_entity_ids(
         if deleted_discrepancy_ids
         else []
     )
+    file_ids = (
+        list(
+            db.scalars(
+                select(BoxFile.id)
+                .where(BoxFile.box_id.in_(box_ids))
+                .order_by(BoxFile.id)
+            ).all()
+        )
+        if box_ids
+        else []
+    )
     return {
         "lots": [plan.lot_id],
         "boxes": sorted(box_ids),
@@ -2987,6 +3292,31 @@ def _force_deleted_entity_ids(
                 ).all()
             )
             if box_ids
+            else []
+        ),
+        "box_files": file_ids,
+        "box_file_events": (
+            list(
+                db.scalars(
+                    select(BoxFileEvent.id)
+                    .where(BoxFileEvent.file_id.in_(file_ids))
+                    .order_by(BoxFileEvent.id)
+                ).all()
+            )
+            if file_ids
+            else []
+        ),
+        "detached_request_file_snapshot_ids": (
+            list(
+                db.scalars(
+                    select(BoxRequestItemFileSnapshot.id)
+                    .where(
+                        BoxRequestItemFileSnapshot.file_id.in_(file_ids)
+                    )
+                    .order_by(BoxRequestItemFileSnapshot.id)
+                ).all()
+            )
+            if file_ids
             else []
         ),
         "lot_events": list(
@@ -3309,6 +3639,35 @@ def force_purge_lot(
         plan=locked,
         box_ids=all_box_ids,
     )
+    force_purge_files = (
+        list(
+            db.scalars(
+                select(BoxFile)
+                .where(BoxFile.id.in_(deleted_entity_ids["box_files"]))
+                .order_by(BoxFile.id)
+            ).all()
+        )
+        if deleted_entity_ids["box_files"]
+        else []
+    )
+    force_file_snapshots = [
+        {
+            "id": file.id,
+            "lot_id": file.lot_id,
+            "box_id": file.box_id,
+            "reference": file.reference,
+            "normalized_reference": file.normalized_reference,
+            "description": file.description,
+            "barcode": file.barcode,
+            "position": file.position,
+            "archived_at": (
+                file.archived_at.isoformat()
+                if file.archived_at is not None
+                else None
+            ),
+        }
+        for file in force_purge_files
+    ]
     cleanup_status = (
         LotPurgeCleanupStatus.pending
         if object_keys
@@ -3346,6 +3705,25 @@ def force_purge_lot(
             "warehouse_ids": warehouse_ids,
             "active_box_ids": locked.active_box_ids,
             "archived_box_ids": locked.archived_box_ids,
+            "file_count": len(force_purge_files),
+            "active_file_count": sum(
+                file.archived_at is None for file in force_purge_files
+            ),
+            "archived_file_count": sum(
+                file.archived_at is not None for file in force_purge_files
+            ),
+            "file_event_count": len(
+                deleted_entity_ids["box_file_events"]
+            ),
+            "file_snapshots": force_file_snapshots,
+            "file_cleanup_plan": {
+                "detach_request_snapshot_links_with_set_null": True,
+                "detached_request_snapshot_ids": deleted_entity_ids[
+                    "detached_request_file_snapshot_ids"
+                ],
+                "delete_file_events_first": True,
+                "hard_delete_file_ids": deleted_entity_ids["box_files"],
+            },
             "pallet_ids": pallet_ids,
             "pallet_count": len(pallet_ids),
             "pallet_snapshots": pallet_snapshots,
@@ -3484,6 +3862,12 @@ def force_purge_lot(
                 .execution_options(synchronize_session=False)
             )
         if all_box_ids:
+            file_deleted_counts = _delete_file_graph_for_boxes(
+                db,
+                box_ids=all_box_ids,
+            )
+            for name, count in file_deleted_counts.items():
+                deleted_counts[name] = deleted_counts.get(name, 0) + count
             deleted_counts["box_events"] = _delete_count(
                 db,
                 delete(BoxEvent).where(BoxEvent.box_id.in_(all_box_ids)),
@@ -3564,6 +3948,11 @@ def force_purge_lot(
         object_cleanup_status=cleanup_status,
         object_cleanup_failures=[],
         warehouse_ids=warehouse_ids,
+        file_count=len(force_purge_files),
+        file_event_count=len(deleted_entity_ids["box_file_events"]),
+        detached_file_snapshot_count=len(
+            deleted_entity_ids["detached_request_file_snapshot_ids"]
+        ),
     )
 
 
@@ -3708,6 +4097,43 @@ def purge_lot(
         }
         for box in boxes
     ]
+    purge_files = list(
+        db.scalars(
+            select(BoxFile)
+            .where(BoxFile.box_id.in_(box_ids))
+            .order_by(BoxFile.id)
+        ).all()
+        if box_ids
+        else []
+    )
+    purge_file_ids = [file.id for file in purge_files]
+    purge_file_event_counts = dict.fromkeys(purge_file_ids, 0)
+    if purge_file_ids:
+        for file_id, count in db.execute(
+            select(BoxFileEvent.file_id, func.count(BoxFileEvent.id))
+            .where(BoxFileEvent.file_id.in_(purge_file_ids))
+            .group_by(BoxFileEvent.file_id)
+        ).all():
+            purge_file_event_counts[int(file_id)] = int(count)
+    purge_file_snapshots = [
+        {
+            "id": file.id,
+            "lot_id": file.lot_id,
+            "box_id": file.box_id,
+            "reference": file.reference,
+            "normalized_reference": file.normalized_reference,
+            "description": file.description,
+            "barcode": file.barcode,
+            "position": file.position,
+            "archived_at": (
+                file.archived_at.isoformat()
+                if file.archived_at is not None
+                else None
+            ),
+            "event_count": purge_file_event_counts[file.id],
+        }
+        for file in purge_files
+    ]
     pallet_snapshots = _pallet_purge_snapshots(pallets, boxes)
 
     cleanup_status = (
@@ -3743,6 +4169,20 @@ def purge_lot(
             "warehouse_ids": warehouse_ids,
             "lot_snapshot": lot_snapshot,
             "box_snapshots": box_snapshots,
+            "file_count": len(purge_files),
+            "active_file_count": sum(
+                file.archived_at is None for file in purge_files
+            ),
+            "archived_file_count": sum(
+                file.archived_at is not None for file in purge_files
+            ),
+            "file_event_count": sum(purge_file_event_counts.values()),
+            "file_snapshots": purge_file_snapshots,
+            "file_cleanup_plan": {
+                "detach_request_snapshot_links_with_set_null": True,
+                "delete_file_events_first": True,
+                "hard_delete_file_ids": purge_file_ids,
+            },
             "pallet_ids": pallet_ids,
             "pallet_count": len(pallet_ids),
             "pallet_snapshots": pallet_snapshots,
@@ -3788,6 +4228,14 @@ def purge_lot(
         object_cleanup_status=cleanup_status,
         object_cleanup_failures=[],
         warehouse_ids=warehouse_ids,
+        file_count=len(purge_files),
+        file_event_count=sum(purge_file_event_counts.values()),
+        detached_file_snapshot_count=int(
+            deleted_counts.get(
+                "box_request_item_file_snapshot_links_detached",
+                0,
+            )
+        ),
     )
 
 
@@ -4119,6 +4567,13 @@ def _merge_candidate(
             .order_by(Box.box_number, Box.lot_id, Box.id)
         ).all()
     )
+    files = list(
+        db.scalars(
+            select(BoxFile)
+            .where(BoxFile.lot_id.in_((source.id, target.id)))
+            .order_by(BoxFile.normalized_reference, BoxFile.lot_id, BoxFile.id)
+        ).all()
+    )
     pallets = list(
         db.scalars(
             select(Pallet)
@@ -4216,6 +4671,55 @@ def _merge_candidate(
                 removed_box_ids.append(removed.id)
         decisions.append((number, source_boxes, target_boxes, survivor, removed))
 
+    removed_box_id_set = set(removed_box_ids)
+    files_by_reference: dict[str, dict[LotMergeSide, list[BoxFile]]] = {}
+    for file in files:
+        side: LotMergeSide = "source" if file.lot_id == source.id else "target"
+        files_by_reference.setdefault(
+            file.normalized_reference,
+            {"source": [], "target": []},
+        )[side].append(file)
+    file_collisions: list[LotFileReferenceCollision] = []
+    archived_file_collisions: list[LotFileReferenceCollision] = []
+    for normalized_reference, grouped in sorted(files_by_reference.items()):
+        source_files = grouped["source"]
+        target_files = grouped["target"]
+        if not source_files or not target_files:
+            continue
+        all_files = source_files + target_files
+        active_ids = sorted(
+            file.id for file in all_files if file.archived_at is None
+        )
+        archived_only = not active_ids
+        survivor: BoxFile | None = None
+        removed_files: list[BoxFile] = []
+        if archived_only:
+            preservable_source = [
+                file for file in source_files if file.box_id not in removed_box_id_set
+            ]
+            preservable_target = [
+                file for file in target_files if file.box_id not in removed_box_id_set
+            ]
+            if preservable_target:
+                survivor = preservable_target[0]
+            elif preservable_source:
+                survivor = preservable_source[0]
+            else:
+                survivor = target_files[0]
+            removed_files = [file for file in all_files if file.id != survivor.id]
+        collision = LotFileReferenceCollision(
+            normalized_reference=normalized_reference,
+            source_file_ids=[file.id for file in source_files],
+            target_file_ids=[file.id for file in target_files],
+            active_file_ids=active_ids,
+            archived_only=archived_only,
+            survivor_file_id=survivor.id if survivor is not None else None,
+            removed_file_ids=sorted(file.id for file in removed_files),
+        )
+        file_collisions.append(collision)
+        if archived_only:
+            archived_file_collisions.append(collision)
+
     item_counts = _box_link_counts(db, removed_box_ids, BoxRequestItem)
     discrepancy_counts = _box_link_counts(
         db, removed_box_ids, BoxRequestDiscrepancy
@@ -4234,6 +4738,19 @@ def _merge_candidate(
     event_counts: dict[int, int] = {box_id: 0 for box_id in removed_box_ids}
     for event in removed_box_events:
         event_counts[event.box_id] += 1
+    file_counts = {
+        box_id: sum(file.box_id == box_id for file in files)
+        for box_id in removed_box_ids
+    }
+    file_event_counts = dict.fromkeys(removed_box_ids, 0)
+    if removed_box_ids:
+        for box_id, count in db.execute(
+            select(BoxFile.box_id, func.count(BoxFileEvent.id))
+            .join(BoxFileEvent, BoxFileEvent.file_id == BoxFile.id)
+            .where(BoxFile.box_id.in_(removed_box_ids))
+            .group_by(BoxFile.box_id)
+        ).all():
+            file_event_counts[int(box_id)] = int(count)
 
 
     resolvable: list[LotArchivedBoxCollision] = []
@@ -4286,6 +4803,8 @@ def _merge_candidate(
             request_item_relink_count=item_counts.get(removed.id, 0),
             discrepancy_relink_count=discrepancy_counts.get(removed.id, 0),
             box_event_delete_count=event_counts.get(removed.id, 0),
+            file_delete_count=file_counts.get(removed.id, 0),
+            file_event_delete_count=file_event_counts.get(removed.id, 0),
         )
         resolvable.append(entry)
         signature_collisions.append(
@@ -4305,6 +4824,8 @@ def _merge_candidate(
                     "request_item_relink_count": entry.request_item_relink_count,
                     "discrepancy_relink_count": entry.discrepancy_relink_count,
                     "box_event_delete_count": entry.box_event_delete_count,
+                    "file_delete_count": entry.file_delete_count,
+                    "file_event_delete_count": entry.file_event_delete_count,
                 },
             }
         )
@@ -4440,6 +4961,29 @@ def _merge_candidate(
         ],
         "pallet_events": pallet_event_context,
         "inventory": [_box_signature_value(box) for box in boxes],
+        "files": [
+            [
+                file.id,
+                file.lot_id,
+                file.box_id,
+                file.normalized_reference,
+                file.position,
+                _collision_timestamp(file.archived_at),
+                file.version,
+            ]
+            for file in files
+        ],
+        "file_collisions": [
+            {
+                "normalized_reference": collision.normalized_reference,
+                "source_file_ids": collision.source_file_ids,
+                "target_file_ids": collision.target_file_ids,
+                "active_file_ids": collision.active_file_ids,
+                "survivor_file_id": collision.survivor_file_id,
+                "removed_file_ids": collision.removed_file_ids,
+            }
+            for collision in file_collisions
+        ],
         "request_item_links": item_links,
         "discrepancy_links": discrepancy_links,
         "request_context": request_context,
@@ -4458,6 +5002,10 @@ def _merge_candidate(
     hard_count = len(hard)
     pallet_collision_count = len(pallet_collisions)
     pallet_action_count = len(pallet_actions)
+    active_file_collision_count = sum(
+        not collision.archived_only for collision in file_collisions
+    )
+    archived_file_collision_count = len(archived_file_collisions)
     return LotMergeCandidate(
         source_id=source.id,
         source_name=source.name,
@@ -4465,7 +5013,11 @@ def _merge_candidate(
         target_id=target.id,
         target_name=target.name,
         target_version=target.version,
-        merge_allowed=overlap_count == 0 and pallet_collision_count == 0,
+        merge_allowed=(
+            overlap_count == 0
+            and pallet_collision_count == 0
+            and not file_collisions
+        ),
         overlapping_box_numbers=overlap_numbers[:_OVERLAP_LIST_LIMIT],
         overlapping_box_count=overlap_count,
         overlap_list_truncated=overlap_count > _OVERLAP_LIST_LIMIT,
@@ -4479,10 +5031,14 @@ def _merge_candidate(
         hard_overlaps_truncated=hard_count > _OVERLAP_LIST_LIMIT,
         merge_allowed_with_archived_overwrite=(
             resolvable_count > 0
-            and hard_count == 0
-            and pallet_collision_count == 0
+            or archived_file_collision_count > 0
+        )
+        and hard_count == 0
+        and pallet_collision_count == 0
+        and active_file_collision_count == 0,
+        requires_explicit_overwrite=(
+            resolvable_count > 0 or archived_file_collision_count > 0
         ),
-        requires_explicit_overwrite=resolvable_count > 0,
         collision_signature=collision_signature,
         pallet_collisions=pallet_collisions[:_OVERLAP_LIST_LIMIT],
         pallet_collision_count=pallet_collision_count,
@@ -4490,7 +5046,15 @@ def _merge_candidate(
         pallet_actions=pallet_actions[:_OVERLAP_LIST_LIMIT],
         pallet_action_count=pallet_action_count,
         pallet_actions_truncated=pallet_action_count > _OVERLAP_LIST_LIMIT,
+        file_reference_collisions=file_collisions[:_OVERLAP_LIST_LIMIT],
+        file_reference_collision_count=len(file_collisions),
+        file_reference_collisions_truncated=(
+            len(file_collisions) > _OVERLAP_LIST_LIMIT
+        ),
+        active_file_reference_collision_count=active_file_collision_count,
+        archived_file_reference_collision_count=archived_file_collision_count,
         all_resolvable_archived_collisions=resolvable,
+        all_archived_file_collisions=archived_file_collisions,
     )
 
 
@@ -4645,6 +5209,40 @@ def merge_lots(
             ).all()
         )
     boxes = list(db.scalars(_merge_box_lock_statement(ordered_ids)).all())
+    files = list(
+        db.scalars(
+            select(BoxFile)
+            .where(BoxFile.lot_id.in_(ordered_ids))
+            .order_by(BoxFile.id)
+            .with_for_update(of=BoxFile)
+            .execution_options(populate_existing=True)
+        ).all()
+    )
+    file_ids = [file.id for file in files]
+    file_events = (
+        list(
+            db.scalars(
+                select(BoxFileEvent)
+                .where(BoxFileEvent.file_id.in_(file_ids))
+                .order_by(BoxFileEvent.id)
+                .with_for_update(of=BoxFileEvent)
+            ).all()
+        )
+        if file_ids
+        else []
+    )
+    file_snapshots = (
+        list(
+            db.scalars(
+                select(BoxRequestItemFileSnapshot)
+                .where(BoxRequestItemFileSnapshot.file_id.in_(file_ids))
+                .order_by(BoxRequestItemFileSnapshot.id)
+                .with_for_update(of=BoxRequestItemFileSnapshot)
+            ).all()
+        )
+        if file_ids
+        else []
+    )
     preliminary_candidate = _merge_candidate(db, source, target)
     removed_box_ids = sorted(
         collision.removed_box_id
@@ -4731,6 +5329,14 @@ def merge_lots(
             target=target,
             candidate=candidate,
         )
+    if candidate.active_file_reference_collision_count:
+        raise LotMergeConflictError(
+            "lots have active File reference collisions",
+            code="file_reference_collision",
+            source=source,
+            target=target,
+            candidate=candidate,
+        )
     if not candidate.merge_allowed and (
         not overwrite_archived_collisions
         or not candidate.merge_allowed_with_archived_overwrite
@@ -4756,6 +5362,53 @@ def merge_lots(
             target=target,
             candidate=candidate,
         )
+    file_delete_ids = sorted(
+        {
+            file.id for file in files if file.box_id in set(removed_box_ids)
+        }
+        | {
+            file_id
+            for collision in candidate.all_archived_file_collisions
+            for file_id in collision.removed_file_ids
+        }
+    )
+    file_delete_id_set = set(file_delete_ids)
+    deleted_file_event_ids = sorted(
+        event.id for event in file_events if event.file_id in file_delete_id_set
+    )
+    detached_file_snapshot_ids = sorted(
+        snapshot.id
+        for snapshot in file_snapshots
+        if snapshot.file_id in file_delete_id_set
+    )
+    moved_files = [
+        file
+        for file in files
+        if file.lot_id == source.id and file.id not in file_delete_id_set
+    ]
+    file_delete_snapshots = [
+        {
+            "id": file.id,
+            "lot_id": file.lot_id,
+            "box_id": file.box_id,
+            "reference": file.reference,
+            "normalized_reference": file.normalized_reference,
+            "description": file.description,
+            "barcode": file.barcode,
+            "position": file.position,
+            "archived_at": _collision_timestamp(file.archived_at),
+            "event_ids": sorted(
+                event.id for event in file_events if event.file_id == file.id
+            ),
+            "detached_request_snapshot_ids": sorted(
+                snapshot.id
+                for snapshot in file_snapshots
+                if snapshot.file_id == file.id
+            ),
+        }
+        for file in files
+        if file.id in file_delete_id_set
+    ]
     for collision in execution_collisions:
         removed = boxes_by_id.get(collision.removed_box_id)
         survivor = boxes_by_id.get(collision.survivor_box_id)
@@ -4986,6 +5639,30 @@ def merge_lots(
         ),
         "survivor_boxes": _bounded_merge_ids(survivor_box_ids),
         "removed_boxes": _bounded_merge_ids(removed_box_ids),
+        "moved_files": _bounded_merge_ids([file.id for file in moved_files]),
+        "removed_files": _bounded_merge_ids(file_delete_ids),
+        "removed_file_snapshots": file_delete_snapshots[:_OVERLAP_LIST_LIMIT],
+        "removed_file_snapshots_truncated": (
+            len(file_delete_snapshots) > _OVERLAP_LIST_LIMIT
+        ),
+        "file_reference_collisions": [
+            {
+                "normalized_reference": collision.normalized_reference,
+                "survivor_file_id": collision.survivor_file_id,
+                "removed_file_ids": collision.removed_file_ids,
+                "archived_only": collision.archived_only,
+            }
+            for collision in candidate.all_archived_file_collisions[
+                :_OVERLAP_LIST_LIMIT
+            ]
+        ],
+        "file_reference_collision_count": len(
+            candidate.all_archived_file_collisions
+        ),
+        "deleted_file_events": _bounded_merge_ids(deleted_file_event_ids),
+        "detached_request_file_snapshots": _bounded_merge_ids(
+            detached_file_snapshot_ids
+        ),
         "relinked_request_items": _bounded_merge_ids(relinked_item_ids),
         "relinked_discrepancies": _bounded_merge_ids(
             relinked_discrepancy_ids
@@ -5011,11 +5688,25 @@ def merge_lots(
             "moved_request_item_count": len(source_request_items),
             "combined_pallet_count": len(combined_pallet_targets),
             "moved_pallet_count": len(transferred_pallets),
+            "moved_file_count": len(moved_files),
+            "overwritten_archived_file_count": len(file_delete_ids),
+            "deleted_file_event_count": len(deleted_file_event_ids),
+            "detached_request_file_snapshot_count": len(
+                detached_file_snapshot_ids
+            ),
         },
     }
 
     try:
         with db.begin_nested():
+            if moved_files and db.get_bind().dialect.name == "postgresql":
+                db.execute(
+                    text(
+                        "SET CONSTRAINTS fk_box_files_box_lot_boxes DEFERRED"
+                    )
+                )
+            elif moved_files and db.get_bind().dialect.name == "sqlite":
+                db.execute(text("PRAGMA defer_foreign_keys = ON"))
             for item in request_items:
                 original_box_id = item.box_id
                 survivor_id = removed_to_survivor.get(original_box_id)
@@ -5028,6 +5719,29 @@ def merge_lots(
                 survivor_id = removed_to_survivor.get(discrepancy.box_id)
                 if survivor_id is not None:
                     discrepancy.box_id = survivor_id
+            if detached_file_snapshot_ids:
+                db.execute(
+                    update(BoxRequestItemFileSnapshot)
+                    .where(
+                        BoxRequestItemFileSnapshot.id.in_(
+                            detached_file_snapshot_ids
+                        )
+                    )
+                    .values(file_id=None)
+                    .execution_options(synchronize_session="fetch")
+                )
+            if deleted_file_event_ids:
+                db.execute(
+                    delete(BoxFileEvent)
+                    .where(BoxFileEvent.id.in_(deleted_file_event_ids))
+                    .execution_options(synchronize_session="fetch")
+                )
+            if file_delete_ids:
+                db.execute(
+                    delete(BoxFile)
+                    .where(BoxFile.id.in_(file_delete_ids))
+                    .execution_options(synchronize_session="fetch")
+                )
             if box_event_ids:
                 db.execute(
                     delete(BoxEvent)
@@ -5091,6 +5805,39 @@ def merge_lots(
                             ),
                         ]
                     )
+            for file in moved_files:
+                before_file = {
+                    "id": file.id,
+                    "lot_id": source.id,
+                    "lot": source_name,
+                    "box_id": file.box_id,
+                    "reference": file.reference,
+                    "position": file.position,
+                    "archived_at": _collision_timestamp(file.archived_at),
+                }
+                file.lot_id = target.id
+                file.updated_by_user_id = user.id
+                file.updated_at = now
+                db.add(
+                    BoxFileEvent(
+                        file_id=file.id,
+                        event_type=BoxFileEventType.lot_reassigned,
+                        before_snapshot=before_file,
+                        after_snapshot={
+                            **before_file,
+                            "lot_id": target.id,
+                            "lot": target_name,
+                        },
+                        actor_user_id=user.id,
+                        reason=cleaned_reason,
+                        event_metadata={
+                            "operation": "lot_merge",
+                            "source_lot_id": source.id,
+                            "target_lot_id": target.id,
+                        },
+                        occurred_at=now,
+                    )
+                )
             for item in source_request_items:
                 # ``item.lot`` is an immutable historical text snapshot.
                 item.lot_id = target.id
@@ -5288,6 +6035,9 @@ def merge_lots(
         moved_pallet_ids=sorted(pallet.id for pallet in transferred_pallets),
         survivor_box_ids=survivor_box_ids,
         removed_box_ids=removed_box_ids,
+        moved_file_count=len(moved_files),
+        overwritten_archived_file_count=len(file_delete_ids),
+        deleted_file_event_count=len(deleted_file_event_ids),
     )
 
 
@@ -5319,6 +6069,7 @@ def _scoped_sources(
 
     boxes = (
         select(
+            Box.id.label("box_id"),
             Box.lot_id.label("lot_id"),
             Box.current_warehouse_id.label("warehouse_id"),
             Box.status.label("status"),
@@ -5404,6 +6155,18 @@ def _summary_statement(
         .group_by(boxes.c.lot_id)
         .cte("lot_box_aggregate")
     )
+    file_aggregate = (
+        select(
+            boxes.c.lot_id,
+            _count_if(BoxFile.archived_at.is_(None)).label("active_file_count"),
+            _count_if(BoxFile.archived_at.is_not(None)).label(
+                "archived_file_count"
+            ),
+        )
+        .join(BoxFile, BoxFile.box_id == boxes.c.box_id)
+        .group_by(boxes.c.lot_id)
+        .cte("lot_file_aggregate")
+    )
     staged_aggregate = (
         select(
             staged.c.lot_id,
@@ -5440,6 +6203,12 @@ def _summary_statement(
             func.coalesce(box_aggregate.c.physical_box_count, 0).label(
                 "physical_box_count"
             ),
+            func.coalesce(file_aggregate.c.active_file_count, 0).label(
+                "active_file_count"
+            ),
+            func.coalesce(file_aggregate.c.archived_file_count, 0).label(
+                "archived_file_count"
+            ),
             *[
                 func.coalesce(
                     getattr(box_aggregate.c, f"{status.value}_count"), 0
@@ -5458,6 +6227,7 @@ def _summary_statement(
             box_aggregate.c.last_box_activity,
         )
         .outerjoin(box_aggregate, box_aggregate.c.lot_id == Lot.id)
+        .outerjoin(file_aggregate, file_aggregate.c.lot_id == Lot.id)
         .outerjoin(staged_aggregate, staged_aggregate.c.lot_id == Lot.id)
         .outerjoin(warehouse_aggregate, warehouse_aggregate.c.lot_id == Lot.id)
         .where(Lot.merged_into_lot_id.is_(None))
@@ -5563,6 +6333,8 @@ def list_lot_summaries(
                 updated_at=lot.updated_at,
                 physical_box_count=int(values["physical_box_count"]),
                 box_count=int(values["box_count"]),
+                active_file_count=int(values["active_file_count"]),
+                archived_file_count=int(values["archived_file_count"]),
                 status_counts={
                     status.value: int(values[f"{status.value}_count"])
                     for status in BoxStatus

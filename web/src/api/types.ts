@@ -98,6 +98,10 @@ export interface Box {
   pallet_id: number | null;
   pallet_number: string | null;
   contents: string | null;
+  file_count: number;
+  active_file_count: number;
+  archived_file_count: number;
+  files: FileSummary[];
   current_warehouse_id: number;
   status: BoxStatus;
   received_at: string | null;
@@ -455,6 +459,142 @@ export interface BoxRequestItem {
   pallet_number: string | null;
   box_number: string | null;
   contents: string | null;
+  files: RequestFileSnapshot[];
+}
+
+export interface FileInput {
+  reference: string;
+  description?: string | null;
+  barcode?: string | null;
+}
+
+export interface FileSummary extends FileInput {
+  id: number;
+  position: number;
+  version: number;
+}
+
+export type FileActivity = "active" | "archived" | "all";
+export type FileSortField =
+  | "reference"
+  | "lot"
+  | "pallet"
+  | "box"
+  | "warehouse"
+  | "status"
+  | "position"
+  | "created_at"
+  | "updated_at";
+
+export interface TrackedFile extends FileSummary {
+  lot_id: number;
+  lot: string;
+  pallet_id: number | null;
+  pallet: string | null;
+  box_id: number;
+  box: string;
+  warehouse_id: number;
+  warehouse: string;
+  status: BoxStatus;
+  is_active: boolean;
+  archived_at: string | null;
+  archived_by_user_id: number | null;
+  archive_reason: string | null;
+  created_at: string;
+  updated_at: string;
+  created_by_user_id: number | null;
+  updated_by_user_id: number | null;
+}
+
+export interface TrackedFileFilters {
+  search?: string;
+  warehouse_id?: number;
+  lot_id?: number;
+  pallet_id?: number;
+  box_id?: number;
+  status?: BoxStatus;
+  activity?: FileActivity;
+  include_inactive?: boolean;
+  sort_by?: FileSortField;
+  sort_dir?: "asc" | "desc";
+}
+
+export interface FileCreatePayload extends FileInput {
+  box_id: number;
+  position?: number;
+}
+
+export interface FileUpdatePayload extends Partial<FileInput> {
+  expected_version: number;
+  force?: boolean;
+  reason?: string;
+}
+
+export interface FileMovePayload {
+  box_id: number;
+  position?: number;
+  expected_version: number;
+  force?: boolean;
+  reason?: string;
+}
+
+export interface FileStateChangePayload {
+  expected_version: number;
+  position?: number;
+  reason: string;
+  force?: boolean;
+}
+
+export interface FileExportFilters extends TrackedFileFilters {}
+
+export interface TrackedFileEvent {
+  id: number;
+  file_id: number;
+  event_type:
+    | "created"
+    | "updated"
+    | "moved"
+    | "archived"
+    | "restored"
+    | "box_moved"
+    | "box_status_changed"
+    | "lot_reassigned";
+  before_snapshot: Record<string, unknown> | null;
+  after_snapshot: Record<string, unknown> | null;
+  actor_user_id: number | null;
+  reason: string | null;
+  occurred_at: string;
+  metadata: Record<string, unknown>;
+}
+
+export interface FileIntegrityIdGroup {
+  count: number;
+  file_ids: number[];
+  snapshot_ids: number[];
+}
+
+export interface FileIntegrity {
+  safe: boolean;
+  conflict_count: number;
+  cross_lot_placements: FileIntegrityIdGroup;
+  duplicate_normalized_references: {
+    count: number;
+    groups: Array<{
+      lot_id: number;
+      normalized_reference: string;
+      file_ids: number[];
+    }>;
+  };
+  invalid_positions: FileIntegrityIdGroup;
+  archived_files_in_active_workflows: FileIntegrityIdGroup;
+  detached_tracked_snapshots: FileIntegrityIdGroup;
+}
+
+export interface RequestFileSnapshot extends FileInput {
+  id: number;
+  file_id: number | null;
+  position: number;
+  snapshot_kind: "tracked_file" | "legacy_contents";
 }
 
 export interface RequestDocument {
@@ -828,6 +968,8 @@ export interface ReturnCandidate {
   pallet_id: number | null;
   pallet_number: string | null;
   contents: string | null;
+  file_count: number;
+  file_summary: string | null;
   status: "ready_to_return";
 }
 
@@ -896,6 +1038,8 @@ export interface PalletSummary {
   updated_by_user_id: number | null;
   physical_box_count: number;
   box_count: number;
+  active_file_count: number;
+  archived_file_count: number;
   status_counts: PalletStatusCounts;
   eligible_box_count: number;
   completed_box_count: number;
@@ -1035,6 +1179,8 @@ export interface LotSummary {
   updated_at: string;
   physical_box_count: number;
   box_count: number;
+  active_file_count: number;
+  archived_file_count: number;
   status_counts: LotStatusCounts;
   eligible_box_count: number;
   completed_box_count: number;
@@ -1096,6 +1242,18 @@ export interface LotArchivedBoxCollision {
   request_item_relink_count: number;
   discrepancy_relink_count: number;
   box_event_delete_count: number;
+  file_delete_count: number;
+  file_event_delete_count: number;
+}
+
+export interface LotFileReferenceCollision {
+  normalized_reference: string;
+  source_file_ids: number[];
+  target_file_ids: number[];
+  active_file_ids: number[];
+  archived_only: boolean;
+  survivor_file_id: number | null;
+  removed_file_ids: number[];
 }
 
 export interface LotHardBoxOverlap {
@@ -1125,6 +1283,11 @@ export interface LotMergeCandidate {
   pallet_actions: LotPalletMergeAction[];
   pallet_action_count: number;
   pallet_actions_truncated: boolean;
+  file_reference_collisions: LotFileReferenceCollision[];
+  file_reference_collision_count: number;
+  file_reference_collisions_truncated: boolean;
+  active_file_reference_collision_count: number;
+  archived_file_reference_collision_count: number;
   merge_allowed_with_archived_overwrite: boolean;
   requires_explicit_overwrite: boolean;
   collision_signature: string;
@@ -1180,6 +1343,9 @@ export interface LotMergeResult {
   moved_pallet_count: number;
   absorbed_pallet_ids: number[];
   moved_pallet_ids: number[];
+  moved_file_count: number;
+  overwritten_archived_file_count: number;
+  deleted_file_event_count: number;
 }
 
 export interface LotOption {
@@ -1282,6 +1448,11 @@ export interface LotPurgePreview {
   requests: LotPurgeRequestPreview[];
   requests_truncated: boolean;
   object_key_count: number;
+  file_count: number;
+  active_file_count: number;
+  archived_file_count: number;
+  file_event_count: number;
+  linked_file_snapshot_count: number;
   graph_signature: string;
   eligible: boolean;
   blockers: LotPurgeBlocker[];
@@ -1317,6 +1488,9 @@ export interface LotPurgeResult {
   object_key_count: number;
   object_cleanup_status: LotPurgeCleanupStatus;
   object_cleanup_failures: LotPurgeObjectFailure[];
+  file_count: number;
+  file_event_count: number;
+  detached_file_snapshot_count: number;
 }
 
 export interface LotPurgeCleanupResult {
@@ -1423,6 +1597,11 @@ export interface LotForcePurgePreview {
   incoming_lineage_detachments: LotForcePurgeLineageDetachment[];
   incoming_lineage_detachment_count: number;
   incoming_lineage_detachments_truncated: boolean;
+  file_count: number;
+  active_file_count: number;
+  archived_file_count: number;
+  file_event_count: number;
+  linked_file_snapshot_count: number;
   object_cleanup: LotForcePurgeObjectCleanupPlan;
   hard_blockers: LotForcePurgeBlocker[];
   overridden_blockers: LotForcePurgeBlocker[];
@@ -1455,6 +1634,9 @@ export interface LotForcePurgeResult {
   skipped_object_count: number;
   object_cleanup_status: LotPurgeCleanupStatus;
   object_cleanup_failure_count: number;
+  file_count: number;
+  file_event_count: number;
+  detached_file_snapshot_count: number;
 }
 
 export interface LotForcePurgeConflict {
@@ -1497,6 +1679,7 @@ export interface InboundRequestItemInput {
   pallet_number?: string | null;
   pallet_id?: number | null;
   contents?: string;
+  files?: FileInput[];
 }
 
 export type InboundCompletionClassification =
@@ -1545,6 +1728,28 @@ export interface InboundCompletionPreviewRow {
   target_warehouse_name: string;
   target_pallet_resolution: InboundCompletionTargetPallet;
   active_return_reservation_ids: number[];
+  file_impacts: InboundFileImpact[];
+  blocked_code: string | null;
+  blocked_message: string | null;
+}
+
+export type InboundFileAction =
+  | "create"
+  | "update"
+  | "move"
+  | "preserve"
+  | "blocked";
+
+export interface InboundFileImpact extends FileInput {
+  action: InboundFileAction;
+  file_id: number | null;
+  file_version: number | null;
+  source_box_id: number | null;
+  source_box_number: string | null;
+  source_warehouse_id: number | null;
+  source_warehouse_name: string | null;
+  source_status: BoxStatus | null;
+  target_box_id: number | null;
   blocked_code: string | null;
   blocked_message: string | null;
 }
@@ -1553,6 +1758,11 @@ export interface InboundCompletionPreviewSummary {
   created: number;
   relocated: number;
   blocked: number;
+  files_created: number;
+  files_updated: number;
+  files_moved: number;
+  files_preserved: number;
+  files_blocked: number;
   source_warehouse_counts: InboundCompletionSourceWarehouseCount[];
 }
 
@@ -1569,6 +1779,7 @@ export interface InboundCompletionPreview {
 
 export interface InboundCompletionFields {
   accept_existing_received_boxes: boolean;
+  accept_file_moves: boolean;
   inbound_impact_signature: string | null;
 }
 
@@ -1613,6 +1824,9 @@ export interface XlsxColumnMappings {
   box_number: XlsxColumnRef;
   pallet_number?: XlsxColumnRef | null;
   lot?: XlsxColumnRef;
+  file_reference?: XlsxColumnRef;
+  file_description?: XlsxColumnRef;
+  barcode?: XlsxColumnRef;
   contents?: XlsxColumnRef;
 }
 
@@ -1637,6 +1851,7 @@ export interface XlsxMappingTemplate {
   updated_at: string;
   is_owner: boolean;
   is_shared: boolean;
+  is_legacy_incomplete: boolean;
 }
 
 export interface XlsxMappingTemplateInput {

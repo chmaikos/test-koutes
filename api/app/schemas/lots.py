@@ -30,6 +30,8 @@ class LotSummaryOut(BaseModel):
     updated_at: datetime
     physical_box_count: int
     box_count: int
+    active_file_count: int
+    archived_file_count: int
     status_counts: LotStatusCounts
     eligible_box_count: int
     completed_box_count: int
@@ -129,6 +131,20 @@ class LotArchivedBoxCollisionOut(BaseModel):
     request_item_relink_count: int
     discrepancy_relink_count: int
     box_event_delete_count: int
+    file_delete_count: int
+    file_event_delete_count: int
+
+
+class LotFileReferenceCollisionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    normalized_reference: str
+    source_file_ids: list[int]
+    target_file_ids: list[int]
+    active_file_ids: list[int]
+    archived_only: bool
+    survivor_file_id: int | None
+    removed_file_ids: list[int]
 
 
 class LotHardBoxOverlapOut(BaseModel):
@@ -184,6 +200,11 @@ class LotMergeCandidateOut(BaseModel):
     pallet_actions: list[LotPalletMergeActionOut]
     pallet_action_count: int
     pallet_actions_truncated: bool
+    file_reference_collisions: list[LotFileReferenceCollisionOut]
+    file_reference_collision_count: int
+    file_reference_collisions_truncated: bool
+    active_file_reference_collision_count: int
+    archived_file_reference_collision_count: int
     merge_allowed_with_archived_overwrite: bool
     requires_explicit_overwrite: bool
     collision_signature: str = Field(
@@ -204,6 +225,9 @@ class LotMergeOut(BaseModel):
     moved_pallet_count: int = 0
     absorbed_pallet_ids: list[int] = Field(default_factory=list)
     moved_pallet_ids: list[int] = Field(default_factory=list)
+    moved_file_count: int = 0
+    overwritten_archived_file_count: int = 0
+    deleted_file_event_count: int = 0
 
 
 class LotMergeConflictOut(BaseModel):
@@ -290,6 +314,11 @@ class LotPurgePreviewOut(BaseModel):
     requests: list[LotPurgeRequestPreviewOut]
     requests_truncated: bool
     object_key_count: int
+    file_count: int
+    active_file_count: int
+    archived_file_count: int
+    file_event_count: int
+    linked_file_snapshot_count: int
     graph_signature: str
     eligible: bool
     blockers: list[LotPurgeBlockerOut]
@@ -326,6 +355,9 @@ class LotPurgeResultOut(BaseModel):
     object_cleanup_failures: list[LotPurgeObjectFailureOut] = Field(
         default_factory=list
     )
+    file_count: int = 0
+    file_event_count: int = 0
+    detached_file_snapshot_count: int = 0
 
 
 class LotPurgeCleanupOut(BaseModel):
@@ -446,6 +478,11 @@ class LotForcePurgePreviewOut(BaseModel):
     incoming_lineage_detachments: list[LotForcePurgeLineageDetachOut]
     incoming_lineage_detachment_count: int
     incoming_lineage_detachments_truncated: bool
+    file_count: int
+    active_file_count: int
+    archived_file_count: int
+    file_event_count: int
+    linked_file_snapshot_count: int
     object_cleanup: LotForcePurgeObjectCleanupPlanOut
     hard_blockers: list[LotForcePurgeBlockerOut]
     overridden_blockers: list[LotForcePurgeBlockerOut]
@@ -480,6 +517,9 @@ class LotForcePurgeResultOut(BaseModel):
     skipped_object_count: int
     object_cleanup_status: LotPurgeCleanupStatus
     object_cleanup_failure_count: int
+    file_count: int = 0
+    file_event_count: int = 0
+    detached_file_snapshot_count: int = 0
 
 
 class LotForcePurgeConflictOut(BaseModel):
@@ -536,6 +576,7 @@ __all__ = [
     "LotIdentityOut",
     "LotArchivedBoxCollisionOut",
     "LotHardBoxOverlapOut",
+    "LotFileReferenceCollisionOut",
     "LotPalletCollisionOut",
     "LotPalletMergeActionOut",
     "LotMerge",

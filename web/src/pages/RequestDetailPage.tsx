@@ -44,12 +44,15 @@ import type {
   RequestDocumentType,
 } from "@/api/types";
 import { ExcelRowMapper } from "@/components/ExcelRowMapper";
+import { FileItemsEditor } from "@/components/FileItemsEditor";
+import { validateFileItems } from "@/components/fileItems";
 import { LotPicker, type LotSelection } from "@/components/LotPicker";
 import { PalletPicker, type PalletSelection } from "@/components/PalletPicker";
 import {
   REQUEST_DIRECTION_LABEL,
   RequestStatusBadge,
 } from "@/components/RequestStatusBadge";
+import { STATUS_LABEL } from "@/components/StatusBadge";
 import { requestPermissions } from "@/pages/requestPermissions";
 import { normalizePalletNumber } from "@/pages/pallets";
 import {
@@ -82,6 +85,7 @@ import {
   isStaleInboundImpactConflict,
   mappedInboundAcceptance,
   reviewedInboundCompletion,
+  setInboundFileMoveAcceptance,
   setInboundRelocationAcceptance,
 } from "@/pages/inboundCompletion";
 
@@ -762,7 +766,7 @@ function ItemsSection({
               <th className="px-4 py-2.5">Box #</th>
               <th className="px-4 py-2.5">Lot</th>
               <th className="px-4 py-2.5">Pallet</th>
-              <th className="px-4 py-2.5">Item descriptions</th>
+              <th className="px-4 py-2.5">Immutable physical File snapshots</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
@@ -799,7 +803,20 @@ function ItemsSection({
                   )}
                 </td>
                 <td className="px-4 py-2.5 text-slate-600">
-                  {item.contents ?? "—"}
+                  {item.files.length > 0 ? (
+                    <ul className="space-y-1">
+                      {item.files.map((file) => (
+                        <li key={file.id}>
+                          {file.file_id ? <Link className="font-mono text-brand-700 hover:underline" to={`/files/${file.file_id}`}>{file.reference}</Link> : <span className="font-mono">{file.reference}</span>}
+                          {file.description ? <span> · {file.description}</span> : null}
+                          {file.barcode ? <span className="text-xs"> · {file.barcode}</span> : null}
+                          <span className="ml-1 text-xs text-slate-400">({file.snapshot_kind === "tracked_file" ? "tracked snapshot" : "legacy snapshot"})</span>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : item.contents ? (
+                    <span>{item.contents} <span className="text-xs text-slate-400">(legacy description)</span></span>
+                  ) : "No File snapshots"}
                 </td>
               </tr>
             ))}
@@ -849,8 +866,9 @@ function DraftSubmission({ request }: { request: BoxRequest }) {
             >
               {box.lot}
             </Link>
-            <span className="text-xs text-slate-500">
-              {box.pallet_number ?? "Unassigned"}
+            <span className="ml-auto text-right text-xs text-slate-500">
+              {box.pallet_number ?? "Unassigned"} · {box.file_count} File{box.file_count === 1 ? "" : "s"}
+              {box.file_summary ? <span className="block max-w-48 truncate" title={box.file_summary}>{box.file_summary}</span> : null}
             </span>
           </label>
         ))}
@@ -1625,7 +1643,7 @@ function CompletionDialog({
           lot: "",
           box_number: "",
           pallet_number: null,
-          contents: "",
+          files: [{ reference: "", description: "", barcode: "" }],
         }))
       : [],
   );
@@ -1678,7 +1696,8 @@ function CompletionDialog({
     rows.every(
       (row) =>
         row.box_number.trim().length > 0 &&
-        row.lot.trim().length > 0,
+        row.lot.trim().length > 0 &&
+        !validateFileItems(row.files ?? [], { requireAtLeastOne: true }),
     );
   const impactFingerprint = inboundCompletionFingerprint({
     requestId: request.id,
@@ -1701,6 +1720,7 @@ function CompletionDialog({
   const canCompleteImpact = canSubmitInboundCompletion(
     currentImpactPreview,
     impactReview.acceptRelocations,
+    impactReview.acceptFileMoves,
   );
 
   useEffect(() => {
@@ -1735,6 +1755,17 @@ function CompletionDialog({
     );
   }
 
+  function updateRowFiles(
+    index: number,
+    files: NonNullable<InboundRequestItemInput["files"]>,
+  ) {
+    setRows((current) =>
+      current.map((row, rowIndex) =>
+        rowIndex === index ? { ...row, files } : row,
+      ),
+    );
+  }
+
   return (
     <div className="modal-backdrop">
       <div
@@ -1764,6 +1795,7 @@ function CompletionDialog({
                 inboundCompletionFields(
                   currentImpactPreview,
                   impactReview.acceptRelocations,
+                  impactReview.acceptFileMoves,
                 ),
               );
               if (result === "stale") {
@@ -1849,7 +1881,7 @@ function CompletionDialog({
                       <Trash2 className="h-4 w-4" /> Remove
                     </button>
                   </div>
-                  <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                  <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                     <label className="block">
                       <span className="text-xs text-slate-500">Box number</span>
                       <input
@@ -1904,19 +1936,14 @@ function CompletionDialog({
                       }
                       label="Pallet"
                     />
-                    <label className="block">
-                      <span className="text-xs text-slate-500">
-                        Item descriptions (optional)
-                      </span>
-                      <input
-                        className="input"
-                        maxLength={2000}
-                        value={row.contents ?? ""}
-                        onChange={(event) =>
-                          updateRow(index, "contents", event.target.value)
-                        }
-                      />
-                    </label>
+                  </div>
+                  <div className="mt-3">
+                    <FileItemsEditor
+                      value={row.files ?? []}
+                      onChange={(files) => updateRowFiles(index, files)}
+                      requireAtLeastOne
+                      label={`Physical Files in Box ${row.box_number || index + 1}`}
+                    />
                   </div>
                 </fieldset>
               ))}
@@ -1930,7 +1957,7 @@ function CompletionDialog({
                       lot: "",
                       box_number: "",
                       pallet_number: null,
-                      contents: "",
+                      files: [{ reference: "", description: "", barcode: "" }],
                     },
                   ])
                 }
@@ -2003,9 +2030,15 @@ function CompletionDialog({
                 ordered={request.quantity}
                 preview={currentImpactPreview}
                 acceptRelocations={impactReview.acceptRelocations}
+                acceptFileMoves={impactReview.acceptFileMoves}
                 onAcceptRelocations={(accepted) =>
                   setImpactReview((current) =>
                     setInboundRelocationAcceptance(current, accepted),
+                  )
+                }
+                onAcceptFileMoves={(accepted) =>
+                  setImpactReview((current) =>
+                    setInboundFileMoveAcceptance(current, accepted),
                   )
                 }
               />
@@ -2127,6 +2160,10 @@ function CompletionDialog({
                   ) : (
                     <span className="text-sm text-slate-500">{item.lot}</span>
                   )}
+                  <span className="ml-auto text-right text-xs text-slate-500">
+                    {item.files.length} physical File{item.files.length === 1 ? "" : "s"}
+                    {item.files.length > 0 ? ` · ${item.files.slice(0, 2).map((file) => file.reference).join(", ")}${item.files.length > 2 ? "…" : ""}` : ""}
+                  </span>
                 </label>
               ))}
             </div>
@@ -2175,12 +2212,16 @@ function InboundImpactPreview({
   ordered,
   preview,
   acceptRelocations,
+  acceptFileMoves,
   onAcceptRelocations,
+  onAcceptFileMoves,
 }: {
   ordered: number;
   preview: InboundCompletionPreview;
   acceptRelocations: boolean;
+  acceptFileMoves: boolean;
   onAcceptRelocations: (accepted: boolean) => void;
+  onAcceptFileMoves: (accepted: boolean) => void;
 }) {
   const created = preview.rows.filter(
     (row) => row.classification === "create",
@@ -2228,6 +2269,36 @@ function InboundImpactPreview({
           tone={preview.summary.blocked > 0 ? "text-rose-700" : "text-slate-700"}
         />
       </dl>
+      <dl className="grid grid-cols-2 gap-3 sm:grid-cols-5">
+        <ImpactMetric label="Files new" value={preview.summary.files_created} tone="text-emerald-700" />
+        <ImpactMetric label="Files updated" value={preview.summary.files_updated} tone="text-amber-700" />
+        <ImpactMetric label="Files moved" value={preview.summary.files_moved} tone="text-sky-700" />
+        <ImpactMetric label="Files preserved" value={preview.summary.files_preserved} tone="text-slate-700" />
+        <ImpactMetric label="Files blocked" value={preview.summary.files_blocked} tone="text-rose-700" />
+      </dl>
+      {preview.rows.some((row) => row.file_impacts.length > 0) && (
+        <ImpactRows title="Physical File reconciliation details">
+          {preview.rows.flatMap((row) =>
+            row.file_impacts.map((file) => (
+              <li
+                key={`${impactRowKey(row)}-${file.reference}`}
+                className={`rounded p-2 ${file.action === "blocked" ? "bg-rose-50 text-rose-900" : "bg-slate-50"}`}
+              >
+                <strong className="font-mono">{file.reference}</strong>
+                {" · "}{file.action}
+                <span className="block text-xs">
+                  Box {file.source_box_number ?? "new"} → {row.box_number}
+                  {file.source_warehouse_name ? ` · from ${file.source_warehouse_name}` : ""}
+                  {file.source_status ? ` · ${STATUS_LABEL[file.source_status]}` : ""}
+                  {file.description ? ` · ${file.description}` : ""}
+                  {file.barcode ? ` · barcode ${file.barcode}` : ""}
+                </span>
+                {file.blocked_message && <span className="block text-xs font-medium">{file.blocked_message}</span>}
+              </li>
+            )),
+          )}
+        </ImpactRows>
+      )}
 
       {created.length > 0 && (
         <ImpactRows title="New boxes">
@@ -2245,6 +2316,26 @@ function InboundImpactPreview({
             </li>
           ))}
         </ImpactRows>
+      )}
+
+      {preview.summary.files_moved > 0 && (
+        <label className="flex items-start gap-3 rounded-lg border border-amber-300 bg-amber-50 p-3">
+          <input
+            type="checkbox"
+            className="mt-1"
+            checked={acceptFileMoves}
+            onChange={(event) => onAcceptFileMoves(event.target.checked)}
+          />
+          <span>
+            <strong className="text-sm text-amber-950">
+              Move all {preview.summary.files_moved} matched files
+            </strong>
+            <span className="mt-1 block text-xs text-amber-900">
+              These references are currently active in another box in the same
+              lot. Completion will move them to their mapped boxes.
+            </span>
+          </span>
+        </label>
       )}
 
       {relocated.length > 0 && (

@@ -22,6 +22,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 from app.db import Base
 
 if TYPE_CHECKING:
+    from app.models.box_files import BoxFile
     from app.models.boxes import Box
     from app.models.pallets import Pallet
 
@@ -122,6 +123,10 @@ class Lot(Base):
     __mapper_args__ = {"version_id_col": version}
 
     boxes: Mapped[list[Box]] = relationship(back_populates="lot_record")
+    files: Mapped[list[BoxFile]] = relationship(
+        back_populates="lot",
+        overlaps="box,files",
+    )
     pallets: Mapped[list[Pallet]] = relationship(back_populates="lot")
     events: Mapped[list[LotEvent]] = relationship(
         back_populates="lot",

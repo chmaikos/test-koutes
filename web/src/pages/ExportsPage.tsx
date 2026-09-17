@@ -1,18 +1,32 @@
 import { useState } from "react";
 import { Download } from "lucide-react";
 import { api } from "@/api/client";
-import { useRequestAssignees, useWarehouses } from "@/api/hooks";
-import type { BoxStatus, LotProgressState, PalletProgressState, RequestIssueSeverity } from "@/api/types";
+import { useBoxes, useRequestAssignees, useWarehouses } from "@/api/hooks";
+import type { BoxStatus, FileActivity, FileSortField, LotProgressState, PalletProgressState, RequestIssueSeverity } from "@/api/types";
 import { ALL_BOX_STATUSES } from "@/api/types";
 import { STATUS_LABEL } from "@/components/StatusBadge";
+import { LotPicker, type LotSelection } from "@/components/LotPicker";
+import { PalletPicker, type PalletSelection } from "@/components/PalletPicker";
+import { useHasRole } from "@/components/RoleGate";
 
 export function ExportsPage() {
+  const isAdmin = useHasRole(["admin"]);
   const warehouses = useWarehouses(true);
   const [warehouseId, setWarehouseId] = useState<number | "">("");
   const [status, setStatus] = useState<BoxStatus | "">("");
   const [receivedFrom, setReceivedFrom] = useState("");
   const [receivedTo, setReceivedTo] = useState("");
   const [downloading, setDownloading] = useState<"csv" | "xlsx" | null>(null);
+  const [fileSearch, setFileSearch] = useState("");
+  const [fileWarehouseId, setFileWarehouseId] = useState<number | "">("");
+  const [fileLot, setFileLot] = useState<LotSelection | null>(null);
+  const [filePallet, setFilePallet] = useState<PalletSelection | null>(null);
+  const [fileBoxId, setFileBoxId] = useState<number | "">("");
+  const [fileStatus, setFileStatus] = useState<BoxStatus | "">("");
+  const [fileActivity, setFileActivity] = useState<FileActivity>("active");
+  const [fileIncludeInactive, setFileIncludeInactive] = useState(false);
+  const [fileSort, setFileSort] = useState<FileSortField>("reference");
+  const [fileDownloading, setFileDownloading] = useState<"csv" | "xlsx" | null>(null);
   const [lotSearch, setLotSearch] = useState("");
   const [lotWarehouseId, setLotWarehouseId] = useState<number | "">("");
   const [lotProgress, setLotProgress] = useState<LotProgressState | "">("");
@@ -42,6 +56,17 @@ export function ExportsPage() {
   );
   const requestAssignees = useRequestAssignees(
     requestWarehouseId || undefined,
+  );
+  const fileBoxes = useBoxes(
+    {
+      lot_id: fileLot?.id,
+      pallet_id: filePallet?.id,
+      warehouse_id: fileWarehouseId || undefined,
+      sort_by: "box_number",
+      sort_dir: "asc",
+    },
+    1,
+    200,
   );
 
   async function download(format: "csv" | "xlsx") {
@@ -114,6 +139,41 @@ export function ExportsPage() {
       alert(`Export failed${status ? `: status ${status}` : ""}`);
     } finally {
       setProductivityDownloading(null);
+    }
+  }
+
+  async function downloadFiles(format: "csv" | "xlsx") {
+    setFileDownloading(format);
+    try {
+      const params: Record<string, string | number | boolean> = {
+        activity: fileActivity,
+        include_inactive: isAdmin && fileIncludeInactive,
+        sort_by: fileSort,
+        sort_dir: "asc",
+      };
+      if (fileSearch.trim()) params.search = fileSearch.trim();
+      if (fileWarehouseId) params.warehouse_id = fileWarehouseId;
+      if (fileLot) params.lot_id = fileLot.id;
+      if (filePallet) params.pallet_id = filePallet.id;
+      if (fileBoxId) params.box_id = fileBoxId;
+      if (fileStatus) params.status = fileStatus;
+      const response = await api.get<Blob>(`/exports/files.${format}`, {
+        params,
+        responseType: "blob",
+      });
+      const url = URL.createObjectURL(response.data);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `physical-files-${new Date().toISOString().replace(/[:.]/g, "-")}.${format}`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch (err) {
+      const status = (err as { response?: { status?: number } }).response?.status;
+      alert(`File export failed${status ? `: status ${status}` : ""}`);
+    } finally {
+      setFileDownloading(null);
     }
   }
 
@@ -230,8 +290,8 @@ export function ExportsPage() {
         <div>
           <h2 className="font-semibold">Box inventory</h2>
           <p className="text-xs text-slate-500">
-            Download boxes with lot, pallet, status, and free-text item
-            descriptions matching the selected filters.
+            Box-granular rows with lot, pallet, status, physical File count and
+            File summary matching the selected filters.
           </p>
         </div>
         <div className="grid gap-4 md:grid-cols-2">
@@ -307,6 +367,31 @@ export function ExportsPage() {
           <Download className="h-4 w-4" />
           {downloading === "xlsx" ? "Preparing..." : "Download XLSX"}
         </button>
+        </div>
+      </section>
+
+      <section className="card card-pad space-y-4">
+        <div>
+          <h2 className="font-semibold">Physical Files</h2>
+          <p className="text-xs text-slate-500">
+            Export one row per tracked physical File. This does not export
+            uploaded ERP documents.
+          </p>
+        </div>
+        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+          <label className="block"><span className="text-xs text-slate-500">Search</span><input className="input" placeholder="Reference, description, barcode" value={fileSearch} onChange={(event) => setFileSearch(event.target.value)} /></label>
+          <label className="block"><span className="text-xs text-slate-500">Warehouse</span><select className="input" value={fileWarehouseId} onChange={(event) => setFileWarehouseId(event.target.value ? Number(event.target.value) : "")}><option value="">All accessible</option>{warehouses.data?.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}</select></label>
+          <LotPicker label="Lot" value={fileLot} onChange={(lot) => { setFileLot(lot); setFilePallet(null); setFileBoxId(""); }} warehouseId={fileWarehouseId || undefined} />
+          <PalletPicker label="Pallet" value={filePallet} onChange={(pallet) => { setFilePallet(pallet); setFileBoxId(""); }} lotId={fileLot?.id} warehouseId={fileWarehouseId || undefined} disabled={!fileLot} />
+          <label className="block"><span className="text-xs text-slate-500">Box</span><select className="input" value={fileBoxId} onChange={(event) => setFileBoxId(event.target.value ? Number(event.target.value) : "")}><option value="">All matching Boxes</option>{fileBoxes.data?.items.map((box) => <option key={box.id} value={box.id}>{box.box_number} · {box.lot}</option>)}</select></label>
+          <label className="block"><span className="text-xs text-slate-500">Inherited status</span><select className="input" value={fileStatus} onChange={(event) => setFileStatus(event.target.value as BoxStatus | "")}><option value="">All</option>{ALL_BOX_STATUSES.map((status) => <option key={status} value={status}>{STATUS_LABEL[status]}</option>)}</select></label>
+          <label className="block"><span className="text-xs text-slate-500">File activity</span><select className="input" value={fileActivity} onChange={(event) => setFileActivity(event.target.value as FileActivity)}><option value="active">Active</option><option value="archived">Archived</option><option value="all">Active and archived</option></select></label>
+          <label className="block"><span className="text-xs text-slate-500">Sort by</span><select className="input" value={fileSort} onChange={(event) => setFileSort(event.target.value as FileSortField)}>{["reference", "lot", "pallet", "box", "warehouse", "status", "position", "created_at", "updated_at"].map((field) => <option key={field} value={field}>{field.replaceAll("_", " ")}</option>)}</select></label>
+        </div>
+        {isAdmin && <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={fileIncludeInactive} onChange={(event) => setFileIncludeInactive(event.target.checked)} />Include Files inherited from archived Boxes, Lots, pallets, or warehouses</label>}
+        <div className="flex flex-wrap gap-3">
+          <button className="btn-primary" disabled={fileDownloading !== null} onClick={() => void downloadFiles("csv")}><Download className="h-4 w-4" />{fileDownloading === "csv" ? "Preparing…" : "Download Files CSV"}</button>
+          <button className="btn-secondary" disabled={fileDownloading !== null} onClick={() => void downloadFiles("xlsx")}><Download className="h-4 w-4" />{fileDownloading === "xlsx" ? "Preparing…" : "Download Files XLSX"}</button>
         </div>
       </section>
 

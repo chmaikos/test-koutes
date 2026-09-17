@@ -130,13 +130,17 @@ export function LotDetailPage() {
           )}
         </div>
 
-        <dl className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+        <dl className="grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
           <Metric label="Total boxes" value={summary.box_count} />
+          <Metric label="Active Files" value={summary.active_file_count} />
           <Metric label="Eligible" value={summary.eligible_box_count} />
           <Metric label="Completed" value={summary.completed_box_count} />
           <Metric label="Quarantined" value={summary.status_counts.quarantined} />
           <Metric label="Staged receipts" value={summary.staged_receipt_count} />
         </dl>
+        <Link className="text-sm text-brand-700 hover:underline" to={`/files?lot_id=${summary.id}&lot_name=${encodeURIComponent(summary.name)}&activity=all`}>
+          Browse {summary.active_file_count} active and {summary.archived_file_count} archived physical Files
+        </Link>
 
         <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_18rem]">
           <div>
@@ -189,6 +193,7 @@ export function LotDetailPage() {
                 <span className="text-xs text-slate-500">{pallet.box_count} boxes</span>
               </div>
               <p className="mt-1 text-xs text-slate-600">{pallet.completion_percent === null ? "N/A" : `${Math.round(pallet.completion_percent)}%`} complete</p>
+              <p className="mt-1 text-xs text-slate-500">{pallet.active_file_count} active Files · {pallet.archived_file_count} archived</p>
               <p className="mt-1 text-xs text-slate-500">{pallet.warehouse_names.length ? `Boxes currently in ${pallet.warehouse_names.join(", ")}` : "No boxes in accessible warehouses"}</p>
             </Link>
           ))}
@@ -268,7 +273,7 @@ export function LotDetailPage() {
                   <th className="px-4 py-2.5">Status</th>
                   <th className="px-4 py-2.5">Warehouse</th>
                   <th className="px-4 py-2.5">Pallet</th>
-                  <th className="px-4 py-2.5">Item descriptions</th>
+                  <th className="px-4 py-2.5">Physical Files</th>
                   <th className="px-4 py-2.5">Updated</th>
                 </tr>
               </thead>
@@ -287,9 +292,7 @@ export function LotDetailPage() {
                     <td className="px-4 py-3">
                       {box.pallet_id ? <Link className="text-brand-700 hover:underline" to={`/pallets/${box.pallet_id}`}>{box.pallet_number ?? `#${box.pallet_id}`}</Link> : <span className="font-medium text-amber-700">Unassigned</span>}
                     </td>
-                    <td className="max-w-80 truncate px-4 py-3 text-slate-600">
-                      {box.contents || "—"}
-                    </td>
+                    <td className="px-4 py-3"><Link className="text-brand-700 hover:underline" to={`/files?box_id=${box.id}&activity=all`}>{box.active_file_count} active · {box.archived_file_count} archived</Link></td>
                     <td className="whitespace-nowrap px-4 py-3 text-slate-500">
                       {new Date(box.updated_at).toLocaleString()}
                     </td>

@@ -1,12 +1,16 @@
 import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { ArrowLeft, Trash2 } from "lucide-react";
+import { Archive, ArrowLeft, Pencil, Plus, Trash2 } from "lucide-react";
 import {
+  useArchiveFile,
   useBox,
   useBoxEvents,
+  useCreateFile,
   useDeleteBox,
+  useFiles,
   useLot,
   useReassignBoxLot,
+  useUpdateFile,
   useUpdateBox,
   useWarehouses,
 } from "@/api/hooks";
@@ -135,7 +139,7 @@ export function BoxDetailPage() {
           <Field label="Returned">
             {box.returned_at ? new Date(box.returned_at).toLocaleString() : "—"}
           </Field>
-          <Field label="Item descriptions">
+          <Field label="Legacy item descriptions">
             {box.contents ?? "—"}
           </Field>
           <Field label="Pallet">
@@ -485,6 +489,11 @@ export function BoxDetailPage() {
         </section>
       )}
 
+      <BoxFilesPanel
+        box={box}
+        canWrite={canWrite && !box.archived_at}
+      />
+
       <section className="card card-pad">
         <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-500">
           Activity
@@ -611,6 +620,151 @@ export function BoxDetailPage() {
           }}
         />
       )}
+    </div>
+  );
+}
+
+function BoxFilesPanel({
+  box,
+  canWrite,
+}: {
+  box: import("@/api/types").Box;
+  canWrite: boolean;
+}) {
+  const files = useFiles(
+    { box_id: box.id, activity: "all", include_inactive: true, sort_by: "position", sort_dir: "asc" },
+    1,
+    200,
+  );
+  const [editing, setEditing] = useState<import("@/api/types").TrackedFile | "new" | null>(null);
+  return (
+    <section className="card overflow-hidden">
+      <header className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 p-4">
+        <div>
+          <h2 className="font-semibold">Contained physical Files</h2>
+          <p className="text-xs text-slate-500">
+            Authoritative contents: {box.active_file_count} active · {box.archived_file_count} archived.
+            These are tracked inventory Files, not uploaded documents.
+          </p>
+        </div>
+        {canWrite && (
+          <button className="btn-primary" onClick={() => setEditing("new")}>
+            <Plus className="h-4 w-4" /> Add File
+          </button>
+        )}
+      </header>
+      {files.isLoading && <p role="status" className="p-5 text-sm text-slate-500">Loading contained Files…</p>}
+      {files.isError && <p role="alert" className="p-5 text-sm text-rose-700">Contained Files could not be loaded.</p>}
+      {!files.isLoading && files.data?.items.length === 0 && (
+        <p className="p-6 text-center text-sm text-slate-500">This Box has no tracked physical Files.</p>
+      )}
+      <div className="divide-y divide-slate-100">
+        {files.data?.items.map((file) => (
+          <div key={file.id} className={`flex flex-wrap items-center gap-3 px-4 py-3 text-sm ${file.is_active ? "" : "bg-slate-50 text-slate-500"}`}>
+            <div className="min-w-0 flex-1">
+              <Link className="font-mono font-medium text-brand-700 hover:underline" to={`/files/${file.id}`}>{file.reference}</Link>
+              {!file.is_active && <span className="ml-2 rounded bg-slate-200 px-1.5 py-0.5 text-xs">Archived</span>}
+              <p className="truncate text-xs text-slate-500" title={file.description ?? undefined}>
+                {file.description || "No description"}{file.barcode ? ` · ${file.barcode}` : ""}
+              </p>
+            </div>
+            <span className="text-xs text-slate-400">Position {file.position}</span>
+            <Link className="btn-ghost" to={`/files/${file.id}`}>Open</Link>
+            {canWrite && file.is_active && (
+              <button className="btn-ghost" onClick={() => setEditing(file)}><Pencil className="h-4 w-4" /> Edit</button>
+            )}
+          </div>
+        ))}
+      </div>
+      {editing && <BoxFileDialog boxId={box.id} file={editing === "new" ? null : editing} onClose={() => setEditing(null)} />}
+    </section>
+  );
+}
+
+function BoxFileDialog({
+  boxId,
+  file,
+  onClose,
+}: {
+  boxId: number;
+  file: import("@/api/types").TrackedFile | null;
+  onClose: () => void;
+}) {
+  const create = useCreateFile();
+  const update = useUpdateFile();
+  const archive = useArchiveFile();
+  const [reference, setReference] = useState(file?.reference ?? "");
+  const [description, setDescription] = useState(file?.description ?? "");
+  const [barcode, setBarcode] = useState(file?.barcode ?? "");
+  const [archiveReason, setArchiveReason] = useState("");
+  const [showArchive, setShowArchive] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const pending = create.isPending || update.isPending || archive.isPending;
+  async function save(event: React.FormEvent) {
+    event.preventDefault();
+    setError(null);
+    try {
+      if (file) {
+        await update.mutateAsync({
+          id: file.id,
+          payload: {
+            expected_version: file.version,
+            reference: reference.trim(),
+            description: description.trim() || null,
+            barcode: barcode.trim() || null,
+          },
+        });
+      } else {
+        await create.mutateAsync({
+          box_id: boxId,
+          reference: reference.trim(),
+          description: description.trim() || undefined,
+          barcode: barcode.trim() || undefined,
+        });
+      }
+      onClose();
+    } catch (caught) {
+      setError(apiError(caught, "The physical File could not be saved."));
+    }
+  }
+  return (
+    <div className="modal-backdrop z-40">
+      <form className="modal-sheet max-h-[90vh] max-w-lg overflow-y-auto" role="dialog" aria-modal="true" aria-labelledby="box-file-dialog-title" onSubmit={save}>
+        <h2 id="box-file-dialog-title" className="text-lg font-semibold">{file ? "Edit" : "Add"} physical File</h2>
+        <p className="mt-1 text-xs text-slate-500">A physical File is a tracked Box content item, not an ERP upload.</p>
+        <div className="mt-4 space-y-3">
+          <label className="block"><span className="text-xs text-slate-500">Reference *</span><input required className="input" maxLength={255} value={reference} onChange={(event) => setReference(event.target.value)} /></label>
+          <label className="block"><span className="text-xs text-slate-500">Description</span><textarea className="input" rows={3} maxLength={10000} value={description} onChange={(event) => setDescription(event.target.value)} /></label>
+          <label className="block"><span className="text-xs text-slate-500">Barcode</span><input className="input" maxLength={255} value={barcode} onChange={(event) => setBarcode(event.target.value)} /></label>
+        </div>
+        {file && showArchive && (
+          <label className="mt-4 block rounded-lg border border-amber-200 bg-amber-50 p-3"><span className="text-xs font-medium text-amber-900">Required archive reason</span><textarea required className="input mt-1 bg-white" rows={2} maxLength={2000} value={archiveReason} onChange={(event) => setArchiveReason(event.target.value)} /></label>
+        )}
+        {error && <p role="alert" className="mt-3 text-sm text-rose-600">{error}</p>}
+        <div className="mt-5 flex flex-wrap justify-end gap-2">
+          {file && (
+            <button
+              type="button"
+              className="btn-danger mr-auto"
+              disabled={pending || (showArchive && !archiveReason.trim())}
+              onClick={async () => {
+                if (!showArchive) {
+                  setShowArchive(true);
+                  return;
+                }
+                try {
+                  await archive.mutateAsync({ id: file.id, payload: { expected_version: file.version, reason: archiveReason.trim() } });
+                  onClose();
+                } catch (caught) {
+                  setError(apiError(caught, "The File could not be archived."));
+                }
+              }}
+            ><Archive className="h-4 w-4" /> {showArchive ? "Confirm archive" : "Archive"}</button>
+          )}
+          <button type="button" className="btn-secondary" onClick={onClose} disabled={pending}>Cancel</button>
+          <button className="btn-primary" disabled={pending || !reference.trim()}>{pending ? "Saving…" : "Save File"}</button>
+        </div>
+      </form>
     </div>
   );
 }

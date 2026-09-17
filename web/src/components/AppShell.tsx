@@ -14,6 +14,7 @@ import {
   Boxes as BoxesIcon,
   ClipboardList,
   Download,
+  Files,
   LayoutDashboard,
   Layers3,
   LogOut,
@@ -37,6 +38,7 @@ interface NavItem {
 const NAV_ITEMS: NavItem[] = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard },
   { to: "/boxes", label: "Boxes", icon: BoxesIcon },
+  { to: "/files", label: "Files", icon: Files },
   { to: "/lots", label: "Lots", icon: Layers3 },
   { to: "/pallets", label: "Pallets", icon: Layers3 },
   { to: "/requests", label: "Requests", icon: ClipboardList },
@@ -57,6 +59,7 @@ const NAV_ITEMS: NavItem[] = [
 function titleForPath(pathname: string): string {
   if (pathname === "/" || pathname === "") return "Dashboard";
   if (pathname.startsWith("/boxes")) return "Boxes";
+  if (pathname.startsWith("/files")) return "Physical Files";
   if (pathname.startsWith("/lots")) return "Lots";
   if (pathname.startsWith("/pallets")) return "Pallets";
   if (pathname.startsWith("/requests")) return "Requests";

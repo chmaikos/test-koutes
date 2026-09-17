@@ -7,8 +7,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
-from sqlalchemy import Select, func, select
+from sqlalchemy import Select, func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -36,6 +37,9 @@ from app.services.acl import can_access
 from app.services.lots import LotRuleError, lock_lots_exclusively, resolve_lot
 from app.services.request_notifications import enqueue_request_event
 from app.services.warehouses import WarehouseRuleError, ensure_active_warehouse
+
+if TYPE_CHECKING:
+    from app.services.box_files import InheritedBoxChange
 
 # Valid forward transitions: a box walks the chain one step at a time. The
 # physical reality is:
@@ -406,6 +410,7 @@ def create_box(
     pallet_number: str | None = None,
     pallet_id: int | None = None,
     contents: str | None = None,
+    files: list[object] | None = None,
     note: str | None = None,
     initial_status: BoxStatus = BoxStatus.received,
     receipt_authorized_pallet_creation: bool = False,
@@ -510,6 +515,22 @@ def create_box(
                     },
                 )
             )
+            from app.services.box_files import (
+                BoxFileConflictError,
+                reconcile_intake_box_files,
+            )
+
+            try:
+                reconcile_intake_box_files(
+                    db,
+                    user=user,
+                    box=box,
+                    files=files,
+                    contents=cleaned_contents,
+                    reason=note or "Created during box receipt.",
+                )
+            except BoxFileConflictError as exc:
+                raise BoxConflictError(str(exc)) from exc
             db.flush()
     except IntegrityError as exc:
         raise BoxConflictError(
@@ -534,6 +555,7 @@ def restore_archived_box(
     pallet_number: str | None = None,
     pallet_id: int | None = None,
     contents: str | None = None,
+    files: list[object] | None = None,
     note: str | None = None,
     restored_status: BoxStatus = BoxStatus.received,
     commit: bool = True,
@@ -653,6 +675,60 @@ def restore_archived_box(
             note=context,
         )
     )
+    from app.models.box_files import BoxFileEventType
+    from app.services.box_files import (
+        InheritedBoxChange,
+        emit_inherited_box_file_events,
+    )
+
+    db.flush([box])
+    inherited_changes: list[InheritedBoxChange] = []
+    if old_warehouse_id != warehouse_id:
+        inherited_changes.append(
+            InheritedBoxChange(
+                box_id=box.id,
+                event_type=BoxFileEventType.box_moved,
+                from_warehouse_id=old_warehouse_id,
+                to_warehouse_id=warehouse_id,
+                from_status=old_status,
+                to_status=old_status,
+            )
+        )
+    if old_status != restored_status:
+        inherited_changes.append(
+            InheritedBoxChange(
+                box_id=box.id,
+                event_type=BoxFileEventType.box_status_changed,
+                from_warehouse_id=warehouse_id,
+                to_warehouse_id=warehouse_id,
+                from_status=old_status,
+                to_status=restored_status,
+            )
+        )
+    emit_inherited_box_file_events(
+        db,
+        changes=inherited_changes,
+        user=user,
+        reason=context,
+        metadata={"operation": "box_restore"},
+        now=now,
+    )
+    from app.services.box_files import (
+        BoxFileConflictError,
+        reconcile_intake_box_files,
+    )
+
+    try:
+        reconcile_intake_box_files(
+            db,
+            user=user,
+            box=box,
+            files=files,
+            contents=cleaned_contents,
+            reason=note or "Restored during box receipt.",
+        )
+    except BoxFileConflictError as exc:
+        raise BoxConflictError(str(exc)) from exc
     if commit:
         db.commit()
         db.refresh(box)
@@ -692,6 +768,7 @@ def update_box(
     new_status: BoxStatus | None = None,
     new_warehouse_id: int | None = None,
     new_contents: str | None = None,
+    new_files: list[object] | None = None,
     note: str | None = None,
     force: bool = False,
     commit: bool = True,
@@ -700,9 +777,12 @@ def update_box(
     detach_pallet: bool = False,
     additional_event_metadata: dict[str, object] | None = None,
     skip_request_guards: bool = False,
+    emit_file_events: bool = True,
     _request_return_move: _RequestReturnMove | None = None,
 ) -> Box:
     now = datetime.now(UTC)
+    initial_warehouse_id = box.current_warehouse_id
+    initial_status = box.status
     events: list[BoxEvent] = []
     audit_note = _audit_note(note, force=force)
     metadata_changed = False
@@ -903,6 +983,26 @@ def update_box(
             )
         )
 
+    files_supplied = new_files is not None or new_contents is not None
+    if files_supplied:
+        from app.services.box_files import (
+            BoxFileConflictError,
+            reconcile_intake_box_files,
+        )
+
+        try:
+            reconcile_intake_box_files(
+                db,
+                user=user,
+                box=box,
+                files=new_files,
+                contents=new_contents,
+                reason=audit_note or "Updated through box intake contract.",
+            )
+        except BoxFileConflictError as exc:
+            raise BoxConflictError(str(exc)) from exc
+        metadata_changed = True
+
     if not events and not metadata_changed:
         return box
 
@@ -910,6 +1010,44 @@ def update_box(
     box.updated_at = now
     for ev in events:
         db.add(ev)
+    if emit_file_events:
+        from app.models.box_files import BoxFileEventType
+        from app.services.box_files import (
+            InheritedBoxChange,
+            emit_inherited_box_file_events,
+        )
+
+        inherited_changes: list[InheritedBoxChange] = []
+        if initial_warehouse_id != box.current_warehouse_id:
+            inherited_changes.append(
+                InheritedBoxChange(
+                    box_id=box.id,
+                    event_type=BoxFileEventType.box_moved,
+                    from_warehouse_id=initial_warehouse_id,
+                    to_warehouse_id=box.current_warehouse_id,
+                    from_status=initial_status,
+                    to_status=initial_status,
+                )
+            )
+        if initial_status != box.status:
+            inherited_changes.append(
+                InheritedBoxChange(
+                    box_id=box.id,
+                    event_type=BoxFileEventType.box_status_changed,
+                    from_warehouse_id=box.current_warehouse_id,
+                    to_warehouse_id=box.current_warehouse_id,
+                    from_status=initial_status,
+                    to_status=box.status,
+                )
+            )
+        emit_inherited_box_file_events(
+            db,
+            changes=inherited_changes,
+            user=user,
+            reason=audit_note,
+            metadata=additional_event_metadata,
+            now=now,
+        )
     if commit:
         db.commit()
         db.refresh(box)
@@ -1043,6 +1181,32 @@ def _move_received_box_for_inbound_request(
     box.current_warehouse_id = target_warehouse_id
     box.updated_by_user_id = user.id
     box.updated_at = now
+    from app.models.box_files import BoxFileEventType
+    from app.services.box_files import (
+        InheritedBoxChange,
+        emit_inherited_box_file_events,
+    )
+
+    emit_inherited_box_file_events(
+        db,
+        changes=[
+            InheritedBoxChange(
+                box_id=box.id,
+                event_type=BoxFileEventType.box_moved,
+                from_warehouse_id=source_warehouse_id,
+                to_warehouse_id=target_warehouse_id,
+                from_status=BoxStatus.received,
+                to_status=BoxStatus.received,
+            )
+        ],
+        user=user,
+        reason=reason,
+        metadata={
+            **metadata,
+            "operation": "inbound_existing_box_relocation",
+        },
+        now=now,
+    )
     if commit:
         db.commit()
         db.refresh(box)
@@ -1157,6 +1321,47 @@ def reassign_box_lot(
             f"box {locked.box_number!r} already exists in lot {target_lot.name!r}"
         )
 
+    from app.models.box_files import BoxFile, BoxFileEventType
+    from app.services.box_files import _add_event as _add_file_event
+    from app.services.box_files import _snapshot as _file_snapshot
+
+    files = list(
+        db.scalars(
+            select(BoxFile)
+            .where(BoxFile.box_id == locked.id)
+            .order_by(BoxFile.id)
+            .with_for_update(of=BoxFile)
+        ).all()
+    )
+    normalized_references = sorted(
+        {file.normalized_reference for file in files}
+    )
+    conflicting_files = (
+        list(
+            db.execute(
+                select(BoxFile.id, BoxFile.reference)
+                .where(
+                    BoxFile.lot_id == target_lot.id,
+                    BoxFile.normalized_reference.in_(normalized_references),
+                )
+                .order_by(BoxFile.id)
+            ).all()
+        )
+        if normalized_references
+        else []
+    )
+    if conflicting_files:
+        preview = ", ".join(
+            f"#{file_id} {reference!r}"
+            for file_id, reference in conflicting_files[:10]
+        )
+        raise BoxConflictError(
+            f"target lot has conflicting file reference(s): {preview}"
+        )
+    file_before = {
+        file.id: _file_snapshot(db, file, box=locked, lot=source_lot)
+        for file in files
+    }
     request_ids = _referencing_request_ids(db, locked.id)
     metadata = {
         "operation": "box_lot_reassignment",
@@ -1168,10 +1373,21 @@ def reassign_box_lot(
         "to_lot_name": target_lot.name,
         "request_snapshot_ids_preserved": request_ids,
         "expected_version": expected_version,
+        "moved_file_count": len(files),
+        "moved_file_ids": [file.id for file in files],
     }
     now = datetime.now(UTC)
     try:
         with db.begin_nested():
+            dialect = db.get_bind().dialect.name
+            if files and dialect == "postgresql":
+                db.execute(
+                    text(
+                        "SET CONSTRAINTS fk_box_files_box_lot_boxes DEFERRED"
+                    )
+                )
+            elif files and dialect == "sqlite":
+                db.execute(text("PRAGMA defer_foreign_keys = ON"))
             target_pallet = None
             if target_pallet_id is not None:
                 target_pallet = locked_pallets.get(target_pallet_id)
@@ -1189,6 +1405,10 @@ def reassign_box_lot(
                 )
             locked.lot_id = target_lot.id
             locked.lot_record = target_lot
+            for file in files:
+                file.lot_id = target_lot.id
+                file.updated_by_user_id = user.id
+                file.updated_at = now
             locked.updated_by_user_id = user.id
             locked.updated_at = now
             # Touching the source lot advances its optimistic version and makes
@@ -1222,6 +1442,23 @@ def reassign_box_lot(
                     event_metadata=metadata,
                 )
             )
+            for file in files:
+                _add_file_event(
+                    db,
+                    file=file,
+                    event_type=BoxFileEventType.lot_reassigned,
+                    before=file_before[file.id],
+                    after=_file_snapshot(
+                        db,
+                        file,
+                        box=locked,
+                        lot=target_lot,
+                    ),
+                    user=user,
+                    reason=cleaned_reason,
+                    metadata=metadata,
+                    now=now,
+                )
             db.flush()
     except IntegrityError as exc:
         raise BoxConflictError(
@@ -1252,6 +1489,7 @@ class BulkOutcome:
     cancelled_request_ids: set[int] = field(default_factory=set)
     affected_warehouse_ids: set[int] = field(default_factory=set)
     affected_pallet_warehouse_ids: dict[int, set[int]] = field(default_factory=dict)
+    inherited_file_changes: list[InheritedBoxChange] = field(default_factory=list)
 
 
 def bulk_update_boxes(
@@ -1289,6 +1527,7 @@ def bulk_update_boxes(
             )
             continue
         source_warehouse_id = box.current_warehouse_id
+        source_status = box.status
         try:
             updated = update_box(
                 db,
@@ -1299,6 +1538,8 @@ def bulk_update_boxes(
                 note=note,
                 force=force,
                 cancelled_request_ids=outcome.cancelled_request_ids,
+                commit=False,
+                emit_file_events=False,
             )
         except BoxRuleError as exc:
             outcome.skipped.append(
@@ -1316,6 +1557,47 @@ def bulk_update_boxes(
                 updated.pallet_id, set()
             ).update((source_warehouse_id, updated.current_warehouse_id))
 
+        if source_warehouse_id != updated.current_warehouse_id:
+            from app.models.box_files import BoxFileEventType
+            from app.services.box_files import InheritedBoxChange
+
+            outcome.inherited_file_changes.append(
+                InheritedBoxChange(
+                    box_id=updated.id,
+                    event_type=BoxFileEventType.box_moved,
+                    from_warehouse_id=source_warehouse_id,
+                    to_warehouse_id=updated.current_warehouse_id,
+                    from_status=source_status,
+                    to_status=source_status,
+                )
+            )
+        if source_status != updated.status:
+            from app.models.box_files import BoxFileEventType
+            from app.services.box_files import InheritedBoxChange
+
+            outcome.inherited_file_changes.append(
+                InheritedBoxChange(
+                    box_id=updated.id,
+                    event_type=BoxFileEventType.box_status_changed,
+                    from_warehouse_id=updated.current_warehouse_id,
+                    to_warehouse_id=updated.current_warehouse_id,
+                    from_status=source_status,
+                    to_status=updated.status,
+                )
+            )
+
+    if outcome.inherited_file_changes:
+        from app.services.box_files import emit_inherited_box_file_events
+
+        emit_inherited_box_file_events(
+            db,
+            changes=outcome.inherited_file_changes,
+            user=user,
+            reason=_audit_note(note, force=force),
+            metadata={"bulk": True, "admin_override": force},
+        )
+    if outcome.updated:
+        db.commit()
     return outcome
 
 
@@ -1354,6 +1636,14 @@ def delete_box(
     warehouse_id = box.current_warehouse_id
     _ensure_warehouse(db, warehouse_id)
     request_ids = _referencing_request_ids(db, box.id)
+    from app.models.box_files import BoxFile
+
+    file_count = int(
+        db.scalar(
+            select(func.count(BoxFile.id)).where(BoxFile.box_id == box.id)
+        )
+        or 0
+    )
     cancelled_request_ids: set[int] = set()
     if request_ids:
         joined = ", ".join(f"#{request_id}" for request_id in request_ids)
@@ -1396,14 +1686,15 @@ def delete_box(
                         "operation": "linked_box_archive",
                         "linked_request_ids": request_ids,
                         "cancelled_request_ids": sorted(cancelled_request_ids),
+                        "preserved_file_count": file_count,
                     },
                 )
             )
         archived = True
-    elif box.pallet_id is not None:
+    elif box.pallet_id is not None or file_count:
         now = datetime.now(UTC)
         archive_reason = (reason or "").strip() or (
-            "Archived to preserve pallet assignment history."
+            "Archived to preserve pallet or File history."
         )
         box.archived_at = now
         box.archived_by_user_id = user.id
@@ -1425,6 +1716,7 @@ def delete_box(
                 event_metadata={
                     "operation": "assigned_box_archive",
                     "pallet_id": box.pallet_id,
+                    "preserved_file_count": file_count,
                 },
             )
         )

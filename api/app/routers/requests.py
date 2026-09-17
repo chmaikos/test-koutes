@@ -813,6 +813,13 @@ def list_return_candidates(
             pallet_id=box.pallet_id,
             pallet_number=box.pallet_number,
             contents=box.contents,
+            file_count=box.active_file_count,
+            file_summary=(
+                ", ".join(file.reference for file in box.active_files[:3])
+                + ("…" if box.active_file_count > 3 else "")
+                if box.active_file_count
+                else None
+            ),
             status=box.status,
         )
         for box in candidates
@@ -1298,6 +1305,7 @@ async def complete(
         user=user,
         inbound_items=payload.inbound_items,
         accept_existing_received_boxes=payload.accept_existing_received_boxes,
+        accept_file_moves=payload.accept_file_moves,
         inbound_impact_signature=payload.inbound_impact_signature,
         collected_box_ids=payload.collected_box_ids,
         discrepancies=payload.discrepancies,

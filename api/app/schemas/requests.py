@@ -17,6 +17,7 @@ from app.models.requests import (
     BoxRequestPriority,
     BoxRequestStatus,
 )
+from app.schemas.box_files import FileInput
 from app.services.boxes import BoxRuleError, normalize_box_number
 
 
@@ -152,6 +153,7 @@ class InboundBoxItem(BaseModel):
     pallet_number: str | None = Field(default=None, max_length=64)
     pallet_id: int | None = Field(default=None, ge=1)
     contents: str | None = Field(default=None, max_length=2000)
+    files: list[FileInput] | None = Field(default=None, max_length=5000)
 
     @field_validator("box_number")
     @classmethod
@@ -203,6 +205,26 @@ class InboundCompletionSourceWarehouseCount(BaseModel):
     count: int
 
 
+InboundFileAction = Literal["create", "update", "move", "preserve", "blocked"]
+
+
+class InboundCompletionFileImpact(BaseModel):
+    action: InboundFileAction
+    reference: str
+    description: str | None = None
+    barcode: str | None = None
+    file_id: int | None = None
+    file_version: int | None = None
+    source_box_id: int | None = None
+    source_box_number: str | None = None
+    source_warehouse_id: int | None = None
+    source_warehouse_name: str | None = None
+    source_status: BoxStatus | None = None
+    target_box_id: int | None = None
+    blocked_code: str | None = None
+    blocked_message: str | None = None
+
+
 class InboundCompletionPreviewRow(BaseModel):
     classification: InboundCompletionClassification
     lot: str
@@ -221,6 +243,7 @@ class InboundCompletionPreviewRow(BaseModel):
     target_warehouse_name: str
     target_pallet_resolution: InboundCompletionTargetPalletOut
     active_return_reservation_ids: list[int] = Field(default_factory=list)
+    file_impacts: list[InboundCompletionFileImpact] = Field(default_factory=list)
     blocked_code: str | None = None
     blocked_message: str | None = None
 
@@ -229,6 +252,11 @@ class InboundCompletionPreviewSummary(BaseModel):
     created: int
     relocated: int
     blocked: int
+    files_created: int = 0
+    files_updated: int = 0
+    files_moved: int = 0
+    files_preserved: int = 0
+    files_blocked: int = 0
     source_warehouse_counts: list[InboundCompletionSourceWarehouseCount] = Field(
         default_factory=list
     )
@@ -257,6 +285,7 @@ class RequestComplete(RequestAction):
     idempotency_key: str = Field(min_length=8, max_length=120)
     inbound_items: list[InboundBoxItem] | None = Field(default=None, max_length=5000)
     accept_existing_received_boxes: bool = False
+    accept_file_moves: bool = False
     inbound_impact_signature: str | None = Field(
         default=None,
         min_length=64,
@@ -288,6 +317,18 @@ class RequestDraftSubmit(RequestAction):
         return value
 
 
+class BoxRequestItemFileSnapshotOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    file_id: int | None
+    reference: str
+    description: str | None
+    barcode: str | None
+    position: int
+    snapshot_kind: str
+
+
 class BoxRequestItemOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -300,6 +341,9 @@ class BoxRequestItemOut(BaseModel):
     pallet_number: str | None
     box_number: str | None
     contents: str | None
+    files: list[BoxRequestItemFileSnapshotOut] = Field(
+        default_factory=list, validation_alias="file_snapshots"
+    )
 
 
 class BoxRequestDocumentOut(BaseModel):
@@ -650,6 +694,8 @@ class ReturnCandidateOut(BaseModel):
     pallet_id: int | None
     pallet_number: str | None
     contents: str | None
+    file_count: int = 0
+    file_summary: str | None = None
     status: BoxStatus
 
 

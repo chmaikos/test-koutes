@@ -29,4 +29,5 @@ Thumbs.db
 # Docker / data
 postgres-data/
 *.log
-docs/
+docs/*
+!docs/FIRST_CLASS_BOX_FILES_DEPLOYMENT.md

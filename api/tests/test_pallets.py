@@ -637,7 +637,7 @@ def test_migration_metadata_offline_sql_and_single_head() -> None:
     config = Config(str(root / "alembic.ini"))
     config.set_main_option("script_location", str(root / "alembic"))
     assert ScriptDirectory.from_config(config).get_heads() == [
-        "0034_reduced_email_notifications"
+        "0035_first_class_box_files"
     ]
     assert migration.down_revision == "0031_return_target_warehouse"
 

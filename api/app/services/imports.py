@@ -11,6 +11,7 @@ from openpyxl import load_workbook
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.models.box_files import normalize_box_file_reference
 from app.models.boxes import Box
 from app.models.pallets import clean_optional_pallet_number
 from app.models.requests import BoxRequestOrigin
@@ -58,7 +59,12 @@ _HEADER_ALIASES = {
     "pallet_id": "pallet_id",
     "pallet id": "pallet_id",
     "contents": "contents",
-    "description": "contents",
+    "file_reference": "file_reference",
+    "file reference": "file_reference",
+    "reference": "file_reference",
+    "file_description": "file_description",
+    "file description": "file_description",
+    "barcode": "barcode",
     "warehouse_id": "warehouse_id",
     "warehouse id": "warehouse_id",
     "warehouse": "warehouse",
@@ -115,7 +121,7 @@ def import_mapped_boxes(
     *,
     user: User,
     warehouse_id: int,
-    items: list[tuple[str, str, str | None, int | None, str | None]],
+    items: list[InboundBoxItem | tuple],
     restore_archived: bool = False,
 ) -> ImportOutcome:
     outcome = ImportOutcome()
@@ -125,9 +131,17 @@ def import_mapped_boxes(
     if not can_access(user, warehouse_id):
         raise BoxAccessError(f"no access to warehouse {warehouse_id}")
     canonical_rows: list[InboundBoxItem] = []
-    for position, (box_number, lot, pallet_number, pallet_id, contents) in enumerate(
-        items, start=1
-    ):
+    for position, raw_item in enumerate(items, start=1):
+        if isinstance(raw_item, InboundBoxItem):
+            box_number = raw_item.box_number
+            lot = raw_item.lot
+            pallet_number = raw_item.pallet_number
+            pallet_id = raw_item.pallet_id
+            contents = raw_item.contents
+            files = raw_item.files
+        else:
+            box_number, lot, pallet_number, pallet_id, contents, *remainder = raw_item
+            files = remainder[0] if remainder else None
         try:
             cleaned_number = normalize_box_number(box_number)
             cleaned_lot = validate_lot_name(lot)
@@ -150,6 +164,7 @@ def import_mapped_boxes(
                 pallet_number=pallet_number,
                 pallet_id=pallet_id,
                 contents=contents,
+                files=files,
             )
         )
     try:
@@ -200,6 +215,7 @@ def import_mapped_boxes(
                     pallet_number=item.pallet_number,
                     pallet_id=item.pallet_id,
                     contents=item.contents,
+                    files=item.files,
                     warehouse_id=warehouse_id,
                     note="Explicitly restored during mapped XLSX import.",
                     commit=False,
@@ -215,6 +231,7 @@ def import_mapped_boxes(
                 pallet_number=item.pallet_number,
                 pallet_id=item.pallet_id,
                 contents=item.contents,
+                files=item.files,
                 warehouse_id=warehouse_id,
                 commit=False,
             )
@@ -295,13 +312,13 @@ def import_boxes_xlsx(
     if "box_number" not in headers:
         raise BoxRuleError(
             "missing required column 'box_number' "
-            "(recognised headers: box_number, lot, contents, "
+            "(recognised headers: box_number, lot, file_reference, contents, "
             "warehouse_id, warehouse)"
         )
     if "lot" not in headers:
         raise BoxRuleError(
             "missing required column 'lot' "
-            "(recognised headers: box_number, lot, contents, "
+            "(recognised headers: box_number, lot, file_reference, contents, "
             "warehouse_id, warehouse)"
         )
     # Pre-resolve warehouses so we don't hit the DB once per row.
@@ -325,6 +342,7 @@ def import_boxes_xlsx(
         int, list[tuple[int, InboundBoxItem]]
     ] = {}
     pending_identity: dict[tuple[str, str], tuple[int, int]] = {}
+    pending_file_targets: dict[tuple[str, str], str] = {}
     blocked_identities: dict[tuple[str, str], str] = {}
 
     for offset, row in enumerate(rows_iter, start=2):  # row 1 was the header
@@ -351,6 +369,9 @@ def import_boxes_xlsx(
         pallet_id_raw = _mapped_cell(headers, cells, "pallet_id")
         contents_raw = _mapped_cell(headers, cells, "contents")
         contents = contents_raw or None
+        file_reference = _mapped_cell(headers, cells, "file_reference")
+        file_description = _mapped_cell(headers, cells, "file_description") or None
+        barcode = _mapped_cell(headers, cells, "barcode") or None
         wh_id_raw = _mapped_cell(headers, cells, "warehouse_id")
         wh_name_raw = _mapped_cell(headers, cells, "warehouse")
 
@@ -422,6 +443,15 @@ def import_boxes_xlsx(
                 )
             )
             continue
+        if "file_reference" in headers and not file_reference:
+            outcome.skipped.append(
+                ImportSkipEntry(
+                    row=offset,
+                    box_number=box_number,
+                    reason="file_reference is required for every mapped file row",
+                )
+            )
+            continue
 
         warehouse_id: int | None = None
         if wh_id_raw:
@@ -478,8 +508,31 @@ def import_boxes_xlsx(
             pallet_number=pallet_number,
             pallet_id=pallet_id,
             contents=contents,
+            files=(
+                [
+                    {
+                        "reference": file_reference,
+                        "description": file_description,
+                        "barcode": barcode,
+                    }
+                ]
+                if file_reference
+                else None
+            ),
         )
         pair = (normalize_lot_name(lot), box_number)
+        for file in item.files or []:
+            file_identity = (
+                pair[0],
+                normalize_box_file_reference(file.reference),
+            )
+            previous_box = pending_file_targets.get(file_identity)
+            if previous_box is not None and previous_box != box_number:
+                raise BoxRuleError(
+                    f"file reference {file.reference!r} targets two boxes "
+                    f"in lot {lot!r}"
+                )
+            pending_file_targets[file_identity] = box_number
         blocked_reason = blocked_identities.get(pair)
         if blocked_reason is not None:
             outcome.skipped.append(
@@ -638,6 +691,7 @@ def import_boxes_xlsx(
                         pallet_number=item.pallet_number,
                         pallet_id=item.pallet_id,
                         contents=item.contents,
+                        files=item.files,
                         warehouse_id=warehouse_id,
                         note=f"Explicitly restored from XLSX row {offset}.",
                         commit=False,
@@ -653,6 +707,7 @@ def import_boxes_xlsx(
                     pallet_number=item.pallet_number,
                     pallet_id=item.pallet_id,
                     contents=item.contents,
+                    files=item.files,
                     warehouse_id=warehouse_id,
                     commit=False,
                 )

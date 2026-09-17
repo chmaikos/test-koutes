@@ -178,6 +178,7 @@ async def create_new_box(
                         pallet_number=payload.pallet_number,
                         pallet_id=payload.pallet_id,
                         contents=payload.contents,
+                        files=payload.files,
                     )
                 ],
                 origin=BoxRequestOrigin.manual_entry,
@@ -204,6 +205,7 @@ async def create_new_box(
             pallet_number=payload.pallet_number,
             pallet_id=payload.pallet_id,
             contents=payload.contents,
+            files=payload.files,
             warehouse_id=payload.warehouse_id,
             note=payload.note,
             commit=False,
@@ -515,6 +517,7 @@ async def patch_box(
             new_status=payload.status,
             new_warehouse_id=payload.warehouse_id,
             new_contents=payload.contents,
+            new_files=payload.files,
             note=payload.note,
             force=payload.force,
             cancelled_request_ids=cancelled_request_ids,

@@ -63,6 +63,7 @@ export interface InboundCompletionReviewState {
   preview: InboundCompletionPreview | null;
   fingerprint: string | null;
   acceptRelocations: boolean;
+  acceptFileMoves: boolean;
   notice: string | null;
 }
 
@@ -70,6 +71,7 @@ export const EMPTY_INBOUND_COMPLETION_REVIEW: InboundCompletionReviewState = {
   preview: null,
   fingerprint: null,
   acceptRelocations: false,
+  acceptFileMoves: false,
   notice: null,
 };
 
@@ -90,6 +92,11 @@ export function inboundCompletionItems(
                 ? { pallet_id: palletConfirmations[index]!.id }
                 : {}),
               contents: row.contents?.trim() || undefined,
+              files: row.files?.map((file) => ({
+                reference: file.reference.trim().replace(/\s+/g, " "),
+                description: file.description?.trim() || undefined,
+                barcode: file.barcode?.trim() || undefined,
+              })),
             },
           ]
         : [],
@@ -117,6 +124,12 @@ export function inboundCompletionFingerprint(input: {
           ? (input.palletConfirmations[index]?.id ?? row.pallet_id ?? null)
           : null,
       contents: row.contents?.trim() || null,
+      files:
+        row.files?.map((file) => ({
+          reference: file.reference.trim().replace(/\s+/g, " "),
+          description: file.description?.trim() || null,
+          barcode: file.barcode?.trim() || null,
+        })) ?? null,
       lotConfirmation: input.lotConfirmations[index]
         ? {
             id: input.lotConfirmations[index]!.id,
@@ -154,6 +167,7 @@ export function reviewedInboundCompletion(
     preview,
     fingerprint,
     acceptRelocations: false,
+    acceptFileMoves: false,
     notice: null,
   };
 }
@@ -178,6 +192,17 @@ export function setInboundRelocationAcceptance(
   };
 }
 
+export function setInboundFileMoveAcceptance(
+  state: InboundCompletionReviewState,
+  accepted: boolean,
+): InboundCompletionReviewState {
+  return {
+    ...state,
+    acceptFileMoves:
+      (state.preview?.summary.files_moved ?? 0) > 0 && accepted,
+  };
+}
+
 export function currentInboundCompletionPreview(
   state: InboundCompletionReviewState,
   fingerprint: string,
@@ -195,21 +220,28 @@ export function currentInboundCompletionPreview(
 export function canSubmitInboundCompletion(
   preview: InboundCompletionPreview | null,
   acceptRelocations: boolean,
+  acceptFileMoves = false,
 ): boolean {
   if (!preview || !preview.can_complete || preview.summary.blocked > 0) {
     return false;
   }
-  return preview.summary.relocated === 0 || acceptRelocations;
+  return (
+    (preview.summary.relocated === 0 || acceptRelocations) &&
+    (preview.summary.files_moved === 0 || acceptFileMoves)
+  );
 }
 
 export function inboundCompletionFields(
   preview: InboundCompletionPreview,
   acceptRelocations: boolean,
+  acceptFileMoves = false,
 ): ReviewedInboundCompletionFields {
   return {
     inbound_impact_signature: preview.impact_signature,
     accept_existing_received_boxes:
       preview.summary.relocated > 0 && acceptRelocations,
+    accept_file_moves:
+      preview.summary.files_moved > 0 && acceptFileMoves,
   };
 }
 

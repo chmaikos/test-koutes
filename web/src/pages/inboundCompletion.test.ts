@@ -19,6 +19,7 @@ import {
   isStaleInboundImpactConflict,
   mappedInboundAcceptance,
   reviewedInboundCompletion,
+  setInboundFileMoveAcceptance,
   setInboundRelocationAcceptance,
 } from "@/pages/inboundCompletion";
 
@@ -29,6 +30,11 @@ function preview(
     created: 1,
     relocated: 2,
     blocked: 0,
+    files_created: 0,
+    files_updated: 0,
+    files_moved: 0,
+    files_preserved: 0,
+    files_blocked: 0,
     source_warehouse_counts: [
       { warehouse_id: 2, warehouse_name: "Source", count: 2 },
     ],
@@ -237,6 +243,7 @@ describe("inbound impact fingerprint and state", () => {
       preview: null,
       fingerprint: null,
       acceptRelocations: false,
+      acceptFileMoves: false,
       notice: "Inventory changed; review again",
     });
   });
@@ -315,6 +322,7 @@ describe("inbound completion gating and payload", () => {
     expect(inboundCompletionFields(allNew, false)).toEqual({
       inbound_impact_signature: "a".repeat(64),
       accept_existing_received_boxes: false,
+      accept_file_moves: false,
     });
   });
 
@@ -325,6 +333,20 @@ describe("inbound completion gating and payload", () => {
     expect(inboundCompletionFields(mixed, true)).toEqual({
       inbound_impact_signature: "a".repeat(64),
       accept_existing_received_boxes: true,
+      accept_file_moves: false,
+    });
+  });
+
+  it("requires separate acknowledgement for proposed file moves", () => {
+    const withMove = preview({ relocated: 0, files_moved: 1 });
+    const reviewed = reviewedInboundCompletion(withMove, "fingerprint");
+    expect(canSubmitInboundCompletion(withMove, false, false)).toBe(false);
+    const accepted = setInboundFileMoveAcceptance(reviewed, true);
+    expect(accepted.acceptFileMoves).toBe(true);
+    expect(canSubmitInboundCompletion(withMove, false, true)).toBe(true);
+    expect(inboundCompletionFields(withMove, false, true)).toMatchObject({
+      accept_existing_received_boxes: false,
+      accept_file_moves: true,
     });
   });
 

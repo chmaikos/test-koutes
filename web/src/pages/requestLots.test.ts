@@ -17,6 +17,7 @@ function item(
     pallet_number: null,
     box_number: null,
     contents: null,
+    files: [],
   };
 }
 

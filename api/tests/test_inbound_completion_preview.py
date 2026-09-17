@@ -195,6 +195,11 @@ def test_preview_classifies_all_box_outcomes_with_target_only_acl_and_no_mutatio
         "created": 1,
         "relocated": 1,
         "blocked": 3,
+            "files_created": 0,
+            "files_updated": 0,
+            "files_moved": 0,
+            "files_preserved": 0,
+            "files_blocked": 0,
         "source_warehouse_counts": [
             {"warehouse_id": 2, "warehouse_name": "Building 2", "count": 1}
         ],
@@ -324,6 +329,7 @@ def test_duplicate_merge_result_is_canonical_across_row_order() -> None:
         "pallet_number": "TARGET",
         "pallet_id": None,
         "contents": "Alpha | Beta",
+            "files": None,
     }
 
 
@@ -565,6 +571,11 @@ def test_completion_mixes_unassigned_creation_and_preserved_relocations(
         "created": 1,
         "relocated": 2,
         "blocked": 0,
+            "files_created": 0,
+            "files_updated": 0,
+            "files_moved": 0,
+            "files_preserved": 0,
+            "files_blocked": 0,
         "source_warehouse_counts": [
             {"warehouse_id": 2, "warehouse_name": "Building 2", "count": 1},
             {"warehouse_id": 3, "warehouse_name": "Building 3", "count": 1},

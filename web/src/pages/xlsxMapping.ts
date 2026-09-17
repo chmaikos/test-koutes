@@ -14,6 +14,9 @@ export interface ResolvedXlsxMapping {
   lotSource: XlsxLotSource;
   lotColumn: number | undefined;
   fixedLot: string;
+  fileReferenceColumn: number | undefined;
+  fileDescriptionColumn: number | undefined;
+  barcodeColumn: number | undefined;
   contentsColumn: number | undefined;
   rowStart: number;
   includeRowsByDefault: boolean;
@@ -114,6 +117,32 @@ export function resolveXlsxTemplate(
     "Item descriptions",
     warnings,
   );
+  const fileReferenceColumn = resolveColumn(
+    template.column_mappings.file_reference,
+    headers,
+    sheet.max_columns,
+    "File reference",
+    warnings,
+  );
+  const fileDescriptionColumn = resolveColumn(
+    template.column_mappings.file_description,
+    headers,
+    sheet.max_columns,
+    "File description",
+    warnings,
+  );
+  const barcodeColumn = resolveColumn(
+    template.column_mappings.barcode,
+    headers,
+    sheet.max_columns,
+    "File barcode",
+    warnings,
+  );
+  if (!template.column_mappings.file_reference) {
+    warnings.push(
+      "Legacy template: choose a File reference column before saving or applying.",
+    );
+  }
   const selectedRows = new Set(
     template.include_rows_by_default
       ? sheet.rows
@@ -130,6 +159,9 @@ export function resolveXlsxTemplate(
     lotSource: template.lot_source,
     lotColumn,
     fixedLot: template.fixed_lot ?? "",
+    fileReferenceColumn,
+    fileDescriptionColumn,
+    barcodeColumn,
     contentsColumn,
     rowStart: template.row_start,
     includeRowsByDefault: template.include_rows_by_default,
@@ -150,6 +182,9 @@ export function xlsxTemplateInput(input: {
   lotSource: XlsxLotSource;
   lotColumn?: number;
   fixedLot: string;
+  fileReferenceColumn: number;
+  fileDescriptionColumn?: number;
+  barcodeColumn?: number;
   contentsColumn?: number;
   rowStart: number;
   includeRowsByDefault: boolean;
@@ -170,6 +205,18 @@ export function xlsxTemplateInput(input: {
       ...(input.lotSource === "column" && input.lotColumn !== undefined
         ? { lot: xlsxColumnRef(input.lotColumn, headers) }
         : {}),
+      file_reference: xlsxColumnRef(input.fileReferenceColumn, headers),
+      ...(input.fileDescriptionColumn !== undefined
+        ? {
+            file_description: xlsxColumnRef(
+              input.fileDescriptionColumn,
+              headers,
+            ),
+          }
+        : {}),
+      ...(input.barcodeColumn !== undefined
+        ? { barcode: xlsxColumnRef(input.barcodeColumn, headers) }
+        : {}),
       ...(input.contentsColumn !== undefined
         ? { contents: xlsxColumnRef(input.contentsColumn, headers) }
         : {}),
@@ -189,6 +236,7 @@ function canonicalBoxNumber(value: string): string {
 export function groupInboundItems(
   rows: InboundRequestItemInput[],
 ): InboundRequestItemInput[] {
+  const fileTargets = new Map<string, string>();
   const grouped = new Map<
     string,
     {
@@ -197,6 +245,8 @@ export function groupInboundItems(
       pallet_number: string | null;
       pallet_id: number | null;
       contents: string[];
+      files: Map<string, NonNullable<InboundRequestItemInput["files"]>[number]>;
+      hasStructuredFiles: boolean;
     }
   >();
 
@@ -227,6 +277,8 @@ export function groupInboundItems(
         pallet_number: palletNumber,
         pallet_id: palletId,
         contents: [],
+        files: new Map(),
+        hasStructuredFiles: row.files !== undefined,
       };
       grouped.set(key, group);
     } else if (
@@ -244,6 +296,40 @@ export function groupInboundItems(
       throw new Error(`Box ${boxNumber} in lot ${lot} is mapped to ${conflict}.`);
     } else if (group.pallet_id === null && palletId !== null) {
       group.pallet_id = palletId;
+    }
+    if (row.files !== undefined) {
+      group.hasStructuredFiles = true;
+      for (const file of row.files) {
+        const normalizedReference = file.reference
+          .trim()
+          .replace(/\s+/g, " ")
+          .toLowerCase();
+        if (!normalizedReference) {
+          throw new Error(
+            `Box ${boxNumber} in lot ${lot} has a blank file reference.`,
+          );
+        }
+        const canonicalFile = {
+          reference: file.reference.trim().replace(/\s+/g, " "),
+          description: file.description?.trim() || undefined,
+          barcode: file.barcode?.trim() || undefined,
+        };
+        const fileIdentity = `${lot.toLowerCase()}\u0000${normalizedReference}`;
+        const existingTarget = fileTargets.get(fileIdentity);
+        if (existingTarget && existingTarget !== key) {
+          throw new Error(
+            `File reference ${canonicalFile.reference} targets two boxes in lot ${lot}.`,
+          );
+        }
+        fileTargets.set(fileIdentity, key);
+        const existing = group.files.get(normalizedReference);
+        if (existing && JSON.stringify(existing) !== JSON.stringify(canonicalFile)) {
+          throw new Error(
+            `File reference ${canonicalFile.reference} has conflicting details.`,
+          );
+        }
+        group.files.set(normalizedReference, canonicalFile);
+      }
     }
     if (canonicalDisplayLessThan(lot, group.lot)) {
       group.lot = lot;
@@ -276,6 +362,13 @@ export function groupInboundItems(
       pallet_number: group.pallet_number,
       ...(group.pallet_id !== null ? { pallet_id: group.pallet_id } : {}),
       contents: contents || undefined,
+      ...(group.hasStructuredFiles
+        ? {
+            files: [...group.files.values()].sort((left, right) =>
+              left.reference.localeCompare(right.reference),
+            ),
+          }
+        : {}),
     };
   });
 }
@@ -315,6 +408,9 @@ export function mapXlsxInboundRows(input: {
   lotSource: XlsxLotSource;
   lotColumn?: number;
   fixedLot: string;
+  fileReferenceColumn?: number;
+  fileDescriptionColumn?: number;
+  barcodeColumn?: number;
   contentsColumn?: number;
 }): { items: InboundRequestItemInput[]; error: string | null } {
   const mapped: InboundRequestItemInput[] = [];
@@ -345,11 +441,36 @@ export function mapXlsxInboundRows(input: {
       input.contentsColumn === undefined
         ? undefined
         : (row.cells[input.contentsColumn] ?? "").trim() || undefined;
+    const fileReference =
+      input.fileReferenceColumn === undefined
+        ? ""
+        : (row.cells[input.fileReferenceColumn] ?? "").trim();
+    const fileDescription =
+      input.fileDescriptionColumn === undefined
+        ? undefined
+        : (row.cells[input.fileDescriptionColumn] ?? "").trim() || undefined;
+    const barcode =
+      input.barcodeColumn === undefined
+        ? undefined
+        : (row.cells[input.barcodeColumn] ?? "").trim() || undefined;
+    if (input.fileReferenceColumn !== undefined && !fileReference) {
+      return {
+        items: [],
+        error: `Excel row ${row.row_number} is missing the mapped file reference.`,
+      };
+    }
     mapped.push({
       box_number: boxNumber,
       lot,
       pallet_number: palletNumber,
       contents,
+      ...(input.fileReferenceColumn !== undefined
+        ? {
+            files: fileReference
+              ? [{ reference: fileReference, description: fileDescription, barcode }]
+              : [],
+          }
+        : {}),
     });
   }
   return tryGroupInboundItems(mapped);

@@ -4,6 +4,7 @@ from app.deps import get_current_user
 from app.main import app
 from app.models.users import UserRole
 from app.models.warehouses import Warehouse
+from app.models.xlsx_mapping_templates import XlsxMappingTemplate, XlsxMappingUseCase
 
 
 def _as_user(user) -> None:
@@ -28,6 +29,7 @@ def _payload(
         "column_mappings": {
             "box_number": {"index": 0, "header": "Box Number"},
             "lot": {"index": 1, "header": "Lot"},
+            "file_reference": {"index": 2, "header": "Contents"},
             "contents": {"index": 2, "header": "Contents"},
             "pallet_number": {"index": 3, "header": "Pallet"},
         },
@@ -35,6 +37,36 @@ def _payload(
         "row_start": 2,
         "include_rows_by_default": True,
     }
+
+
+def test_legacy_template_is_returned_as_incomplete(client, make_user, session):
+    owner = make_user(UserRole.operator)
+    session.add(
+        XlsxMappingTemplate(
+            owner_user_id=owner.id,
+            use_case=XlsxMappingUseCase.box_import,
+            name="Legacy contents template",
+            sheet_pattern="*",
+            filename_fingerprint="legacy",
+            header_fingerprint="box\x1flot\x1fdescription",
+            column_mappings={
+                "box_number": {"index": 0, "header": "Box"},
+                "lot": {"index": 1, "header": "Lot"},
+                "contents": {"index": 2, "header": "Description"},
+            },
+            lot_source="column",
+            row_start=2,
+        )
+    )
+    session.commit()
+    _as_user(owner)
+
+    response = client.get(
+        "/api/xlsx-mapping-templates", params={"use_case": "box_import"}
+    )
+    assert response.status_code == 200
+    assert response.json()[0]["is_legacy_incomplete"] is True
+    assert response.json()[0]["column_mappings"]["file_reference"] is None
 
 
 def test_template_acl_and_owner_only_mutations(client, make_user, session):

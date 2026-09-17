@@ -23,6 +23,7 @@ from app.db import Base
 from app.models.lots import Lot
 
 if TYPE_CHECKING:
+    from app.models.box_files import BoxFile
     from app.models.pallets import Pallet
 
 
@@ -83,6 +84,7 @@ class Box(Base):
     __table_args__ = (
         Index("ix_boxes_status_warehouse", "status", "current_warehouse_id"),
         UniqueConstraint("lot_id", "box_number", name="uq_boxes_lot_box_number"),
+        UniqueConstraint("id", "lot_id", name="uq_boxes_id_lot_id"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -95,6 +97,13 @@ class Box(Base):
         ForeignKey("pallets.id", ondelete="SET NULL"), nullable=True, index=True
     )
     pallet: Mapped[Pallet | None] = relationship("Pallet", back_populates="boxes")
+    files: Mapped[list[BoxFile]] = relationship(
+        back_populates="box",
+        order_by="BoxFile.position",
+        lazy="selectin",
+        passive_deletes=True,
+        overlaps="files,lot",
+    )
     contents: Mapped[str | None] = mapped_column(Text)
     current_warehouse_id: Mapped[int] = mapped_column(
         ForeignKey("warehouses.id", ondelete="RESTRICT"), nullable=False, index=True
@@ -141,6 +150,27 @@ class Box(Base):
     @property
     def pallet_number(self) -> str | None:
         return self.pallet.pallet_number if self.pallet is not None else None
+
+    @property
+    def active_files(self) -> list[BoxFile]:
+        if (
+            self.archived_at is not None
+            or self.lot_record.merged_into_lot_id is not None
+        ):
+            return []
+        return [file for file in self.files if file.archived_at is None]
+
+    @property
+    def active_file_count(self) -> int:
+        return len(self.active_files)
+
+    @property
+    def archived_file_count(self) -> int:
+        return len(self.files) - self.active_file_count
+
+    @property
+    def file_count(self) -> int:
+        return len(self.files)
 
 
 class BoxEvent(Base):

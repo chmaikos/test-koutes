@@ -13,6 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
+from app.models.box_files import BoxFile, normalize_box_file_reference
 from app.models.boxes import (
     ACTIVE_STATUSES,
     AVAILABLE_STATUSES,
@@ -49,8 +50,10 @@ from app.models.requests import (
 )
 from app.models.users import User, UserRole
 from app.models.warehouses import Warehouse
+from app.schemas.box_files import FileInput
 from app.schemas.requests import (
     InboundBoxItem,
+    InboundCompletionFileImpact,
     InboundCompletionPreviewOut,
     InboundCompletionPreviewRow,
     InboundCompletionPreviewSummary,
@@ -59,6 +62,13 @@ from app.schemas.requests import (
     RequestDiscrepancyInput,
 )
 from app.services.acl import can_access
+from app.services.box_files import (
+    BoxFileConflictError,
+    IntakeFile,
+    reconcile_intake_box_files,
+    snapshot_request_item_files,
+    split_legacy_contents,
+)
 from app.services.boxes import (
     BoxRuleError,
     _move_received_box_for_inbound_request,
@@ -95,6 +105,51 @@ def _pallet_number_for_box(db: Session, box: Box) -> str | None:
         return None
     pallet = db.get(Pallet, box.pallet_id)
     return pallet.pallet_number if pallet is not None else None
+
+
+def _active_files_by_box_ids(
+    db: Session, box_ids: list[int], *, lock: bool = False
+) -> dict[int, list[BoxFile]]:
+    result = {box_id: [] for box_id in box_ids}
+    if not box_ids:
+        return result
+    stmt = (
+        select(BoxFile)
+        .where(
+            BoxFile.box_id.in_(sorted(set(box_ids))),
+            BoxFile.archived_at.is_(None),
+        )
+        .order_by(BoxFile.box_id, BoxFile.position, BoxFile.id)
+    )
+    if lock:
+        stmt = stmt.with_for_update(of=BoxFile)
+    for file in db.scalars(stmt).all():
+        result[file.box_id].append(file)
+    return result
+
+
+def _staged_file_values(item: InboundBoxItem) -> list[IntakeFile]:
+    if item.files is not None:
+        return [
+            IntakeFile(
+                reference=file.reference,
+                description=file.description,
+                barcode=file.barcode,
+            )
+            for file in item.files
+        ]
+    return [
+        IntakeFile(
+            reference=(
+                f"LEGACY-BOX-{item.box_number}-FILE-{position}"
+            ),
+            description=description,
+            legacy=True,
+        )
+        for position, description in enumerate(
+            split_legacy_contents(item.contents), start=1
+        )
+    ]
 
 
 def _lock_lots_for_current_links(db: Session, lot_ids: list[int | None]) -> None:
@@ -786,19 +841,25 @@ def create_completed_receipt(
     db.add(request)
     db.flush()
     request.root_request_id = request.id
+    files_by_box_id = _active_files_by_box_ids(db, [box.id for box in boxes])
     for position, box in enumerate(boxes, start=1):
-        db.add(
-            BoxRequestItem(
-                request_id=request.id,
-                position=position,
-                box_id=box.id,
-                lot_id=box.lot_id,
-                lot=box.lot,
-                pallet_id=box.pallet_id,
-                pallet=_pallet_number_for_box(db, box),
-                box_number=box.box_number,
-                contents=box.contents,
-            )
+        item = BoxRequestItem(
+            request_id=request.id,
+            position=position,
+            box_id=box.id,
+            lot_id=box.lot_id,
+            lot=box.lot,
+            pallet_id=box.pallet_id,
+            pallet=_pallet_number_for_box(db, box),
+            box_number=box.box_number,
+            contents=box.contents,
+        )
+        db.add(item)
+        db.flush()
+        snapshot_request_item_files(
+            db,
+            item=item,
+            files=files_by_box_id[box.id],
         )
     db.add(
         _event(
@@ -925,17 +986,22 @@ def create_staged_receipt(
                 )
             except PalletRuleError as exc:
                 raise RequestRuleError(str(exc)) from exc
-        db.add(
-            BoxRequestItem(
-                request_id=request.id,
-                position=position,
-                lot_id=lot_record.id,
-                lot=lot_record.name,
-                pallet_id=pallet.id if pallet is not None else None,
-                pallet=pallet.pallet_number if pallet is not None else None,
-                box_number=item.box_number,
-                contents=item.contents,
-            )
+        request_item = BoxRequestItem(
+            request_id=request.id,
+            position=position,
+            lot_id=lot_record.id,
+            lot=lot_record.name,
+            pallet_id=pallet.id if pallet is not None else None,
+            pallet=pallet.pallet_number if pallet is not None else None,
+            box_number=item.box_number,
+            contents=item.contents,
+        )
+        db.add(request_item)
+        db.flush()
+        snapshot_request_item_files(
+            db,
+            item=request_item,
+            values=_staged_file_values(item),
         )
     db.add(
         _event(
@@ -1090,6 +1156,18 @@ def finalize_staged_receipt(
         for item in staged_items:
             key = (item.lot_id, item.box_number or "")
             target_pallet = pallets_by_item_id[item.id]
+            staged_files = (
+                [
+                    FileInput(
+                        reference=snapshot.reference,
+                        description=snapshot.description,
+                        barcode=snapshot.barcode,
+                    )
+                    for snapshot in item.file_snapshots
+                ]
+                if item.file_snapshots
+                else None
+            )
             box = (
                 restore_archived_box(
                     db,
@@ -1103,6 +1181,7 @@ def finalize_staged_receipt(
                     ),
                     pallet_id=target_pallet.id if target_pallet is not None else None,
                     contents=item.contents,
+                    files=staged_files,
                     warehouse_id=request.warehouse_id,
                     note=f"Restored through staged receipt #{request.id}.",
                     restored_status=target_status,
@@ -1121,6 +1200,7 @@ def finalize_staged_receipt(
                     ),
                     pallet_id=target_pallet.id if target_pallet is not None else None,
                     contents=item.contents,
+                    files=staged_files,
                     warehouse_id=request.warehouse_id,
                     note=f"Created through staged receipt #{request.id}.",
                     initial_status=target_status,
@@ -1130,6 +1210,19 @@ def finalize_staged_receipt(
             if box is None:
                 raise RequestConflictError("archived box disappeared during finalization")
             item.box_id = box.id
+            current_files = _active_files_by_box_ids(db, [box.id], lock=True)[box.id]
+            by_reference = {
+                file.normalized_reference: file for file in current_files
+            }
+            for snapshot in item.file_snapshots:
+                file = by_reference.get(
+                    normalize_box_file_reference(snapshot.reference)
+                )
+                if file is None:
+                    raise RequestConflictError(
+                        f"staged file {snapshot.reference!r} was not created"
+                    )
+                snapshot.file_id = file.id
     except (BoxRuleError, IntegrityError) as exc:
         db.rollback()
         detail = (
@@ -1340,19 +1433,25 @@ def create_request(
     request.root_request_id = request.id
 
     if direction == BoxRequestDirection.return_:
+        files_by_box_id = _active_files_by_box_ids(
+            db, [box.id for box in return_boxes], lock=True
+        )
         for position, box in enumerate(return_boxes, start=1):
-            db.add(
-                BoxRequestItem(
-                    request_id=request.id,
-                    position=position,
-                    box_id=box.id,
-                    lot_id=box.lot_id,
-                    lot=box.lot,
-                    pallet_id=box.pallet_id,
-                    pallet=_pallet_number_for_box(db, box),
-                    box_number=box.box_number,
-                    contents=box.contents,
-                )
+            item = BoxRequestItem(
+                request_id=request.id,
+                position=position,
+                box_id=box.id,
+                lot_id=box.lot_id,
+                lot=box.lot,
+                pallet_id=box.pallet_id,
+                pallet=_pallet_number_for_box(db, box),
+                box_number=box.box_number,
+                contents=box.contents,
+            )
+            db.add(item)
+            db.flush()
+            snapshot_request_item_files(
+                db, item=item, files=files_by_box_id[box.id]
             )
 
     db.add(
@@ -2315,7 +2414,18 @@ def merge_inbound_items(items: list[InboundBoxItem]) -> list[InboundBoxItem]:
     """
     grouped: dict[
         tuple[str, str],
-        tuple[str, str | None, str | None, int | None, list[str]],
+        tuple[
+            str,
+            str | None,
+            str | None,
+            int | None,
+            list[str],
+            dict[str, FileInput],
+            bool,
+        ],
+    ] = {}
+    reference_targets: dict[
+        tuple[str, str], tuple[tuple[str, str], FileInput]
     ] = {}
     for item in items:
         try:
@@ -2342,6 +2452,8 @@ def merge_inbound_items(items: list[InboundBoxItem]) -> list[InboundBoxItem]:
                 normalized_pallet,
                 item.pallet_id,
                 [],
+                {},
+                item.files is not None,
             )
         else:
             existing_assigned = existing[1] is not None
@@ -2370,6 +2482,8 @@ def merge_inbound_items(items: list[InboundBoxItem]) -> list[InboundBoxItem]:
                     existing[2],
                     item.pallet_id,
                     existing[4],
+                    existing[5],
+                    existing[6] or item.files is not None,
                 )
         existing = grouped[key]
         canonical_pallet_number = existing[1]
@@ -2385,17 +2499,46 @@ def merge_inbound_items(items: list[InboundBoxItem]) -> list[InboundBoxItem]:
             existing[2],
             existing[3],
             existing[4],
+            existing[5],
+            existing[6] or item.files is not None,
         )
         contents = grouped[key][4]
         value = (item.contents or "").strip()
         if value and value not in contents:
             contents.append(value)
+        if item.files is not None:
+            file_values = grouped[key][5]
+            for file in item.files:
+                normalized_reference = normalize_box_file_reference(file.reference)
+                existing_file = file_values.get(normalized_reference)
+                if existing_file is not None and existing_file != file:
+                    raise RequestRuleError(
+                        f"file reference {file.reference!r} is repeated with "
+                        "conflicting details"
+                    )
+                reference_identity = (normalized_lot, normalized_reference)
+                other_target = reference_targets.get(reference_identity)
+                if other_target is not None and other_target[0] != key:
+                    raise RequestRuleError(
+                        f"file reference {file.reference!r} targets two boxes "
+                        f"in lot {lot!r}"
+                    )
+                file_values.setdefault(normalized_reference, file)
+                reference_targets.setdefault(reference_identity, (key, file))
 
     merged: list[InboundBoxItem] = []
     for (
         _normalized_lot,
         box_number,
-    ), (lot, pallet_number, _normalized_pallet, pallet_id, contents) in grouped.items():
+    ), (
+        lot,
+        pallet_number,
+        _normalized_pallet,
+        pallet_id,
+        contents,
+        files,
+        has_structured_files,
+    ) in grouped.items():
         combined = " | ".join(sorted(contents))
         if len(combined) > 2000:
             raise RequestRuleError(
@@ -2409,9 +2552,42 @@ def merge_inbound_items(items: list[InboundBoxItem]) -> list[InboundBoxItem]:
                 pallet_number=pallet_number,
                 pallet_id=pallet_id,
                 contents=combined or None,
+                files=(
+                    sorted(
+                        files.values(),
+                        key=lambda file: (
+                            normalize_box_file_reference(file.reference),
+                            file.reference,
+                        ),
+                    )
+                    if has_structured_files
+                    else None
+                ),
             )
         )
     return merged
+
+
+def _inbound_file_values(item: InboundBoxItem) -> list[IntakeFile]:
+    if item.files is not None:
+        return [
+            IntakeFile(
+                reference=file.reference,
+                description=file.description,
+                barcode=file.barcode,
+            )
+            for file in item.files
+        ]
+    return [
+        IntakeFile(
+            reference=f"LEGACY-BOX-{item.box_number}-FILE-{position}",
+            description=description,
+            legacy=True,
+        )
+        for position, description in enumerate(
+            split_legacy_contents(item.contents), start=1
+        )
+    ]
 
 
 @dataclass(frozen=True)
@@ -2750,16 +2926,68 @@ def _classify_inbound_completion(
             (box.lot_id, box.box_number): box for box in existing_boxes
         }
 
-    box_ids = {box.id for box in existing_boxes}
-    reservation_ids_by_box_id: dict[int, list[int]] = {
-        box_id: [] for box_id in box_ids
+    incoming_values_by_identity = {
+        (normalize_lot_name(item.lot), item.box_number): _inbound_file_values(item)
+        for item in merged_rows
     }
-    if box_ids:
+    incoming_references = {
+        normalize_box_file_reference(value.reference)
+        for values in incoming_values_by_identity.values()
+        for value in values
+    }
+    existing_box_ids = {box.id for box in existing_boxes}
+    file_filter = BoxFile.box_id.in_(sorted(existing_box_ids))
+    if incoming_references:
+        file_filter = file_filter | (
+            (BoxFile.lot_id.in_(sorted(lot_ids)))
+            & BoxFile.normalized_reference.in_(sorted(incoming_references))
+        )
+    file_stmt = (
+        select(BoxFile)
+        .where(file_filter)
+        .order_by(BoxFile.id)
+    )
+    if lock_for_update:
+        file_stmt = file_stmt.with_for_update(of=BoxFile)
+    relevant_files = list(db.scalars(file_stmt).all()) if lot_ids else []
+    files_by_lot_reference = {
+        (file.lot_id, file.normalized_reference): file for file in relevant_files
+    }
+    active_files_by_box_id: dict[int, list[BoxFile]] = {}
+    for file in relevant_files:
+        if file.archived_at is None:
+            active_files_by_box_id.setdefault(file.box_id, []).append(file)
+    file_source_box_ids = {
+        file.box_id for file in relevant_files if file.box_id not in existing_box_ids
+    }
+    file_source_boxes: dict[int, Box] = {}
+    if file_source_box_ids:
+        source_box_stmt = (
+            select(Box)
+            .where(Box.id.in_(sorted(file_source_box_ids)))
+            .order_by(Box.id)
+        )
+        if lock_for_update:
+            source_box_stmt = source_box_stmt.with_for_update(of=Box)
+        file_source_boxes = {
+            source.id: source for source in db.scalars(source_box_stmt).all()
+        }
+    file_boxes_by_id = {
+        **{existing.id: existing for existing in existing_boxes},
+        **file_source_boxes,
+    }
+
+    box_ids = {box.id for box in existing_boxes}
+    reservation_box_ids = box_ids | file_source_box_ids
+    reservation_ids_by_box_id: dict[int, list[int]] = {
+        box_id: [] for box_id in reservation_box_ids
+    }
+    if reservation_box_ids:
         return_reference_rows = db.execute(
             select(BoxRequestItem.box_id, BoxRequest.id, BoxRequest.status)
             .join(BoxRequest, BoxRequest.id == BoxRequestItem.request_id)
             .where(
-                BoxRequestItem.box_id.in_(sorted(box_ids)),
+                BoxRequestItem.box_id.in_(sorted(reservation_box_ids)),
                 BoxRequest.direction == BoxRequestDirection.return_,
             )
             .distinct()
@@ -2772,7 +3000,8 @@ def _classify_inbound_completion(
                 reservation_ids_by_box_id[box_id].append(active_request_id)
 
     source_warehouse_ids = {
-        box.current_warehouse_id for box in existing_boxes
+        box.current_warehouse_id
+        for box in (*existing_boxes, *file_source_boxes.values())
     }
     warehouses_by_id = {
         warehouse.id: warehouse
@@ -2813,6 +3042,128 @@ def _classify_inbound_completion(
             pallets_by_id=pallets_by_id,
             pallets_by_identity=pallets_by_identity,
         )
+        file_impacts: list[InboundCompletionFileImpact] = []
+        supplied_file_references: set[str] = set()
+        for value in incoming_values_by_identity[
+            (normalized_lot, item.box_number)
+        ]:
+            normalized_reference = normalize_box_file_reference(value.reference)
+            supplied_file_references.add(normalized_reference)
+            existing_file = (
+                files_by_lot_reference.get((lot.id, normalized_reference))
+                if lot is not None
+                else None
+            )
+            source_box = (
+                file_boxes_by_id.get(existing_file.box_id)
+                if existing_file is not None
+                else None
+            )
+            if existing_file is None:
+                action = "create"
+                file_blocked_code = None
+                file_blocked_message = None
+            elif existing_file.archived_at is not None:
+                action = "blocked"
+                file_blocked_code = "archived_file_reference"
+                file_blocked_message = (
+                    f"file reference {value.reference!r} is archived in this lot"
+                )
+            elif box is not None and existing_file.box_id == box.id:
+                changed = (
+                    existing_file.reference != value.reference
+                    or existing_file.description != value.description
+                    or existing_file.barcode != value.barcode
+                )
+                action = "update" if changed else "preserve"
+                file_blocked_code = None
+                file_blocked_message = None
+            elif source_box is None or source_box.archived_at is not None:
+                action = "blocked"
+                file_blocked_code = "file_source_box_unavailable"
+                file_blocked_message = (
+                    f"source box for file {value.reference!r} is unavailable"
+                )
+            elif reservation_ids_by_box_id.get(existing_file.box_id):
+                action = "blocked"
+                file_blocked_code = "file_source_box_reserved"
+                rendered = ", ".join(
+                    f"#{reservation_id}"
+                    for reservation_id in reservation_ids_by_box_id[
+                        existing_file.box_id
+                    ]
+                )
+                file_blocked_message = (
+                    f"source box for file {value.reference!r} is reserved by "
+                    f"active return request(s) {rendered}"
+                )
+            elif source_box.lot_id != (lot.id if lot is not None else None):
+                action = "blocked"
+                file_blocked_code = "file_lot_mismatch"
+                file_blocked_message = (
+                    f"file reference {value.reference!r} belongs to another lot"
+                )
+            else:
+                action = "move"
+                file_blocked_code = None
+                file_blocked_message = None
+            file_impacts.append(
+                InboundCompletionFileImpact(
+                    action=action,
+                    reference=value.reference,
+                    description=value.description,
+                    barcode=value.barcode,
+                    file_id=existing_file.id if existing_file is not None else None,
+                    file_version=(
+                        existing_file.version if existing_file is not None else None
+                    ),
+                    source_box_id=(
+                        existing_file.box_id if existing_file is not None else None
+                    ),
+                    source_box_number=(
+                        source_box.box_number if source_box is not None else None
+                    ),
+                    source_warehouse_id=(
+                        source_box.current_warehouse_id
+                        if source_box is not None
+                        else None
+                    ),
+                    source_warehouse_name=(
+                        warehouses_by_id[source_box.current_warehouse_id].name
+                        if source_box is not None
+                        and source_box.current_warehouse_id in warehouses_by_id
+                        else None
+                    ),
+                    source_status=source_box.status if source_box is not None else None,
+                    target_box_id=box.id if box is not None else None,
+                    blocked_code=file_blocked_code,
+                    blocked_message=file_blocked_message,
+                )
+            )
+        if box is not None:
+            for existing_file in active_files_by_box_id.get(box.id, []):
+                if existing_file.normalized_reference in supplied_file_references:
+                    continue
+                file_impacts.append(
+                    InboundCompletionFileImpact(
+                        action="preserve",
+                        reference=existing_file.reference,
+                        description=existing_file.description,
+                        barcode=existing_file.barcode,
+                        file_id=existing_file.id,
+                        file_version=existing_file.version,
+                        source_box_id=box.id,
+                        source_box_number=box.box_number,
+                        source_warehouse_id=box.current_warehouse_id,
+                        source_warehouse_name=(
+                            warehouses_by_id[box.current_warehouse_id].name
+                            if box.current_warehouse_id in warehouses_by_id
+                            else None
+                        ),
+                        source_status=box.status,
+                        target_box_id=box.id,
+                    )
+                )
 
         blocked_code: str | None = None
         blocked_message: str | None = None
@@ -2852,6 +3203,14 @@ def _classify_inbound_completion(
             classification = "blocked"
             blocked_code = target_pallet.blocked_code
             blocked_message = target_pallet.blocked_message
+        blocked_file = next(
+            (impact for impact in file_impacts if impact.action == "blocked"),
+            None,
+        )
+        if blocked_file is not None and classification != "blocked":
+            classification = "blocked"
+            blocked_code = blocked_file.blocked_code
+            blocked_message = blocked_file.blocked_message
 
         source_warehouse = (
             warehouses_by_id.get(box.current_warehouse_id)
@@ -2887,6 +3246,7 @@ def _classify_inbound_completion(
             target_warehouse_name=target_warehouse.name,
             target_pallet_resolution=target_pallet.output,
             active_return_reservation_ids=reservations,
+            file_impacts=file_impacts,
             blocked_code=blocked_code,
             blocked_message=blocked_message,
         )
@@ -2954,12 +3314,18 @@ def _classify_inbound_completion(
                 ),
                 "active_return_reservation_ids": reservations,
                 "target_pallet": target_pallet.signature,
+                "files": [
+                    impact.model_dump(mode="json") for impact in file_impacts
+                ],
             }
         )
 
     created = sum(row.classification == "create" for row in rows)
     relocated = sum(row.classification == "relocate" for row in rows)
     blocked = sum(row.classification == "blocked" for row in rows)
+    all_file_impacts = [
+        impact for row in rows for impact in row.file_impacts
+    ]
     source_warehouse_counts = [
         InboundCompletionSourceWarehouseCount(
             warehouse_id=warehouse_id,
@@ -2998,6 +3364,21 @@ def _classify_inbound_completion(
                 created=created,
                 relocated=relocated,
                 blocked=blocked,
+                files_created=sum(
+                    impact.action == "create" for impact in all_file_impacts
+                ),
+                files_updated=sum(
+                    impact.action == "update" for impact in all_file_impacts
+                ),
+                files_moved=sum(
+                    impact.action == "move" for impact in all_file_impacts
+                ),
+                files_preserved=sum(
+                    impact.action == "preserve" for impact in all_file_impacts
+                ),
+                files_blocked=sum(
+                    impact.action == "blocked" for impact in all_file_impacts
+                ),
                 source_warehouse_counts=source_warehouse_counts,
             ),
             rows=rows,
@@ -3031,6 +3412,7 @@ def complete_request(
     user: User,
     inbound_items: list[InboundBoxItem] | None = None,
     accept_existing_received_boxes: bool = False,
+    accept_file_moves: bool = False,
     inbound_impact_signature: str | None = None,
     collected_box_ids: list[int] | None = None,
     discrepancies: list[RequestDiscrepancyInput] | None = None,
@@ -3108,6 +3490,7 @@ def complete_request(
     created_box_ids: list[int] = []
     relocated_box_ids: list[int] = []
     relocation_source_counts: dict[int, int] = {}
+    file_impact_counts: dict[str, int] = {}
     if affected_warehouse_ids is not None:
         affected_warehouse_ids.add(request.warehouse_id)
         if request.target_warehouse_id is not None:
@@ -3160,6 +3543,13 @@ def complete_request(
             db.rollback()
             raise
         current_signature = impact.preview.impact_signature
+        file_impact_counts = {
+            "created": impact.preview.summary.files_created,
+            "updated": impact.preview.summary.files_updated,
+            "moved": impact.preview.summary.files_moved,
+            "preserved": impact.preview.summary.files_preserved,
+            "blocked": impact.preview.summary.files_blocked,
+        }
         if (
             inbound_impact_signature is not None
             and inbound_impact_signature != current_signature
@@ -3192,6 +3582,17 @@ def complete_request(
                 db.rollback()
                 raise RequestConflictError(
                     "inbound_impact_signature is required for existing box relocation"
+                )
+        if impact.preview.summary.files_moved:
+            if not accept_file_moves:
+                db.rollback()
+                raise RequestConflictError(
+                    "explicit accept_file_moves acknowledgement is required"
+                )
+            if inbound_impact_signature is None:
+                db.rollback()
+                raise RequestConflictError(
+                    "inbound_impact_signature is required for file moves"
                 )
         rows = impact.items
         try:
@@ -3234,10 +3635,22 @@ def complete_request(
                             target_pallet.id if target_pallet is not None else None
                         ),
                         contents=item.contents,
+                        # Reconcile below so accepted same-Lot references can
+                        # move into a newly created target Box as previewed.
+                        files=[],
                         warehouse_id=request.warehouse_id,
                         note=f"Received through request #{request.id}",
                         receipt_authorized_pallet_creation=True,
                         commit=False,
+                    )
+                    reconcile_intake_box_files(
+                        db,
+                        user=user,
+                        box=box,
+                        files=item.files,
+                        contents=item.contents,
+                        allow_moves=True,
+                        reason=f"Reconciled through inbound request #{request.id}",
                     )
                     created_box_ids.append(box.id)
                     if (
@@ -3269,6 +3682,15 @@ def complete_request(
                         mapped_contents=item.contents,
                         commit=False,
                     )
+                    reconcile_intake_box_files(
+                        db,
+                        user=user,
+                        box=box,
+                        files=item.files,
+                        contents=item.contents,
+                        allow_moves=True,
+                        reason=f"Reconciled through inbound request #{request.id}",
+                    )
                     relocated_box_ids.append(box.id)
                     relocation_source_counts[source_warehouse_id] = (
                         relocation_source_counts.get(source_warehouse_id, 0) + 1
@@ -3289,22 +3711,29 @@ def complete_request(
                             affected_pallet_warehouse_ids.setdefault(
                                 effective_pallet_id, set()
                             ).add(request.warehouse_id)
-                db.add(
-                    BoxRequestItem(
-                        request_id=request.id,
-                        position=position,
-                        box_id=box.id,
-                        lot_id=box.lot_id,
-                        lot=box.lot,
-                        pallet_id=box.pallet_id,
-                        pallet=_pallet_number_for_box(db, box),
-                        box_number=box.box_number,
-                        contents=box.contents,
-                    )
+                request_item = BoxRequestItem(
+                    request_id=request.id,
+                    position=position,
+                    box_id=box.id,
+                    lot_id=box.lot_id,
+                    lot=box.lot,
+                    pallet_id=box.pallet_id,
+                    pallet=_pallet_number_for_box(db, box),
+                    box_number=box.box_number,
+                    contents=box.contents,
                 )
-        except RequestConflictError:
+                db.add(request_item)
+                db.flush()
+                snapshot_request_item_files(
+                    db,
+                    item=request_item,
+                    files=_active_files_by_box_ids(
+                        db, [box.id], lock=True
+                    )[box.id],
+                )
+        except (RequestConflictError, BoxFileConflictError) as exc:
             db.rollback()
-            raise
+            raise RequestConflictError(str(exc)) from exc
         except (BoxRuleError, LotRuleError, PalletRuleError, IntegrityError) as exc:
             db.rollback()
             raise RequestConflictError(str(exc)) from exc
@@ -3485,6 +3914,8 @@ def complete_request(
                 )
             },
             "accept_existing_received_boxes": accept_existing_received_boxes,
+            "accept_file_moves": accept_file_moves,
+            "file_impact_counts": file_impact_counts,
         },
     )
     enqueue_request_event(
@@ -3636,22 +4067,26 @@ def submit_follow_up_draft(
     candidates_by_id = {box.id: box for box in candidates}
     if any(box_id not in candidates_by_id for box_id in box_ids):
         raise RequestConflictError("one or more selected boxes are no longer available")
+    files_by_box_id = _active_files_by_box_ids(db, box_ids, lock=True)
     for position, box_id in enumerate(box_ids, start=1):
         box = candidates_by_id[box_id]
         if locked_lots_by_box[box_id] != box.lot_id:
             raise RequestConflictError("one or more selected box lots changed")
-        db.add(
-            BoxRequestItem(
-                request_id=request.id,
-                position=position,
-                box_id=box.id,
-                lot_id=box.lot_id,
-                lot=box.lot,
-                pallet_id=box.pallet_id,
-                pallet=_pallet_number_for_box(db, box),
-                box_number=box.box_number,
-                contents=box.contents,
-            )
+        item = BoxRequestItem(
+            request_id=request.id,
+            position=position,
+            box_id=box.id,
+            lot_id=box.lot_id,
+            lot=box.lot,
+            pallet_id=box.pallet_id,
+            pallet=_pallet_number_for_box(db, box),
+            box_number=box.box_number,
+            contents=box.contents,
+        )
+        db.add(item)
+        db.flush()
+        snapshot_request_item_files(
+            db, item=item, files=files_by_box_id[box.id]
         )
     request.submitted_at = datetime.now(UTC)
     _transition(

@@ -25,13 +25,15 @@ export function ImportBoxesDialog({
 
   return (
     <div className="modal-backdrop z-30">
-      <div className="modal-sheet max-w-5xl">
+      <div className="modal-sheet max-h-[90vh] max-w-5xl overflow-y-auto">
         <h2 className="text-lg font-semibold">Import boxes from XLSX</h2>
         <p className="mt-1 text-sm text-slate-500">
           Choose the destination warehouse, then map any workbook layout just
           like an inbound delivery. All rows start included; exclude headers or
           unrelated data. Pallet assignment is optional. Repeated compatible
           rows for the same lot and box are merged into one box.
+          Every included row must map a required physical File reference;
+          repeated Box rows become multiple contained Files.
         </p>
 
         <form
@@ -126,6 +128,8 @@ export function ImportBoxesDialog({
                 {mappedRows.length === 1 ? "" : "es"} ready to import ·{" "}
                 {palletCounts.assigned} assigned · {palletCounts.unassigned}{" "}
                 Unassigned
+                {" · "}
+                {mappedRows.reduce((total, row) => total + (row.files?.length ?? 0), 0)} physical Files
               </p>
               <div className="mt-2 max-h-32 overflow-auto text-xs text-emerald-900">
                 {mappedRows.map((row) => (
@@ -133,7 +137,8 @@ export function ImportBoxesDialog({
                     {row.lot} · {row.box_number}
                     {" · Pallet "}
                     {row.pallet_number || "Unassigned"}
-                    {row.contents ? ` · ${row.contents}` : ""}
+                    {` · ${(row.files ?? []).length} File${(row.files ?? []).length === 1 ? "" : "s"}`}
+                    {(row.files ?? []).length > 0 ? `: ${row.files!.map((file) => file.reference).join(", ")}` : ""}
                   </div>
                 ))}
               </div>

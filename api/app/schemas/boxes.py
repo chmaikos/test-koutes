@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from app.models.boxes import BoxEventType, BoxStatus
 from app.models.pallets import clean_optional_pallet_number
+from app.schemas.box_files import FileInput, FileSummaryOut
 from app.services.boxes import BoxRuleError, normalize_box_number
 
 
@@ -19,6 +20,10 @@ class BoxOut(BaseModel):
     pallet_id: int | None
     pallet_number: str | None
     contents: str | None
+    file_count: int = 0
+    active_file_count: int = 0
+    archived_file_count: int = 0
+    files: list[FileSummaryOut] = Field(default_factory=list, validation_alias="active_files")
     current_warehouse_id: int
     status: BoxStatus
     received_at: datetime | None
@@ -39,6 +44,7 @@ class BoxCreate(BaseModel):
     pallet_number: str | None = Field(default=None, max_length=64)
     pallet_id: int | None = Field(default=None, ge=1)
     contents: str | None = Field(default=None, max_length=2000)
+    files: list[FileInput] | None = Field(default=None, max_length=5000)
     warehouse_id: int = Field(ge=1)
     note: str | None = Field(default=None, max_length=2000)
 
@@ -78,6 +84,7 @@ class BoxUpdate(BaseModel):
     status: BoxStatus | None = None
     warehouse_id: int | None = Field(default=None, ge=1)
     contents: str | None = Field(default=None, max_length=2000)
+    files: list[FileInput] | None = Field(default=None, max_length=5000)
     note: str | None = Field(default=None, max_length=2000)
     pallet_id: int | None = Field(default=None, ge=1)
     detach_pallet: bool = False
@@ -173,6 +180,7 @@ class MappedImportItem(BaseModel):
     pallet_number: str | None = Field(default=None, max_length=64)
     pallet_id: int | None = Field(default=None, ge=1)
     contents: str | None = Field(default=None, max_length=2000)
+    files: list[FileInput] | None = Field(default=None, max_length=5000)
 
     @field_validator("pallet_number", mode="before")
     @classmethod

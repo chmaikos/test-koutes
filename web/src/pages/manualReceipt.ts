@@ -1,3 +1,6 @@
+import type { FileInput } from "@/api/types";
+import { cleanFileItems } from "@/components/fileItems";
+
 export interface ManualReceiptPallet {
   id: number;
   pallet_number: string;
@@ -7,7 +10,7 @@ export function manualReceiptPayload(input: {
   boxNumber: string;
   lotId: number;
   pallet: ManualReceiptPallet | null;
-  contents: string;
+  files: FileInput[];
   warehouseId: number;
 }) {
   const trimmedNumber = input.boxNumber.trim();
@@ -23,7 +26,7 @@ export function manualReceiptPayload(input: {
           pallet_number: input.pallet.pallet_number,
         }
       : {}),
-    contents: input.contents.trim() || undefined,
+    files: cleanFileItems(input.files),
     warehouse_id: input.warehouseId,
   };
 }

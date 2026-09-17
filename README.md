@@ -1,9 +1,10 @@
 # Warehouse Box Tracker
 
-A small, dockerized web app for tracking the status of boxes across a 3-building
-warehouse. Built with **FastAPI**, **React (Vite + TypeScript)**, **Postgres 16**,
-**Microsoft Entra ID** (M365 SSO), live updates over **SSE**, CSV/XLSX exports,
-and threshold alerts (in-app + email via Microsoft Graph).
+A small, dockerized web app for tracking the physical
+`Lot → Pallet → Box → File` hierarchy across a 3-building warehouse. Built with
+**FastAPI**, **React (Vite + TypeScript)**, **Postgres 16**, **Microsoft Entra
+ID** (M365 SSO), live updates over **SSE**, CSV/XLSX exports, and threshold
+alerts (in-app + email via Microsoft Graph).
 
 **Documentation:** [Ελληνικός οδηγός (Markdown)](docs/USER_GUIDE_EL.md) ·
 [Ελληνικός οδηγός (PDF)](docs/USER_GUIDE_EL.pdf)
@@ -31,6 +32,12 @@ and threshold alerts (in-app + email via Microsoft Graph).
   Pallets support audited create, rename, assign/detach, archive, restore,
   merge absorption, and purge behavior. Any Box may remain `Unassigned`;
   assigned Boxes must reference an active Pallet in the same Lot.
+- First-class physical Files complete the `Lot → Pallet → Box → File`
+  hierarchy. Each File has a Lot-unique, case/whitespace-insensitive reference,
+  optional description/barcode, ordered placement in one same-Lot Box, inherited
+  warehouse/status, immutable audit events, archive/restore, same-Lot moves,
+  ACL-scoped list/detail search, and CSV/XLSX exports. Physical Files are
+  inventory records—not uploaded ERP documents or request attachments.
 - Full audit trail per box (timeline of events).
 - Audited inbound box orders and return requests with the explicit lifecycle
   `submitted → approved → preparing → ready_for_transport → in_transit →
@@ -65,13 +72,13 @@ and threshold alerts (in-app + email via Microsoft Graph).
   requests cancelled by the correction.
 - Inbound receipt can be entered manually or populated from any `.xlsx`
   layout by choosing the worksheet, mapping columns, and selecting or skipping
-  source rows. Pallet is optional: choose a Pallet column, or explicitly leave
-  new Boxes **Unassigned**. Blank cells in a selected Pallet column are
-  Unassigned. Repeated rows for the same Lot and Box number merge only when
-  they are all Unassigned or all resolve to the same Pallet; assigned versus
-  Unassigned and differing assignments are deterministic conflicts. Distinct
-  item-description text is combined into one physical Box record up to 2,000
-  characters.
+  source rows. Mapped rows require a physical File reference and may include
+  File description/barcode. Repeated rows for one Lot/Box become multiple
+  Files. Pallet is optional: choose a Pallet column, or explicitly leave new
+  Boxes **Unassigned**. Assigned-versus-Unassigned, differing Pallets,
+  conflicting File metadata, and one Lot-scoped File reference targeting two
+  Boxes are deterministic conflicts. Legacy `contents` remains a compatibility
+  field, not the authoritative File list.
 - Inbound confirmation includes a read-only inventory-impact review before the
   final write. It distinguishes new boxes, eligible received boxes in other
   warehouses, and blocked identities; shows source-to-target and pallet
@@ -81,7 +88,9 @@ and threshold alerts (in-app + email via Microsoft Graph).
   sufficient—source access is neither required nor granted. Completion
   rechecks the signed impact under locks and atomically creates or relocates
   boxes while preserving status, original receipt timestamp, and prior request
-  history.
+  history. The same signed review classifies Files as
+  create/update/move/preserve/blocked; every cross-Box File move needs its own
+  explicit default-off acknowledgement.
 - Versioned ERP delivery and return notes stored privately in local RustFS.
 - Explainable demand recommendations combine minimum stock, outstanding inbound
   and return work, lead-time demand, weighted 30/90-day history, safety stock,
@@ -104,9 +113,10 @@ and threshold alerts (in-app + email via Microsoft Graph).
 - Admin employee XLSX imports support worksheet/column mapping, row exclusion,
   and case-insensitive updates of existing warehouse employees.
 - CSV and XLSX inventory exports honouring the current filters and including
-  pallet ID/number, plus Lot summaries, Pallet summaries, reconciliation
-  pallet snapshots, and productivity reports with employee averages and 90
-  days of daily-entry detail.
+  pallet ID/number and File counts/summary, plus dedicated physical File
+  exports, Lot/Pallet File counts, reconciliation pallet snapshots, and
+  productivity reports with employee averages and 90 days of daily-entry
+  detail.
 - Low-inventory, capacity, and leading-indicator alerts remain in-app. Each
   newly opened incident may send one opening email via Graph, with at most five
   delivery attempts and no reminder, escalation, or resolution email.
@@ -635,9 +645,34 @@ blocking requests, not organizational Pallet rows.
 
 Pallet list/detail queries, options, progress metrics, contained-Box pagination,
 integrity reporting, audit events, CSV/XLSX summaries, and SSE invalidation are
-warehouse-ACL scoped. Item descriptions remain one optional free-text field on
-the physical Box—not a second inventory-item layer—and are limited to 2,000
-characters end to end.
+warehouse-ACL scoped.
+
+## Physical Files domain and permissions
+
+Physical Files are first-class inventory records inside Boxes, not uploaded
+digital files. A File's required reference is unique within its Lot after
+trimming, whitespace collapse, and case folding. Description and barcode are
+optional; barcode is searchable but not unique. Warehouse, Pallet, and status
+are inherited from the containing Box. Operators and Admins can create, edit,
+move within the same Lot, and archive Files they can access; the UI exposes
+restore to Admins. Viewer and Warehouse Mover access is read-only and
+warehouse-ACL scoped.
+
+The Files list/detail UI and API expose hierarchy, ordering, active/archive
+state, and immutable events. Box warehouse/status changes emit inherited File
+events. Active return reservations block File reference, placement, archive,
+and restore changes; only an Admin may explicitly force the operation with an
+audited reason, cancelling affected reservations. Description/barcode-only
+edits are snapshot-safe.
+
+Manual receipt requires at least one structured File. XLSX mappings require
+`file_reference` and optionally map `file_description` and `barcode`; repeated
+Box rows merge into multiple contained Files. Inbound completion performs
+non-destructive reconciliation: supplied references create, update, or
+explicitly move, while active unsupplied Files in the target Box are preserved.
+Cross-Box moves require a separate signed acknowledgement. Request items retain
+immutable File snapshots, and returns continue to select and move whole Boxes.
+Legacy `contents` columns remain only for migration/API compatibility.
 
 ## ERP delivery and return notes
 
@@ -732,6 +767,14 @@ Pallet endpoints are:
 - ACL-scoped `GET /api/exports/pallets.csv` and
   `/api/exports/pallets.xlsx`.
 
+Physical File endpoints are:
+
+- `GET/POST /api/files` and `GET/PATCH /api/files/{file_id}`,
+- `POST /api/files/{file_id}/move`, `/archive`, and `/restore`,
+- `GET /api/files/{file_id}/events`,
+- Admin-only `GET /api/files/integrity`,
+- ACL-scoped `GET /api/exports/files.csv` and `/api/exports/files.xlsx`.
+
 Box, request-item, and return-candidate responses include `lot_id`,
 `pallet_id`, and pallet display/snapshot data; `lot` and `pallet` snapshot
 fields are immutable history. Lot, Pallet, inventory, and request mutations
@@ -747,7 +790,7 @@ invalidate the relevant request, inventory, and dashboard queries.
 You can run things directly without Docker if you prefer; see
 [`api/README.md`](api/README.md) and [`web/README.md`](web/README.md).
 
-## Deploying Lot/Pallet migrations 0027–0033
+## Deploying hierarchy migrations 0027–0035
 
 `0027_first_class_lots` is a coordinated cutover from `boxes.lot` to the
 required `boxes.lot_id` foreign key. Stop old API instances, run the read-only
@@ -794,3 +837,15 @@ snapshots, or item descriptions longer than the old 200-character shape exist.
 See
 [`docs/FIRST_CLASS_PALLETS_DEPLOYMENT.md`](docs/FIRST_CLASS_PALLETS_DEPLOYMENT.md)
 for exact online, offline, SQLite-test, preflight, and rollback procedures.
+
+`0035_first_class_box_files` backfills first-class physical Files and immutable
+request snapshots by splitting legacy `contents` on `|`, preserving order and
+creating deterministic `LEGACY-...` references. It retains both compatibility
+columns. Stop writers, back up PostgreSQL and RustFS together, apply
+`alembic upgrade head`, run `api/scripts/box_files_preflight.py`, verify the
+Admin `GET /api/files/integrity` report, and deploy matching API/web builds.
+Downgrade is intentionally blocked after real File activity or whenever the new
+tables no longer exactly match the deterministic legacy representation. Exact
+outside/inside-Docker commands, SQL checks, backup requirements, and rollback
+restrictions are in
+[`docs/FIRST_CLASS_BOX_FILES_DEPLOYMENT.md`](docs/FIRST_CLASS_BOX_FILES_DEPLOYMENT.md).

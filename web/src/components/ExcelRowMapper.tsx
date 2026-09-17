@@ -62,6 +62,11 @@ export function ExcelRowMapper({
   const [fixedLot, setFixedLot] = useState("");
   const [fixedLotSelection, setFixedLotSelection] =
     useState<LotSelection | null>(null);
+  const [fileReferenceColumn, setFileReferenceColumn] =
+    useState<number | undefined>();
+  const [fileDescriptionColumn, setFileDescriptionColumn] =
+    useState<number | undefined>();
+  const [barcodeColumn, setBarcodeColumn] = useState<number | undefined>();
   const [contentsColumn, setContentsColumn] = useState<number | undefined>();
   const [selectedRows, setSelectedRows] = useState<Set<number>>(new Set());
   const [rowStart, setRowStart] = useState(1);
@@ -110,6 +115,25 @@ export function ExcelRowMapper({
             contentsColumn === undefined
               ? undefined
               : (row.cells[contentsColumn] ?? "").trim() || undefined,
+          files:
+            fileReferenceColumn === undefined
+              ? undefined
+              : (row.cells[fileReferenceColumn] ?? "").trim()
+                ? [
+                    {
+                      reference: (row.cells[fileReferenceColumn] ?? "").trim(),
+                      description:
+                        fileDescriptionColumn === undefined
+                          ? undefined
+                          : (row.cells[fileDescriptionColumn] ?? "").trim() ||
+                            undefined,
+                      barcode:
+                        barcodeColumn === undefined
+                          ? undefined
+                          : (row.cells[barcodeColumn] ?? "").trim() || undefined,
+                    },
+                  ]
+                : [],
         }))
     : [];
   const selectedGrouping = tryGroupInboundItems(
@@ -128,6 +152,9 @@ export function ExcelRowMapper({
     setLotColumn(undefined);
     setFixedLot("");
     setFixedLotSelection(null);
+    setFileReferenceColumn(undefined);
+    setFileDescriptionColumn(undefined);
+    setBarcodeColumn(undefined);
     setContentsColumn(undefined);
     setRowStart(1);
     setIncludeRowsByDefault(true);
@@ -206,6 +233,9 @@ export function ExcelRowMapper({
     setLotColumn(resolved.lotColumn);
     setFixedLot(resolved.fixedLot);
     setFixedLotSelection(null);
+    setFileReferenceColumn(resolved.fileReferenceColumn);
+    setFileDescriptionColumn(resolved.fileDescriptionColumn);
+    setBarcodeColumn(resolved.barcodeColumn);
     setContentsColumn(resolved.contentsColumn);
     setRowStart(resolved.rowStart);
     setIncludeRowsByDefault(resolved.includeRowsByDefault);
@@ -235,6 +265,9 @@ export function ExcelRowMapper({
     if (lotSource === "column" && lotColumn === undefined) {
       throw new Error("Choose the lot column before saving a template.");
     }
+    if (fileReferenceColumn === undefined) {
+      throw new Error("Choose the file reference column before saving a template.");
+    }
     return xlsxTemplateInput({
       useCase,
       name,
@@ -248,6 +281,9 @@ export function ExcelRowMapper({
       lotSource,
       lotColumn,
       fixedLot,
+      fileReferenceColumn,
+      fileDescriptionColumn,
+      barcodeColumn,
       contentsColumn,
       rowStart,
       includeRowsByDefault,
@@ -357,10 +393,17 @@ export function ExcelRowMapper({
       setError("Choose the column containing the lot.");
       return;
     }
+    if (fileReferenceColumn === undefined) {
+      setError("Choose the column containing the required file reference.");
+      return;
+    }
     const selectedColumns = [
       boxColumn,
       ...(lotSource === "column" && lotColumn != null ? [lotColumn] : []),
       ...(contentsColumn == null ? [] : [contentsColumn]),
+      fileReferenceColumn,
+      ...(fileDescriptionColumn == null ? [] : [fileDescriptionColumn]),
+      ...(barcodeColumn == null ? [] : [barcodeColumn]),
       ...(palletMappingChoice === "column" && palletColumn != null
         ? [palletColumn]
         : []),
@@ -383,6 +426,9 @@ export function ExcelRowMapper({
       lotSource,
       lotColumn,
       fixedLot,
+      fileReferenceColumn,
+      fileDescriptionColumn,
+      barcodeColumn,
       contentsColumn,
     });
     if (groupedResult.error) {
@@ -664,7 +710,26 @@ export function ExcelRowMapper({
               />
             )}
             <ColumnSelect
-              label="Item descriptions column (optional)"
+              label="File reference column"
+              sheet={sheet}
+              value={fileReferenceColumn}
+              required
+              onChange={setFileReferenceColumn}
+            />
+            <ColumnSelect
+              label="File description column (optional)"
+              sheet={sheet}
+              value={fileDescriptionColumn}
+              onChange={setFileDescriptionColumn}
+            />
+            <ColumnSelect
+              label="File barcode column (optional)"
+              sheet={sheet}
+              value={barcodeColumn}
+              onChange={setBarcodeColumn}
+            />
+            <ColumnSelect
+              label="Legacy contents column (optional)"
               sheet={sheet}
               value={contentsColumn}
               onChange={setContentsColumn}
@@ -792,6 +857,9 @@ export function ExcelRowMapper({
                               columnIndex === boxColumn ||
                               columnIndex === lotColumn ||
                               columnIndex === palletColumn ||
+                              columnIndex === fileReferenceColumn ||
+                              columnIndex === fileDescriptionColumn ||
+                              columnIndex === barcodeColumn ||
                               columnIndex === contentsColumn
                                 ? "bg-amber-50"
                                 : ""

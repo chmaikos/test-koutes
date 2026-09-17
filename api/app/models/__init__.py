@@ -4,6 +4,7 @@ from app.models.alerts import (
     AlertNotificationKind,
     AlertType,
 )
+from app.models.box_files import BoxFile, BoxFileEvent, BoxFileEventType
 from app.models.boxes import Box, BoxEvent, BoxEventType, BoxStatus
 from app.models.employees import (
     Employee,
@@ -39,6 +40,8 @@ from app.models.requests import (
     BoxRequestException,
     BoxRequestExceptionKind,
     BoxRequestItem,
+    BoxRequestItemFileSnapshot,
+    BoxRequestItemFileSnapshotKind,
     BoxRequestOrigin,
     BoxRequestPriority,
     BoxRequestStatus,
@@ -56,6 +59,9 @@ __all__ = [
     "AlertNotificationKind",
     "AlertType",
     "Box",
+    "BoxFile",
+    "BoxFileEvent",
+    "BoxFileEventType",
     "BoxEvent",
     "BoxEventType",
     "BoxStatus",
@@ -86,6 +92,8 @@ __all__ = [
     "BoxRequestException",
     "BoxRequestExceptionKind",
     "BoxRequestItem",
+    "BoxRequestItemFileSnapshot",
+    "BoxRequestItemFileSnapshotKind",
     "BoxRequestOrigin",
     "BoxRequestPriority",
     "BoxRequestStatus",

@@ -8,6 +8,7 @@ from sqlalchemy import Float, case, cast, func, or_, select, union_all
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.models.box_files import BoxFile
 from app.models.boxes import ACTIVE_STATUSES, Box, BoxStatus
 from app.models.lots import Lot
 from app.models.pallets import (
@@ -83,6 +84,8 @@ class PalletSummary:
     updated_by_user_id: int | None
     physical_box_count: int
     box_count: int
+    active_file_count: int
+    archived_file_count: int
     status_counts: dict[str, int]
     eligible_box_count: int
     completed_box_count: int
@@ -170,6 +173,7 @@ def _visibility_sources(user: User):
 
     assigned = (
         select(
+            Box.id.label("box_id"),
             Box.pallet_id.label("pallet_id"),
             Box.current_warehouse_id.label("warehouse_id"),
             Box.status.label("status"),
@@ -288,6 +292,18 @@ def list_pallet_summaries(
         .group_by(scoped_boxes.c.pallet_id)
         .cte("pallet_box_aggregate")
     )
+    file_aggregate = (
+        select(
+            scoped_boxes.c.pallet_id,
+            _count_if(BoxFile.archived_at.is_(None)).label("active_file_count"),
+            _count_if(BoxFile.archived_at.is_not(None)).label(
+                "archived_file_count"
+            ),
+        )
+        .join(BoxFile, BoxFile.box_id == scoped_boxes.c.box_id)
+        .group_by(scoped_boxes.c.pallet_id)
+        .cte("pallet_file_aggregate")
+    )
     eligible = func.coalesce(aggregate.c.eligible_box_count, 0)
     completed = func.coalesce(aggregate.c.completed_box_count, 0)
     box_count = func.coalesce(aggregate.c.box_count, 0)
@@ -308,6 +324,12 @@ def list_pallet_summaries(
             func.coalesce(aggregate.c.physical_box_count, 0).label(
                 "physical_box_count"
             ),
+            func.coalesce(file_aggregate.c.active_file_count, 0).label(
+                "active_file_count"
+            ),
+            func.coalesce(file_aggregate.c.archived_file_count, 0).label(
+                "archived_file_count"
+            ),
             *[
                 func.coalesce(
                     getattr(aggregate.c, f"{status.value}_count"), 0
@@ -321,6 +343,7 @@ def list_pallet_summaries(
         )
         .join(Lot, Lot.id == Pallet.lot_id)
         .outerjoin(aggregate, aggregate.c.pallet_id == Pallet.id)
+        .outerjoin(file_aggregate, file_aggregate.c.pallet_id == Pallet.id)
     )
     if not include_inactive:
         stmt = stmt.where(
@@ -411,6 +434,8 @@ def list_pallet_summaries(
                 updated_by_user_id=pallet.updated_by_user_id,
                 physical_box_count=int(values["physical_box_count"]),
                 box_count=int(values["box_count"]),
+                active_file_count=int(values["active_file_count"]),
+                archived_file_count=int(values["archived_file_count"]),
                 status_counts={
                     status.value: int(values[f"{status.value}_count"])
                     for status in BoxStatus

@@ -18,6 +18,8 @@ const candidates: ReturnCandidate[] = [
     pallet_id: 5,
     pallet_number: "PAL-5",
     contents: "A",
+    file_count: 2,
+    file_summary: "FILE-1, FILE-2",
     status: "ready_to_return",
   },
   {
@@ -28,6 +30,8 @@ const candidates: ReturnCandidate[] = [
     pallet_id: null,
     pallet_number: null,
     contents: null,
+    file_count: 0,
+    file_summary: null,
     status: "ready_to_return",
   },
 ];

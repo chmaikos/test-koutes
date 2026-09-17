@@ -561,5 +561,5 @@ def test_offline_sql_and_single_head(dialect: str) -> None:
     alembic_config = Config(str(root / "alembic.ini"))
     alembic_config.set_main_option("script_location", str(root / "alembic"))
     assert ScriptDirectory.from_config(alembic_config).get_heads() == [
-        "0034_reduced_email_notifications"
+        "0035_first_class_box_files"
     ]

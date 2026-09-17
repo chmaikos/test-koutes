@@ -8,18 +8,22 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from app.deps import CurrentUser, DbSession
-from app.models.boxes import Box
+from app.models.boxes import Box, BoxStatus
 from app.models.employees import Employee, ProductivityEntry
 from app.models.warehouses import Warehouse
 from app.routers._filters import BoxFilters, apply_box_filters, parse_box_filters
+from app.schemas.box_files import FileActivity
 from app.schemas.lots import LotProgressState, LotSortField
 from app.schemas.pallets import PalletProgressState, PalletSortField
 from app.services.acl import apply_warehouse_filter
+from app.services.box_files import BoxFileAccessError, list_box_files
 from app.services.exports import (
     ProductivityDetailExportRow,
     ProductivitySummaryExportRow,
     boxes_to_csv,
     boxes_to_xlsx,
+    files_to_csv,
+    files_to_xlsx,
     lot_summaries_to_csv,
     lot_summaries_to_xlsx,
     pallet_summaries_to_csv,
@@ -50,6 +54,153 @@ def _filename(prefix: str, ext: str) -> str:
 
 def _warehouse_names(db) -> dict[int, str]:
     return dict(db.execute(select(Warehouse.id, Warehouse.name)).all())
+
+
+def _file_export_rows(
+    db,
+    user,
+    *,
+    search: str | None,
+    warehouse_id: int | None,
+    lot_id: int | None,
+    pallet_id: int | None,
+    box_id: int | None,
+    status: BoxStatus | None,
+    activity: FileActivity | None,
+    include_inactive: bool,
+    sort_by: Literal[
+        "reference",
+        "lot",
+        "pallet",
+        "box",
+        "warehouse",
+        "status",
+        "position",
+        "created_at",
+        "updated_at",
+    ],
+    sort_dir: Literal["asc", "desc"],
+):
+    try:
+        rows, _ = list_box_files(
+            db,
+            user=user,
+            search=search,
+            warehouse_id=warehouse_id,
+            lot_id=lot_id,
+            pallet_id=pallet_id,
+            box_id=box_id,
+            status=status,
+            activity=activity,
+            include_inactive=include_inactive,
+            sort_by=sort_by,
+            sort_dir=sort_dir,
+            page=1,
+            page_size=1_000_000,
+        )
+    except BoxFileAccessError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    return rows
+
+
+@router.get("/files.csv")
+def export_files_csv(
+    db: DbSession,
+    user: CurrentUser,
+    search: str | None = None,
+    warehouse_id: int | None = Query(default=None, ge=1),
+    lot_id: int | None = Query(default=None, ge=1),
+    pallet_id: int | None = Query(default=None, ge=1),
+    box_id: int | None = Query(default=None, ge=1),
+    status_filter: Annotated[
+        BoxStatus | None, Query(alias="status")
+    ] = None,
+    activity: FileActivity | None = None,
+    include_inactive: bool = False,
+    sort_by: Literal[
+        "reference",
+        "lot",
+        "pallet",
+        "box",
+        "warehouse",
+        "status",
+        "position",
+        "created_at",
+        "updated_at",
+    ] = "reference",
+    sort_dir: Literal["asc", "desc"] = "asc",
+) -> Response:
+    rows = _file_export_rows(
+        db,
+        user,
+        search=search,
+        warehouse_id=warehouse_id,
+        lot_id=lot_id,
+        pallet_id=pallet_id,
+        box_id=box_id,
+        status=status_filter,
+        activity=activity,
+        include_inactive=include_inactive,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+    )
+    return Response(
+        content=files_to_csv(rows),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f'attachment; filename="{_filename("files", "csv")}"'
+        },
+    )
+
+
+@router.get("/files.xlsx")
+def export_files_xlsx(
+    db: DbSession,
+    user: CurrentUser,
+    search: str | None = None,
+    warehouse_id: int | None = Query(default=None, ge=1),
+    lot_id: int | None = Query(default=None, ge=1),
+    pallet_id: int | None = Query(default=None, ge=1),
+    box_id: int | None = Query(default=None, ge=1),
+    status_filter: Annotated[
+        BoxStatus | None, Query(alias="status")
+    ] = None,
+    activity: FileActivity | None = None,
+    include_inactive: bool = False,
+    sort_by: Literal[
+        "reference",
+        "lot",
+        "pallet",
+        "box",
+        "warehouse",
+        "status",
+        "position",
+        "created_at",
+        "updated_at",
+    ] = "reference",
+    sort_dir: Literal["asc", "desc"] = "asc",
+) -> Response:
+    rows = _file_export_rows(
+        db,
+        user,
+        search=search,
+        warehouse_id=warehouse_id,
+        lot_id=lot_id,
+        pallet_id=pallet_id,
+        box_id=box_id,
+        status=status_filter,
+        activity=activity,
+        include_inactive=include_inactive,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+    )
+    return Response(
+        content=files_to_xlsx(rows),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f'attachment; filename="{_filename("files", "xlsx")}"'
+        },
+    )
 
 
 def _request_filters(

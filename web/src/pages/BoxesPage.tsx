@@ -28,6 +28,7 @@ import type {
   BoxStatus,
   BulkDeleteResult,
   BulkResult,
+  FileInput,
   ImportResult,
 } from "@/api/types";
 import { ALL_BOX_STATUSES } from "@/api/types";
@@ -37,6 +38,8 @@ import {
   type BulkResultSkipRow,
 } from "@/components/BulkResultDialog";
 import { ImportBoxesDialog } from "@/components/ImportBoxesDialog";
+import { FileItemsEditor } from "@/components/FileItemsEditor";
+import { validateFileItems } from "@/components/fileItems";
 import { LotPicker, type LotSelection } from "@/components/LotPicker";
 import { PalletPicker, type PalletSelection } from "@/components/PalletPicker";
 import { useHasRole } from "@/components/RoleGate";
@@ -297,7 +300,7 @@ export function BoxesPage() {
             <Search className="pointer-events-none absolute left-2 top-2.5 h-4 w-4 text-slate-400" />
             <input
               className="input pl-8"
-              placeholder="Box #, lot, pallet, or item descriptions"
+              placeholder="Box #, lot, pallet, File ref, description, or barcode"
               value={filters.search ?? ""}
               onChange={(e) => setParam("q", e.target.value || undefined)}
             />
@@ -475,7 +478,7 @@ export function BoxesPage() {
                   direction={activeSortDir}
                   onToggle={toggleSort}
                 />
-                <th className="px-4 py-2.5 text-left">Item descriptions</th>
+                <th className="px-4 py-2.5 text-left">Physical Files</th>
                 <th className="px-4 py-2.5 text-left">Pallet</th>
                 <SortableTh
                   label="Warehouse"
@@ -1141,15 +1144,11 @@ function BoxRow({
         </Link>
       </td>
       <td className="px-4 py-2.5">
-        {box.contents ? (
-          <span
-            className="block max-w-[18rem] truncate text-slate-700"
-            title={box.contents}
-          >
-            {box.contents}
-          </span>
-        ) : (
-          <span className="text-slate-400">—</span>
+        <Link className="text-brand-700 hover:underline" to={`/files?box_id=${box.id}&activity=all`}>
+          {box.active_file_count} active
+        </Link>
+        {box.archived_file_count > 0 && (
+          <span className="block text-xs text-slate-500">{box.archived_file_count} archived</span>
         )}
       </td>
       <td className="px-4 py-2.5">
@@ -1258,14 +1257,8 @@ function BoxCard({
                 "Unassigned"
               )}
             </dd>
-            {box.contents && (
-              <>
-                <dt className="text-slate-500">Item descriptions</dt>
-                <dd className="line-clamp-2 break-words text-slate-700">
-                  {box.contents}
-                </dd>
-              </>
-            )}
+            <dt className="text-slate-500">Physical Files</dt>
+            <dd><Link className="text-brand-700 hover:underline" to={`/files?box_id=${box.id}&activity=all`}>{box.active_file_count} active{box.archived_file_count ? ` · ${box.archived_file_count} archived` : ""}</Link></dd>
             <dt className="text-slate-500">Updated</dt>
             <dd className="truncate text-slate-500">
               {new Date(box.updated_at).toLocaleString()}
@@ -1305,13 +1298,13 @@ function CreateBoxModal({ onClose }: { onClose: () => void }) {
   const [lot, setLot] = useState<LotSelection | null>(null);
   const [pallet, setPallet] = useState<PalletSelection | null>(null);
   const [palletNumber, setPalletNumber] = useState("");
-  const [contents, setContents] = useState("");
+  const [files, setFiles] = useState<FileInput[]>([{ reference: "", description: "", barcode: "" }]);
   const [warehouseId, setWarehouseId] = useState<number | "">("");
   const [error, setError] = useState<string | null>(null);
 
   return (
     <div className="modal-backdrop z-30">
-      <div className="modal-sheet max-w-md">
+      <div className="modal-sheet max-h-[90vh] max-w-4xl overflow-y-auto">
         <h2 className="text-lg font-semibold">Receive a new box</h2>
         <form
           className="mt-4 space-y-3"
@@ -1320,6 +1313,11 @@ function CreateBoxModal({ onClose }: { onClose: () => void }) {
             setError(null);
             if (!warehouseId || !lot) {
               setError("Pick a warehouse and lot.");
+              return;
+            }
+            const fileError = validateFileItems(files, { requireAtLeastOne: true });
+            if (fileError) {
+              setError(fileError);
               return;
             }
             if (!isValidPalletPickerValue(palletNumber, pallet)) {
@@ -1334,7 +1332,7 @@ function CreateBoxModal({ onClose }: { onClose: () => void }) {
                   boxNumber,
                   lotId: lot.id,
                   pallet,
-                  contents,
+                  files,
                   warehouseId: Number(warehouseId),
                 }),
               );
@@ -1362,19 +1360,7 @@ function CreateBoxModal({ onClose }: { onClose: () => void }) {
               onChange={(e) => setBoxNumber(e.target.value)}
             />
           </label>
-          <label className="block">
-            <span className="text-xs text-slate-500">Item descriptions (optional)</span>
-            <textarea
-              maxLength={2000}
-              rows={2}
-              className="input"
-              value={contents}
-              onChange={(e) => setContents(e.target.value)}
-            />
-            <span className="mt-1 block text-xs text-slate-500">
-              Free text only; individual items are not separately tracked.
-            </span>
-          </label>
+          <FileItemsEditor value={files} onChange={setFiles} disabled={create.isPending} requireAtLeastOne />
           <LotPicker
             value={lot}
             onChange={setLot}

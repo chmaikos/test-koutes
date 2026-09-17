@@ -6,8 +6,9 @@ from typing import Annotated, Literal
 
 from fastapi import HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import Select, or_
+from sqlalchemy import Select, and_, or_
 
+from app.models.box_files import BoxFile
 from app.models.boxes import Box, BoxStatus
 from app.models.pallets import Pallet
 from app.models.warehouses import Warehouse
@@ -50,7 +51,12 @@ def parse_box_filters(
     unassigned_pallet: Annotated[bool, Query()] = False,
     search: Annotated[
         str | None,
-        Query(description="matches box_number, lot, pallet number, or contents"),
+        Query(
+            description=(
+                "matches box, lot, pallet, contents, or an active File "
+                "reference/description/barcode"
+            )
+        ),
     ] = None,
     received_from: Annotated[datetime | None, Query()] = None,
     received_to: Annotated[datetime | None, Query()] = None,
@@ -122,6 +128,16 @@ def apply_box_filters(
                 Box.lot.ilike(like),
                 Box.pallet.has(Pallet.pallet_number.ilike(like)),
                 Box.contents.ilike(like),
+                Box.files.any(
+                    and_(
+                        BoxFile.archived_at.is_(None),
+                        or_(
+                            BoxFile.reference.ilike(like),
+                            BoxFile.description.ilike(like),
+                            BoxFile.barcode.ilike(like),
+                        ),
+                    ),
+                ),
             )
         )
     if filters.received_from is not None:

@@ -79,6 +79,8 @@ function handleEvent(
       qc.invalidateQueries({ queryKey: ["pallet"] });
       qc.invalidateQueries({ queryKey: ["pallet-events"] });
       qc.invalidateQueries({ queryKey: ["pallet-integrity"] });
+      qc.invalidateQueries({ queryKey: ["files"] });
+      qc.invalidateQueries({ queryKey: ["file-integrity"] });
       qc.invalidateQueries({ queryKey: ["boxes"] });
       qc.invalidateQueries({ queryKey: ["lots"] });
       qc.invalidateQueries({ queryKey: ["lot"] });
@@ -97,6 +99,8 @@ function handleEvent(
     case "box.updated":
     case "box.deleted":
       qc.invalidateQueries({ queryKey: ["boxes"] });
+      qc.invalidateQueries({ queryKey: ["files"] });
+      qc.invalidateQueries({ queryKey: ["file-integrity"] });
       qc.invalidateQueries({ queryKey: ["pallets"] });
       qc.invalidateQueries({ queryKey: ["pallet-options"] });
       qc.invalidateQueries({ queryKey: ["pallet"] });
@@ -142,6 +146,8 @@ function handleEvent(
     case "lot.reassigned":
     case "lot.merged": {
       qc.invalidateQueries({ queryKey: ["lots"] });
+      qc.invalidateQueries({ queryKey: ["files"] });
+      qc.invalidateQueries({ queryKey: ["file-integrity"] });
       qc.invalidateQueries({ queryKey: ["pallets"] });
       qc.invalidateQueries({ queryKey: ["pallet-options"] });
       qc.invalidateQueries({ queryKey: ["pallet"] });
@@ -181,6 +187,8 @@ function handleEvent(
     }
     case "lot.purged": {
       qc.invalidateQueries({ queryKey: ["lots"] });
+      qc.invalidateQueries({ queryKey: ["files"] });
+      qc.invalidateQueries({ queryKey: ["file-integrity"] });
       qc.invalidateQueries({ queryKey: ["lot-options"] });
       qc.invalidateQueries({ queryKey: ["boxes"] });
       qc.invalidateQueries({ queryKey: ["pallets"] });
@@ -230,6 +238,35 @@ function handleEvent(
       }
       break;
     }
+    case "file.created":
+    case "file.updated":
+    case "file.moved":
+    case "file.archived":
+    case "file.restored": {
+      qc.invalidateQueries({ queryKey: ["files"] });
+      qc.invalidateQueries({ queryKey: ["file"] });
+      qc.invalidateQueries({ queryKey: ["file-events"] });
+      qc.invalidateQueries({ queryKey: ["file-integrity"] });
+      qc.invalidateQueries({ queryKey: ["boxes"] });
+      qc.invalidateQueries({ queryKey: ["lots"] });
+      qc.invalidateQueries({ queryKey: ["pallets"] });
+      qc.invalidateQueries({ queryKey: ["requests"] });
+      qc.invalidateQueries({ queryKey: ["request"] });
+      qc.invalidateQueries({ queryKey: ["request-reconciliation"] });
+      qc.invalidateQueries({ queryKey: ["request-suggestion"] });
+      qc.invalidateQueries({ queryKey: ["return-sources"] });
+      qc.invalidateQueries({ queryKey: ["return-candidates"] });
+      qc.invalidateQueries({ queryKey: queryKeys.dashboard });
+      if (typeof event.data.box_id === "number") {
+        qc.invalidateQueries({ queryKey: queryKeys.box(event.data.box_id) });
+      }
+      if (typeof event.data.source_box_id === "number") {
+        qc.invalidateQueries({
+          queryKey: queryKeys.box(event.data.source_box_id),
+        });
+      }
+      break;
+    }
     case "alert.triggered":
     case "alert.resolved":
       qc.invalidateQueries({ queryKey: ["alerts"] });
@@ -239,6 +276,8 @@ function handleEvent(
     case "request.updated": {
       qc.invalidateQueries({ queryKey: ["requests"] });
       qc.invalidateQueries({ queryKey: ["boxes"] });
+      qc.invalidateQueries({ queryKey: ["files"] });
+      qc.invalidateQueries({ queryKey: ["file-integrity"] });
       qc.invalidateQueries({ queryKey: ["lots"] });
       qc.invalidateQueries({ queryKey: ["lot-options"] });
       qc.invalidateQueries({ queryKey: ["lot-purge-preview"] });

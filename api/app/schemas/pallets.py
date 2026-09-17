@@ -44,6 +44,8 @@ class PalletSummaryOut(BaseModel):
     updated_by_user_id: int | None
     physical_box_count: int
     box_count: int
+    active_file_count: int
+    archived_file_count: int
     status_counts: PalletStatusCounts
     eligible_box_count: int
     completed_box_count: int

@@ -178,7 +178,7 @@ export function LotsPage() {
               <thead className="bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
                 <tr>
                   <th className="px-4 py-3">Lot</th>
-                  <th className="px-4 py-3">Boxes</th>
+                  <th className="px-4 py-3">Boxes / Files</th>
                   <th className="min-w-56 px-4 py-3">Status distribution</th>
                   <th className="px-4 py-3">Completion</th>
                   <th className="px-4 py-3">Warehouses</th>
@@ -210,6 +210,9 @@ export function LotsPage() {
                         {lot.completed_box_count} completed ·{" "}
                         {lot.status_counts.quarantined} quarantined
                       </div>
+                      <Link className="text-xs text-brand-700 hover:underline" to={`/files?lot_id=${lot.id}&lot_name=${encodeURIComponent(lot.name)}&activity=all`}>
+                        {lot.active_file_count} active Files · {lot.archived_file_count} archived
+                      </Link>
                     </td>
                     <td className="px-4 py-3">
                       <LotStatusBar counts={lot.status_counts} />
@@ -251,7 +254,7 @@ export function LotsPage() {
                       {lot.name}
                     </Link>
                     <p className="text-xs text-slate-500">
-                      {lot.box_count} boxes · {lot.warehouse_names.join(", ") || "No warehouse"}
+                      {lot.box_count} boxes · {lot.active_file_count} active Files · {lot.archived_file_count} archived · {lot.warehouse_names.join(", ") || "No warehouse"}
                     </p>
                   </div>
                   <Completion lot={lot} compact />

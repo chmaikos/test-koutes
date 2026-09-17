@@ -26,6 +26,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 from app.db import Base
 
 if TYPE_CHECKING:
+    from app.models.box_files import BoxFile
     from app.models.lots import Lot
     from app.models.pallets import Pallet
 
@@ -126,6 +127,11 @@ class BoxRequestDiscrepancyType(str, enum.Enum):
     wrong_lot = "wrong_lot"
     wrong_contents = "wrong_contents"
     rejected = "rejected"
+
+
+class BoxRequestItemFileSnapshotKind(str, enum.Enum):
+    tracked_file = "tracked_file"
+    legacy_contents = "legacy_contents"
 
 
 class BoxRequest(Base):
@@ -349,6 +355,12 @@ class BoxRequestItem(Base):
     request: Mapped[BoxRequest] = relationship(back_populates="items")
     lot_record: Mapped[Lot | None] = relationship()
     pallet_record: Mapped[Pallet | None] = relationship()
+    file_snapshots: Mapped[list[BoxRequestItemFileSnapshot]] = relationship(
+        back_populates="request_item",
+        cascade="all, delete-orphan",
+        order_by="BoxRequestItemFileSnapshot.position",
+        lazy="selectin",
+    )
 
     @validates("lot")
     def _keep_lot_snapshot_immutable(
@@ -374,6 +386,85 @@ class BoxRequestItem(Base):
     def pallet_number(self) -> str | None:
         """Explicit API alias for the immutable pallet display snapshot."""
         return self.pallet
+
+
+class BoxRequestItemFileSnapshot(Base):
+    """Immutable file details captured for one request item."""
+
+    __tablename__ = "box_request_item_file_snapshots"
+    __table_args__ = (
+        UniqueConstraint(
+            "request_item_id",
+            "position",
+            name="uq_request_item_file_snapshots_position",
+        ),
+        CheckConstraint(
+            "length(trim(reference)) > 0",
+            name="ck_request_item_file_snapshots_reference_not_blank",
+        ),
+        CheckConstraint(
+            "position > 0",
+            name="ck_request_item_file_snapshots_position_positive",
+        ),
+        Index("ix_request_item_file_snapshots_file_id", "file_id"),
+        Index(
+            "ix_request_item_file_snapshots_kind",
+            "snapshot_kind",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    request_item_id: Mapped[int] = mapped_column(
+        ForeignKey("box_request_items.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    file_id: Mapped[int | None] = mapped_column(
+        ForeignKey("box_files.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    reference: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    barcode: Mapped[str | None] = mapped_column(String(255))
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    snapshot_kind: Mapped[BoxRequestItemFileSnapshotKind] = mapped_column(
+        Enum(
+            BoxRequestItemFileSnapshotKind,
+            name="box_request_item_file_snapshot_kind",
+            native_enum=False,
+            create_constraint=True,
+            values_callable=lambda enum_cls: [item.value for item in enum_cls],
+        ),
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    request_item: Mapped[BoxRequestItem] = relationship(back_populates="file_snapshots")
+    file: Mapped[BoxFile | None] = relationship(back_populates="request_snapshots")
+
+    @validates(
+        "request_item_id",
+        "file_id",
+        "reference",
+        "description",
+        "barcode",
+        "position",
+        "snapshot_kind",
+    )
+    def _keep_snapshot_immutable(self, key: str, value: object) -> object:
+        # Staged receipts capture immutable values before a live BoxFile exists.
+        # Completion may attach that snapshot once; an established link cannot
+        # subsequently be redirected.
+        if (
+            key == "file_id"
+            and self.__dict__.get(key) is None
+            and isinstance(value, int)
+        ):
+            return value
+        if key in self.__dict__ and self.__dict__[key] != value:
+            raise ValueError(f"request item file {key} snapshot is immutable")
+        return value
 
 
 class BoxRequestEvent(Base):
@@ -630,6 +721,8 @@ __all__ = [
     "BoxRequestException",
     "BoxRequestExceptionKind",
     "BoxRequestItem",
+    "BoxRequestItemFileSnapshot",
+    "BoxRequestItemFileSnapshotKind",
     "BoxRequestPriority",
     "BoxRequestStatus",
 ]

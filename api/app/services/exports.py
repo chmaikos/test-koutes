@@ -24,6 +24,9 @@ EXPORT_COLUMNS = [
     "Pallet ID",
     "Pallet Number",
     "Contents",
+    "File Count",
+    "Archived File Count",
+    "File Summary",
     "Warehouse ID",
     "Warehouse",
     "Status",
@@ -35,11 +38,13 @@ EXPORT_COLUMNS = [
 
 # Indices of columns whose values are datetimes. Used by the XLSX writer to
 # apply a date number_format and by the CSV writer to format them as text.
-_DATETIME_COLUMN_INDICES = (8, 9, 10, 11)
+_DATETIME_COLUMN_INDICES = (11, 12, 13, 14)
 
 STATUS_LABELS: dict[BoxStatus, str] = {
     BoxStatus.quarantined: "Quarantined",
     BoxStatus.received: "Received",
+    BoxStatus.processing: "Processing",
+    BoxStatus.incomplete: "Incomplete",
     BoxStatus.ready_to_return: "Ready to return",
     BoxStatus.returned: "Returned",
 }
@@ -115,6 +120,8 @@ LOT_SUMMARY_COLUMNS = [
     "Lot",
     "Physical Box Count",
     "Total Non-Archived Boxes",
+    "Active File Count",
+    "Archived File Count",
     "Quarantined",
     "Received",
     "Processing",
@@ -144,11 +151,35 @@ PALLET_SUMMARY_COLUMNS = [
     "Active",
     "Physical Box Count",
     "Total Non-Archived Boxes",
+    "Active File Count",
+    "Archived File Count",
     "Eligible Box Count",
     "Completed Box Count",
     "Completion Percent",
     "Progress State",
     "Latest Activity",
+    "Created At",
+    "Updated At",
+]
+
+FILE_EXPORT_COLUMNS = [
+    "File ID",
+    "Reference",
+    "Description",
+    "Barcode",
+    "Position",
+    "Lot ID",
+    "Lot",
+    "Pallet ID",
+    "Pallet",
+    "Box ID",
+    "Box",
+    "Warehouse ID",
+    "Warehouse",
+    "Status",
+    "Active",
+    "Archived At",
+    "Archive Reason",
     "Created At",
     "Updated At",
 ]
@@ -188,12 +219,26 @@ def _to_naive_utc(value: datetime | None) -> datetime | None:
 
 def _row_for(box: Box, warehouses: Mapping[int, str]) -> list:
     """Return a row of native Python values (datetimes naive UTC for XLSX)."""
+    files = list(getattr(box, "files", []))
+    active_files = sorted(
+        (file for file in files if file.archived_at is None),
+        key=lambda file: (file.position, file.id),
+    )
+    summary = "; ".join(
+        " ".join(file.reference.replace("\r", " ").replace("\n", " ").split())
+        for file in active_files
+    )[:2000]
+    if summary.startswith(("=", "+", "-", "@")):
+        summary = f"'{summary}"
     return [
         box.box_number,
         box.lot,
         getattr(box, "pallet_id", None),
         getattr(box, "pallet_number", None) or "",
         box.contents or "",
+        len(active_files),
+        sum(file.archived_at is not None for file in files),
+        summary,
         box.current_warehouse_id,
         warehouses.get(box.current_warehouse_id, ""),
         STATUS_LABELS.get(box.status, box.status.value),
@@ -262,6 +307,56 @@ def boxes_to_xlsx(boxes: Iterable[Box], warehouses: Mapping[int, str]) -> bytes:
     return buf.getvalue()
 
 
+def _safe_spreadsheet_text(value: object) -> object:
+    if isinstance(value, str):
+        cleaned = value.replace("\x00", "").replace("\r", " ").replace("\n", " ")
+        return f"'{cleaned}" if cleaned.startswith(("=", "+", "-", "@")) else cleaned
+    return value
+
+
+def _file_row(file: Mapping[str, object]) -> list:
+    return [
+        file["id"],
+        _safe_spreadsheet_text(file["reference"]),
+        _safe_spreadsheet_text(file.get("description") or ""),
+        _safe_spreadsheet_text(file.get("barcode") or ""),
+        file["position"],
+        file["lot_id"],
+        _safe_spreadsheet_text(file["lot"]),
+        file.get("pallet_id"),
+        _safe_spreadsheet_text(file.get("pallet") or ""),
+        file["box_id"],
+        _safe_spreadsheet_text(file["box"]),
+        file["warehouse_id"],
+        _safe_spreadsheet_text(file["warehouse"]),
+        getattr(file["status"], "value", file["status"]),
+        file["is_active"],
+        _to_naive_utc(file.get("archived_at")),  # type: ignore[arg-type]
+        _safe_spreadsheet_text(file.get("archive_reason") or ""),
+        _to_naive_utc(file.get("created_at")),  # type: ignore[arg-type]
+        _to_naive_utc(file.get("updated_at")),  # type: ignore[arg-type]
+    ]
+
+
+def files_to_csv(files: Iterable[Mapping[str, object]]) -> bytes:
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(FILE_EXPORT_COLUMNS)
+    for file in files:
+        writer.writerow([_format_csv_value(value) for value in _file_row(file)])
+    return ("\ufeff" + buf.getvalue()).encode("utf-8")
+
+
+def files_to_xlsx(files: Iterable[Mapping[str, object]]) -> bytes:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Files"
+    _write_sheet(sheet, FILE_EXPORT_COLUMNS, (_file_row(file) for file in files))
+    buf = io.BytesIO()
+    workbook.save(buf)
+    return buf.getvalue()
+
+
 def _lot_summary_row(summary: LotSummary) -> list:
     counts = summary.status_counts
     return [
@@ -269,6 +364,8 @@ def _lot_summary_row(summary: LotSummary) -> list:
         summary.name,
         summary.physical_box_count,
         summary.box_count,
+        summary.active_file_count,
+        summary.archived_file_count,
         counts["quarantined"],
         counts["received"],
         counts["processing"],
@@ -325,6 +422,8 @@ def _pallet_summary_row(summary: PalletSummary) -> list:
         summary.is_active,
         summary.physical_box_count,
         summary.box_count,
+        summary.active_file_count,
+        summary.archived_file_count,
         summary.eligible_box_count,
         summary.completed_box_count,
         summary.completion_percent,

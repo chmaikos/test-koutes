@@ -91,13 +91,13 @@ describe("pallet list and picker helpers", () => {
         boxNumber: "1",
         lotId: 2,
         pallet: null,
-        contents: " Notes ",
+        files: [{ reference: " FILE 1 ", description: " Notes " }],
         warehouseId: 3,
       }),
     ).toEqual({
       box_number: "001",
       lot_id: 2,
-      contents: "Notes",
+      files: [{ reference: "FILE 1", description: "Notes", barcode: undefined }],
       warehouse_id: 3,
     });
     expect(
@@ -105,7 +105,7 @@ describe("pallet list and picker helpers", () => {
         boxNumber: "2",
         lotId: 2,
         pallet: { id: 7, pallet_number: "PAL 01" },
-        contents: "",
+        files: [],
         warehouseId: 3,
       }),
     ).toMatchObject({ pallet_id: 7, pallet_number: "PAL 01" });

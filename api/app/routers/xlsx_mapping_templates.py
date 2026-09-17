@@ -65,6 +65,9 @@ def _out(template: XlsxMappingTemplate, user: CurrentUser) -> XlsxMappingTemplat
         updated_at=template.updated_at,
         is_owner=template.owner_user_id == user.id,
         is_shared=template.warehouse_id is not None,
+        is_legacy_incomplete=not bool(
+            template.column_mappings.get("file_reference")
+        ),
     )
 
 
@@ -117,6 +120,7 @@ def create_mapping_template(
             lot_source=payload.lot_source,
             fixed_lot=payload.fixed_lot,
             column_mappings=mappings,
+            require_file_reference=True,
         )
     except XlsxTemplateRuleError as exc:
         raise _error(exc) from exc
@@ -214,6 +218,7 @@ def update_mapping_template(
             lot_source=template.lot_source,
             fixed_lot=template.fixed_lot,
             column_mappings=template.column_mappings,
+            require_file_reference="column_mappings" in fields,
         )
     except XlsxTemplateRuleError as exc:
         raise _error(exc) from exc

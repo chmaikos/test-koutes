@@ -20,6 +20,15 @@ import type {
   EmployeeAverages,
   EmployeeImportItem,
   EmployeeImportResult,
+  FileCreatePayload,
+  FileIntegrity,
+  FileInput,
+  FileMovePayload,
+  FileStateChangePayload,
+  FileUpdatePayload,
+  TrackedFile,
+  TrackedFileEvent,
+  TrackedFileFilters,
   ImportResult,
   InboundCompletionPreview,
   InboundCompletionPreviewRequest,
@@ -101,6 +110,12 @@ export const queryKeys = {
   boxEvents: (id: number) => ["box-events", id] as const,
   boxes: (filters: BoxFilters, page: number, pageSize: number) =>
     ["boxes", filters, page, pageSize] as const,
+  files: (filters: TrackedFileFilters, page: number, pageSize: number) =>
+    ["files", filters, page, pageSize] as const,
+  file: (id: number, includeInactive = false, includeArchived = false) =>
+    ["file", id, includeInactive, includeArchived] as const,
+  fileEvents: (id: number) => ["file-events", id] as const,
+  fileIntegrity: ["file-integrity"] as const,
   lots: (filters: LotFilters, page: number, pageSize: number) =>
     ["lots", filters, page, pageSize] as const,
   lotOptions: (search: string, page: number, limit: number) =>
@@ -459,12 +474,152 @@ export function useBoxEvents(id: number | undefined) {
   });
 }
 
+export function useFiles(
+  filters: TrackedFileFilters,
+  page: number,
+  pageSize: number,
+) {
+  return useQuery({
+    queryKey: queryKeys.files(filters, page, pageSize),
+    queryFn: async () =>
+      (
+        await api.get<Page<TrackedFile>>(
+          `/files${buildQueryString({ ...filters, page, page_size: pageSize })}`,
+        )
+      ).data,
+    placeholderData: (previous) => previous,
+  });
+}
+
+export function useFile(
+  id: number | undefined,
+  includeInactive = false,
+  includeArchived = false,
+) {
+  return useQuery({
+    queryKey: id
+      ? queryKeys.file(id, includeInactive, includeArchived)
+      : ["file", "noop"],
+    queryFn: async () =>
+      (
+        await api.get<TrackedFile>(
+          `/files/${id}${buildQueryString({
+            include_inactive: includeInactive || undefined,
+            include_archived: includeArchived || undefined,
+          })}`,
+        )
+      ).data,
+    enabled: !!id,
+  });
+}
+
+export function useFileEvents(id: number | undefined) {
+  return useQuery({
+    queryKey: id ? queryKeys.fileEvents(id) : ["file-events", "noop"],
+    queryFn: async () =>
+      (await api.get<TrackedFileEvent[]>(`/files/${id}/events`)).data,
+    enabled: !!id,
+  });
+}
+
+export function useFileIntegrity(enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.fileIntegrity,
+    queryFn: async () =>
+      (await api.get<FileIntegrity>("/files/integrity")).data,
+    enabled,
+  });
+}
+
+function invalidateFileState(
+  qc: ReturnType<typeof useQueryClient>,
+  fileId?: number,
+) {
+  qc.invalidateQueries({ queryKey: ["files"] });
+  qc.invalidateQueries({ queryKey: ["file-integrity"] });
+  if (fileId !== undefined) {
+    qc.invalidateQueries({ queryKey: ["file", fileId] });
+    qc.invalidateQueries({ queryKey: queryKeys.fileEvents(fileId) });
+  } else {
+    qc.invalidateQueries({ queryKey: ["file"] });
+    qc.invalidateQueries({ queryKey: ["file-events"] });
+  }
+  qc.invalidateQueries({ queryKey: ["boxes"] });
+  qc.invalidateQueries({ queryKey: ["box"] });
+  qc.invalidateQueries({ queryKey: ["lots"] });
+  qc.invalidateQueries({ queryKey: ["lot"] });
+  qc.invalidateQueries({ queryKey: ["lot-boxes"] });
+  qc.invalidateQueries({ queryKey: ["pallets"] });
+  qc.invalidateQueries({ queryKey: ["pallet"] });
+  qc.invalidateQueries({ queryKey: ["requests"] });
+  qc.invalidateQueries({ queryKey: ["request"] });
+  qc.invalidateQueries({ queryKey: ["request-reconciliation"] });
+  qc.invalidateQueries({ queryKey: ["request-suggestion"] });
+  qc.invalidateQueries({ queryKey: ["return-sources"] });
+  qc.invalidateQueries({ queryKey: ["return-candidates"] });
+  qc.invalidateQueries({ queryKey: queryKeys.dashboard });
+}
+
+export function useCreateFile() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (payload: FileCreatePayload) =>
+      (await api.post<TrackedFile>("/files", payload)).data,
+    onSettled: (file) => invalidateFileState(qc, file?.id),
+  });
+}
+
+export function useUpdateFile() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: { id: number; payload: FileUpdatePayload }) =>
+      (await api.patch<TrackedFile>(`/files/${input.id}`, input.payload)).data,
+    onSettled: (_file, _error, input) => invalidateFileState(qc, input.id),
+  });
+}
+
+export function useMoveFile() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: { id: number; payload: FileMovePayload }) =>
+      (await api.post<TrackedFile>(`/files/${input.id}/move`, input.payload))
+        .data,
+    onSettled: (_file, _error, input) => invalidateFileState(qc, input.id),
+  });
+}
+
+function useFileStateMutation(action: "archive" | "restore") {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: {
+      id: number;
+      payload: FileStateChangePayload;
+    }) =>
+      (
+        await api.post<TrackedFile>(
+          `/files/${input.id}/${action}`,
+          input.payload,
+        )
+      ).data,
+    onSettled: (_file, _error, input) => invalidateFileState(qc, input.id),
+  });
+}
+
+export function useArchiveFile() {
+  return useFileStateMutation("archive");
+}
+
+export function useRestoreFile() {
+  return useFileStateMutation("restore");
+}
+
 function invalidateLotState(
   qc: ReturnType<typeof useQueryClient>,
   lotIds: number[] = [],
 ) {
   qc.invalidateQueries({ queryKey: ["lots"] });
   qc.invalidateQueries({ queryKey: ["lot-options"] });
+  qc.invalidateQueries({ queryKey: ["files"] });
   if (lotIds.length === 0) {
     qc.invalidateQueries({ queryKey: ["lot"] });
     qc.invalidateQueries({ queryKey: ["lot-events"] });
@@ -827,6 +982,7 @@ function invalidatePurgedLotState(
 ) {
   qc.invalidateQueries({ queryKey: ["lots"] });
   qc.invalidateQueries({ queryKey: ["lot-options"] });
+  qc.invalidateQueries({ queryKey: ["files"] });
   qc.invalidateQueries({ queryKey: ["boxes"] });
   qc.invalidateQueries({ queryKey: ["requests"] });
   qc.invalidateQueries({ queryKey: ["request-reconciliation"] });
@@ -944,6 +1100,7 @@ export function useCreateBox() {
       pallet_number?: string | null;
       pallet_id?: number | null;
       contents?: string;
+      files?: FileInput[];
       warehouse_id: number;
       note?: string;
     }) => (await api.post<Box | StagedReceiptResult>("/boxes", input)).data,
@@ -968,6 +1125,7 @@ export function useUpdateBox() {
         status: Box["status"];
         warehouse_id: number;
         contents: string;
+        files: FileInput[];
         note: string;
         pallet_id: number;
         detach_pallet: boolean;
@@ -1045,6 +1203,9 @@ export function useBulkUpdateBoxes() {
       (await api.post<BulkResult>("/boxes/bulk", input)).data,
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["boxes"] });
+      qc.invalidateQueries({ queryKey: ["files"] });
+      qc.invalidateQueries({ queryKey: ["lots"] });
+      qc.invalidateQueries({ queryKey: ["pallets"] });
       qc.invalidateQueries({ queryKey: queryKeys.dashboard });
       qc.invalidateQueries({ queryKey: ["alerts"] });
       qc.invalidateQueries({ queryKey: ["requests"] });
@@ -1486,6 +1647,7 @@ type RequestActionInput =
       body: {
         inbound_items?: InboundRequestItemInput[];
         accept_existing_received_boxes?: boolean;
+        accept_file_moves?: boolean;
         inbound_impact_signature?: string | null;
         collected_box_ids?: number[];
         discrepancies?: RequestDiscrepancyInput[];

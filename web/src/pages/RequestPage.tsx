@@ -1024,7 +1024,7 @@ function CreateRequestDialog({ onClose }: { onClose: () => void }) {
                               <th className="px-3 py-2">Box</th>
                               <th className="px-3 py-2">Lot</th>
                               <th className="px-3 py-2">Pallet</th>
-                              <th className="px-3 py-2">Item descriptions</th>
+                              <th className="px-3 py-2">Contained physical Files</th>
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-slate-100">
@@ -1050,7 +1050,8 @@ function CreateRequestDialog({ onClose }: { onClose: () => void }) {
                                   {box.pallet_id ? <Link className="text-brand-700 hover:underline" to={`/pallets/${box.pallet_id}`}>{box.pallet_number ?? `#${box.pallet_id}`}</Link> : <span className="text-amber-700">Unassigned</span>}
                                 </td>
                                 <td className="px-3 py-2 text-slate-500">
-                                  {box.contents || "—"}
+                                  {box.file_count} File{box.file_count === 1 ? "" : "s"}
+                                  {box.file_summary ? <span className="block max-w-64 truncate text-xs" title={box.file_summary}>{box.file_summary}</span> : null}
                                 </td>
                               </tr>
                             ))}

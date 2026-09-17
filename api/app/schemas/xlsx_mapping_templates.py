@@ -17,6 +17,11 @@ class XlsxColumnMappings(BaseModel):
     box_number: XlsxColumnRef
     pallet_number: XlsxColumnRef | None = None
     lot: XlsxColumnRef | None = None
+    file_reference: XlsxColumnRef | None = None
+    file_description: XlsxColumnRef | None = None
+    barcode: XlsxColumnRef | None = None
+    # Deprecated compatibility mapping. It is never treated as a file
+    # description unless an explicit file_reference mapping is also present.
     contents: XlsxColumnRef | None = None
 
 
@@ -39,6 +44,8 @@ class XlsxMappingTemplateCreate(BaseModel):
             raise ValueError("fixed_lot is required when lot_source is fixed")
         if self.lot_source == "column" and self.column_mappings.lot is None:
             raise ValueError("a lot column is required when lot_source is column")
+        if self.column_mappings.file_reference is None:
+            raise ValueError("a file_reference column is required for new templates")
         return self
 
 
@@ -78,6 +85,7 @@ class XlsxMappingTemplateOut(BaseModel):
     updated_at: datetime
     is_owner: bool
     is_shared: bool
+    is_legacy_incomplete: bool
 
 
 class XlsxMappingSuggestionRequest(BaseModel):
