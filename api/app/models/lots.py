@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     CheckConstraint,
     DateTime,
     Enum,
@@ -22,6 +23,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 from app.db import Base
 
 if TYPE_CHECKING:
+    from app.models.barcode_identities import BarcodeIdentity
     from app.models.box_files import BoxFile
     from app.models.boxes import Box
     from app.models.pallets import Pallet
@@ -92,6 +94,12 @@ class Lot(Base):
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    barcode_identity_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("barcode_identities.id", ondelete="RESTRICT"),
+        nullable=False,
+        unique=True,
+    )
     name: Mapped[str] = mapped_column(String(MAX_LOT_NAME_LENGTH), nullable=False)
     normalized_name: Mapped[str | None] = mapped_column(
         String(MAX_LOT_NAME_LENGTH), nullable=True
@@ -123,6 +131,11 @@ class Lot(Base):
     __mapper_args__ = {"version_id_col": version}
 
     boxes: Mapped[list[Box]] = relationship(back_populates="lot_record")
+    barcode_identity: Mapped[BarcodeIdentity] = relationship(
+        "BarcodeIdentity",
+        foreign_keys=[barcode_identity_id],
+        lazy="joined",
+    )
     files: Mapped[list[BoxFile]] = relationship(
         back_populates="lot",
         overlaps="box,files",
@@ -141,6 +154,10 @@ class Lot(Base):
     @property
     def is_merged(self) -> bool:
         return self.merged_into_lot_id is not None
+
+    @property
+    def barcode(self) -> str:
+        return self.barcode_identity.barcode
 
     @validates("name")
     def _normalize_name(self, _key: str, value: str) -> str:

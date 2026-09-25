@@ -1,4 +1,8 @@
-import type { RequestOrigin, ReturnCandidate } from "@/api/types";
+import type {
+  RequestOrigin,
+  ReturnCandidate,
+  ReturnLotContext,
+} from "@/api/types";
 
 export function returnCandidateIds(candidates: ReturnCandidate[]): number[] {
   return candidates.map((candidate) => candidate.box_id);
@@ -53,4 +57,10 @@ export function returnSourceLabel(origin: RequestOrigin): string {
     default:
       return "Inbound order";
   }
+}
+
+export function returnSourceLotsLabel(lots: ReturnLotContext[]): string {
+  if (lots.length === 0) return "Lot unavailable";
+  const names = lots.map((lot) => lot.lot_name);
+  return `${names.length === 1 ? "Lot" : "Lots"} ${names.join(", ")}`;
 }

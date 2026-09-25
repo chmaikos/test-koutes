@@ -1,10 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, buildQueryString } from "@/api/client";
+import { stripGeneratedBarcodeFields } from "@/lib/barcode";
 import type {
   Alert,
   AlertDetail,
   AlertRecipients,
   AlertTestEmailResult,
+  BarcodeResolution,
   Box,
   BoxDeleteResult,
   BoxUpdateResult,
@@ -106,6 +108,7 @@ export const queryKeys = {
   alerts: (open: boolean) => ["alerts", open] as const,
   alert: (id: number) => ["alert", id] as const,
   alertRecipients: ["alert-recipients"] as const,
+  barcode: (barcode: string) => ["barcode", barcode] as const,
   box: (id: number) => ["box", id] as const,
   boxEvents: (id: number) => ["box-events", id] as const,
   boxes: (filters: BoxFilters, page: number, pageSize: number) =>
@@ -458,6 +461,19 @@ export function useBoxes(filters: BoxFilters, page: number, pageSize: number) {
   });
 }
 
+export function useBarcode(barcode: string | undefined) {
+  return useQuery({
+    queryKey: barcode ? queryKeys.barcode(barcode) : ["barcode", "noop"],
+    queryFn: async () =>
+      (
+        await api.get<BarcodeResolution>(
+          `/barcodes/${encodeURIComponent(barcode as string)}`,
+        )
+      ).data,
+    enabled: !!barcode,
+  });
+}
+
 export function useBox(id: number | undefined) {
   return useQuery({
     queryKey: id ? queryKeys.box(id) : ["box", "noop"],
@@ -564,7 +580,7 @@ export function useCreateFile() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (payload: FileCreatePayload) =>
-      (await api.post<TrackedFile>("/files", payload)).data,
+      (await api.post<TrackedFile>("/files", stripGeneratedBarcodeFields(payload))).data,
     onSettled: (file) => invalidateFileState(qc, file?.id),
   });
 }
@@ -573,7 +589,12 @@ export function useUpdateFile() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (input: { id: number; payload: FileUpdatePayload }) =>
-      (await api.patch<TrackedFile>(`/files/${input.id}`, input.payload)).data,
+      (
+        await api.patch<TrackedFile>(
+          `/files/${input.id}`,
+          stripGeneratedBarcodeFields(input.payload),
+        )
+      ).data,
     onSettled: (_file, _error, input) => invalidateFileState(qc, input.id),
   });
 }
@@ -582,8 +603,12 @@ export function useMoveFile() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (input: { id: number; payload: FileMovePayload }) =>
-      (await api.post<TrackedFile>(`/files/${input.id}/move`, input.payload))
-        .data,
+      (
+        await api.post<TrackedFile>(
+          `/files/${input.id}/move`,
+          stripGeneratedBarcodeFields(input.payload),
+        )
+      ).data,
     onSettled: (_file, _error, input) => invalidateFileState(qc, input.id),
   });
 }
@@ -598,7 +623,7 @@ function useFileStateMutation(action: "archive" | "restore") {
       (
         await api.post<TrackedFile>(
           `/files/${input.id}/${action}`,
-          input.payload,
+          stripGeneratedBarcodeFields(input.payload),
         )
       ).data,
     onSettled: (_file, _error, input) => invalidateFileState(qc, input.id),
@@ -1103,7 +1128,13 @@ export function useCreateBox() {
       files?: FileInput[];
       warehouse_id: number;
       note?: string;
-    }) => (await api.post<Box | StagedReceiptResult>("/boxes", input)).data,
+    }) =>
+      (
+        await api.post<Box | StagedReceiptResult>(
+          "/boxes",
+          stripGeneratedBarcodeFields(input),
+        )
+      ).data,
     onSuccess: () => {
       invalidatePalletState(qc);
       invalidateLotState(qc);
@@ -1132,7 +1163,12 @@ export function useUpdateBox() {
         force: boolean;
       }>;
     }) =>
-      (await api.patch<BoxUpdateResult>(`/boxes/${input.id}`, input.patch)).data,
+      (
+        await api.patch<BoxUpdateResult>(
+          `/boxes/${input.id}`,
+          stripGeneratedBarcodeFields(input.patch),
+        )
+      ).data,
     onSuccess: (data) => {
       invalidatePalletState(qc, data.pallet_id ? [data.pallet_id] : []);
       invalidateLotState(qc, [data.lot_id]);
@@ -1358,7 +1394,12 @@ export function useImportMappedBoxes() {
       items: InboundRequestItemInput[];
       restore_archived?: boolean;
     }) =>
-      (await api.post<ImportResult>("/boxes/import-mapped", input)).data,
+      (
+        await api.post<ImportResult>(
+          "/boxes/import-mapped",
+          stripGeneratedBarcodeFields(input),
+        )
+      ).data,
     onSuccess: () => {
       invalidateLotState(qc);
       qc.invalidateQueries({ queryKey: ["boxes"] });
@@ -1553,7 +1594,7 @@ export function useInboundCompletionPreview() {
       (
         await api.post<InboundCompletionPreview>(
           `/requests/${input.id}/inbound-completion-preview`,
-          input.payload,
+          stripGeneratedBarcodeFields(input.payload),
         )
       ).data,
   });
@@ -1660,10 +1701,10 @@ export function useRequestAction() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (input: RequestActionInput) => {
-      const body = {
+      const body = stripGeneratedBarcodeFields({
         ...("body" in input ? input.body : {}),
         expected_version: input.expectedVersion,
-      };
+      });
       return (
         await api.post<BoxRequest>(
           `/requests/${input.id}/${input.action}`,

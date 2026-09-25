@@ -16,6 +16,7 @@ import {
   type FileSortField,
   type TrackedFile,
 } from "@/api/types";
+import { BarcodeDisplay } from "@/components/BarcodeDisplay";
 import { LotPicker } from "@/components/LotPicker";
 import { PalletPicker } from "@/components/PalletPicker";
 import { useHasRole } from "@/components/RoleGate";
@@ -236,7 +237,7 @@ export function FilesPage() {
             <thead className="bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
               <tr>
                 <SortHeader label="Reference" field="reference" filters={filters} onToggle={toggleSort} />
-                <th className="px-4 py-3">Description / barcode</th>
+                <th className="px-4 py-3">Description / generated barcode</th>
                 <SortHeader label="Lot" field="lot" filters={filters} onToggle={toggleSort} />
                 <SortHeader label="Pallet / Box" field="box" filters={filters} onToggle={toggleSort} />
                 <SortHeader label="Warehouse" field="warehouse" filters={filters} onToggle={toggleSort} />
@@ -317,7 +318,7 @@ function FileRow({ file }: { file: TrackedFile }) {
       </td>
       <td className="max-w-64 px-4 py-3">
         <span className="block truncate" title={file.description ?? undefined}>{file.description || "—"}</span>
-        {file.barcode && <span className="block truncate font-mono text-xs text-slate-500">{file.barcode}</span>}
+        <BarcodeDisplay value={file.barcode} variant="compact" />
       </td>
       <td className="px-4 py-3"><Link className="text-brand-700 hover:underline" to={`/lots/${file.lot_id}`}>{file.lot}</Link></td>
       <td className="px-4 py-3"><Hierarchy file={file} /></td>
@@ -339,7 +340,8 @@ function FileCard({ file }: { file: TrackedFile }) {
       <p className="text-xs text-slate-500">
         <Link className="text-brand-700" to={`/lots/${file.lot_id}`}>{file.lot}</Link> · {file.pallet ?? "Unassigned"} · <Link className="text-brand-700" to={`/boxes/${file.box_id}`}>Box {file.box}</Link>
       </p>
-      <p className="text-xs text-slate-500">{file.warehouse} · inherited {STATUS_LABEL[file.status]}{file.barcode ? ` · ${file.barcode}` : ""}</p>
+      <p className="text-xs text-slate-500">{file.warehouse} · inherited {STATUS_LABEL[file.status]}</p>
+      <BarcodeDisplay value={file.barcode} variant="compact" />
     </article>
   );
 }

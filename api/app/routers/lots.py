@@ -9,6 +9,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.deps import CurrentUser, DbSession, require_admin, require_operator
 from app.events import bus
+from app.models.barcode_identities import BarcodeEntityKind, BarcodeIdentity
 from app.models.boxes import Box, BoxStatus
 from app.models.lots import Lot, LotEvent, LotPurgeEvent
 from app.models.users import User
@@ -103,6 +104,18 @@ def _summary_out(summary) -> LotSummaryOut:
     return LotSummaryOut.model_validate(summary, from_attributes=True)
 
 
+def _lot_barcode(db: DbSession, lot_id: int) -> str:
+    barcode = db.scalar(
+        select(BarcodeIdentity.barcode).where(
+            BarcodeIdentity.entity_kind == BarcodeEntityKind.lot,
+            BarcodeIdentity.entity_id == lot_id,
+        )
+    )
+    if barcode is None:
+        raise HTTPException(status_code=500, detail="lot barcode identity is missing")
+    return barcode
+
+
 def _purge_preview_out(preview) -> LotPurgePreviewOut:
     return LotPurgePreviewOut.model_validate(preview, from_attributes=True)
 
@@ -133,11 +146,13 @@ def _candidate_detail(candidate: LotMergeCandidate) -> dict[str, object]:
     return LotMergeCandidateOut(
         source=LotIdentityOut(
             id=candidate.source_id,
+            barcode=candidate.source_barcode,
             name=candidate.source_name,
             version=candidate.source_version,
         ),
         target=LotIdentityOut(
             id=candidate.target_id,
+            barcode=candidate.target_barcode,
             name=candidate.target_name,
             version=candidate.target_version,
         ),
@@ -444,6 +459,7 @@ async def force_purge(
         purge_audit_id=result.audit_id,
         deleted_lot=LotIdentityOut(
             id=result.lot_id,
+            barcode=_lot_barcode(db, result.lot_id),
             name=result.lot_name,
             version=result.lot_version,
         ),
@@ -570,6 +586,7 @@ async def purge(
         purge_audit_id=result.audit_id,
         deleted_lot=LotIdentityOut(
             id=result.lot_id,
+            barcode=_lot_barcode(db, result.lot_id),
             name=result.lot_name,
             version=result.lot_version,
         ),
@@ -643,12 +660,14 @@ def get_lot_detail(
         assert stored.merged_at is not None
         return MergedLotOut(
             id=stored.id,
+            barcode=stored.barcode,
             name=stored.name,
             version=stored.version,
             merged_at=stored.merged_at,
             merged_by_user_id=stored.merged_by_user_id,
             merged_into=LotIdentityOut(
                 id=target.id,
+                barcode=target.barcode,
                 name=target.name,
                 version=target.version,
             ),
@@ -853,11 +872,13 @@ async def merge(
     return LotMergeOut(
         source=LotIdentityOut(
             id=result.source.id,
+            barcode=result.source.barcode,
             name=result.source.name,
             version=result.source.version,
         ),
         target=LotIdentityOut(
             id=result.target.id,
+            barcode=result.target.barcode,
             name=result.target.name,
             version=result.target.version,
         ),

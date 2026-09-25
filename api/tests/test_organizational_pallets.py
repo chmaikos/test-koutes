@@ -32,6 +32,7 @@ from app.models import (
     Warehouse,
 )
 from app.schemas.pallets import PalletDetailOut, PalletOptionOut, PalletSummaryOut
+from app.services.barcodes import format_barcode
 
 
 def _load_migration():
@@ -491,30 +492,62 @@ def _sqlite_0032_engine() -> sa.Engine:
     return engine
 
 
+def _seed_barcode_identities(
+    connection: sa.Connection,
+    rows: list[tuple[int, str, int]],
+) -> None:
+    connection.execute(
+        sa.text(
+            """
+            INSERT INTO barcode_identities (
+                id, entity_kind, issuance_number, barcode, entity_id, metadata
+            ) VALUES (
+                :id, :kind, :id, :barcode, :entity_id, '{}'
+            )
+            """
+        ),
+        [
+            {
+                "id": number,
+                "kind": kind,
+                "barcode": format_barcode(kind, number),
+                "entity_id": entity_id,
+            }
+            for number, kind, entity_id in rows
+        ],
+    )
+
+
 def test_0033_sqlite_upgrade_and_safe_downgrade_preserve_assignments() -> None:
     migration = _load_migration()
     engine = _sqlite_0032_engine()
     with engine.begin() as connection:
+        _seed_barcode_identities(
+            connection,
+            [(1, "lot", 10), (2, "pallet", 20), (3, "box", 30), (4, "box", 31)],
+        )
         connection.execute(
             sa.text(
-                "INSERT INTO lots (id, name, normalized_name, version) "
-                "VALUES (10, 'Migration', 'migration', 1)"
+                "INSERT INTO lots "
+                "(id, barcode_identity_id, name, normalized_name, version) "
+                "VALUES (10, 1, 'Migration', 'migration', 1)"
             )
         )
         connection.execute(
             sa.text(
                 "INSERT INTO pallets "
-                "(id, lot_id, current_warehouse_id, pallet_number, "
+                "(id, barcode_identity_id, lot_id, current_warehouse_id, pallet_number, "
                 "normalized_pallet_number, version, is_active) "
-                "VALUES (20, 10, 1, 'P-1', 'p-1', 1, 1)"
+                "VALUES (20, 2, 10, 1, 'P-1', 'p-1', 1, 1)"
             )
         )
         connection.execute(
             sa.text(
                 "INSERT INTO boxes "
-                "(id, box_number, lot_id, current_warehouse_id, status, pallet_id) "
-                "VALUES (30, '001', 10, 1, 'received', 20), "
-                "(31, '002', 10, 1, 'received', 20)"
+                "(id, barcode_identity_id, box_number, lot_id, "
+                "current_warehouse_id, status, pallet_id) "
+                "VALUES (30, 3, '001', 10, 1, 'received', 20), "
+                "(31, 4, '002', 10, 1, 'received', 20)"
             )
         )
         migration.op = Operations(MigrationContext.configure(connection))
@@ -592,27 +625,33 @@ def test_0033_sqlite_downgrade_refuses_lossy_shapes(shape: str) -> None:
     migration = _load_migration()
     engine = _sqlite_0032_engine()
     with engine.begin() as connection:
+        identities = [(1, "lot", 10), (2, "pallet", 20)]
+        if shape == "multi_warehouse":
+            identities.extend([(3, "box", 30), (4, "box", 31)])
+        _seed_barcode_identities(connection, identities)
         connection.execute(
             sa.text(
-                "INSERT INTO lots (id, name, normalized_name, version) "
-                "VALUES (10, 'Unsafe', 'unsafe', 1)"
+                "INSERT INTO lots "
+                "(id, barcode_identity_id, name, normalized_name, version) "
+                "VALUES (10, 1, 'Unsafe', 'unsafe', 1)"
             )
         )
         connection.execute(
             sa.text(
                 "INSERT INTO pallets "
-                "(id, lot_id, current_warehouse_id, pallet_number, "
+                "(id, barcode_identity_id, lot_id, current_warehouse_id, pallet_number, "
                 "normalized_pallet_number, version, is_active) "
-                "VALUES (20, 10, 1, 'P-1', 'p-1', 1, 1)"
+                "VALUES (20, 2, 10, 1, 'P-1', 'p-1', 1, 1)"
             )
         )
         if shape == "multi_warehouse":
             connection.execute(
                 sa.text(
                     "INSERT INTO boxes "
-                    "(id, box_number, lot_id, current_warehouse_id, status, pallet_id) "
-                    "VALUES (30, '001', 10, 1, 'received', 20), "
-                    "(31, '002', 10, 2, 'received', 20)"
+                    "(id, barcode_identity_id, box_number, lot_id, "
+                    "current_warehouse_id, status, pallet_id) "
+                    "VALUES (30, 3, '001', 10, 1, 'received', 20), "
+                    "(31, 4, '002', 10, 2, 'received', 20)"
                 )
             )
         migration.op = Operations(MigrationContext.configure(connection))
@@ -655,5 +694,5 @@ def test_0033_offline_sql_and_single_head() -> None:
     alembic_config = Config(str(root / "alembic.ini"))
     alembic_config.set_main_option("script_location", str(root / "alembic"))
     assert ScriptDirectory.from_config(alembic_config).get_heads() == [
-            "0035_first_class_box_files"
+            "0036_barcode_registry"
     ]

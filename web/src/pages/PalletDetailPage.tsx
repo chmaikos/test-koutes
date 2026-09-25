@@ -13,7 +13,12 @@ import {
   useWarehouses,
 } from "@/api/hooks";
 import { ALL_BOX_STATUSES, type BoxStatus, type Warehouse } from "@/api/types";
+import { BarcodeDisplay } from "@/components/BarcodeDisplay";
 import { LotStatusBar } from "@/components/LotStatusBar";
+import {
+  PrintableLabelDialog,
+  PrintLabelButton,
+} from "@/components/PrintableLabelDialog";
 import { STATUS_LABEL, StatusBadge } from "@/components/StatusBadge";
 import { useHasRole } from "@/components/RoleGate";
 import { palletCandidateFilters, palletCompletionLabel } from "@/pages/pallets";
@@ -34,6 +39,7 @@ export function PalletDetailPage() {
   const [reason, setReason] = useState("");
   const [newNumber, setNewNumber] = useState("");
   const [feedback, setFeedback] = useState<string | null>(null);
+  const [printLabel, setPrintLabel] = useState(false);
   const rename = useRenamePallet();
   const archive = useArchivePallet();
   const restore = useRestorePallet();
@@ -92,13 +98,20 @@ export function PalletDetailPage() {
             <p className="text-sm text-slate-500"><Link className="text-brand-700 hover:underline" to={`/lots/${summary.lot_id}`}>{summary.lot_name}</Link> · version {summary.version}</p>
             <p className="mt-1 text-xs text-slate-500">{summary.warehouse_names.length ? `Boxes currently in ${summary.warehouse_names.join(", ")}` : "No boxes in accessible warehouses"}</p>
           </div>
-          {canWrite && (
-            <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap gap-2">
+            <PrintLabelButton onClick={() => setPrintLabel(true)} />
+            {canWrite && (
+              <>
               {isAdmin && <button className="btn-secondary" onClick={() => { setAction("rename"); setNewNumber(summary.pallet_number); }}><Pencil className="h-4 w-4" /> Rename</button>}
               {isAdmin && summary.is_active && <button className="btn-secondary" onClick={() => setAction("archive")}><Archive className="h-4 w-4" /> Archive</button>}
               {isAdmin && !summary.is_active && summary.absorbed_into_pallet_id === null && <button className="btn-secondary" onClick={() => setAction("restore")}><RotateCcw className="h-4 w-4" /> Restore</button>}
-            </div>
-          )}
+              </>
+            )}
+          </div>
+        </div>
+        <div>
+          <p className="mb-2 text-xs font-medium uppercase tracking-wider text-slate-400">Generated immutable barcode</p>
+          <BarcodeDisplay value={summary.barcode} />
         </div>
         <dl className="grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
           <Metric label="Boxes" value={summary.box_count} />
@@ -115,6 +128,20 @@ export function PalletDetailPage() {
         {summary.archive_reason && <p className="rounded-lg bg-amber-50 p-3 text-sm text-amber-900">Archive reason: {summary.archive_reason}</p>}
         {summary.absorbed_into_pallet_id !== null && <p className="rounded-lg bg-slate-100 p-3 text-sm text-slate-700">This pallet was absorbed during a lot merge and cannot be restored. Its surviving pallet is <Link className="text-brand-700 hover:underline" to={`/pallets/${summary.absorbed_into_pallet_id}`}>#{summary.absorbed_into_pallet_id}</Link>.</p>}
       </header>
+      {printLabel && (
+        <PrintableLabelDialog
+          label={{
+            entityType: "Pallet",
+            title: summary.pallet_number,
+            barcode: summary.barcode,
+            context: [
+              `Lot: ${summary.lot_name}`,
+              `Warehouses: ${summary.warehouse_names.join(", ") || "No boxes in accessible warehouses"}`,
+            ],
+          }}
+          onClose={() => setPrintLabel(false)}
+        />
+      )}
 
       {action && (
         <form className="card card-pad space-y-3" onSubmit={submitAction}>
@@ -130,7 +157,7 @@ export function PalletDetailPage() {
         <header className="border-b p-4">
           <h2 className="font-semibold">Contained boxes</h2>
           <div className="mt-3 grid gap-3 sm:grid-cols-3">
-            <label className="relative"><span className="sr-only">Search boxes</span><Search className="pointer-events-none absolute left-2 top-2.5 h-4 w-4 text-slate-400" /><input className="input pl-8" placeholder="Box number or item descriptions" value={search} onChange={(e) => { setSearch(e.target.value); setBoxPage(1); }} /></label>
+            <label className="relative"><span className="sr-only">Search boxes</span><Search className="pointer-events-none absolute left-2 top-2.5 h-4 w-4 text-slate-400" /><input className="input pl-8" placeholder="Box number, File, item description, or barcode" value={search} onChange={(e) => { setSearch(e.target.value); setBoxPage(1); }} /></label>
             <select aria-label="Status" className="input" value={status} onChange={(e) => { setStatus(e.target.value as BoxStatus | ""); setBoxPage(1); }}><option value="">All statuses</option>{ALL_BOX_STATUSES.map((value) => <option key={value} value={value}>{STATUS_LABEL[value]}</option>)}</select>
             <select aria-label="Warehouse" className="input" value={boxWarehouseId} onChange={(e) => { setBoxWarehouseId(e.target.value ? Number(e.target.value) : ""); setBoxPage(1); }}><option value="">All accessible warehouses</option>{warehouses.data?.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}</select>
           </div>

@@ -341,6 +341,9 @@ class BoxRequestItemOut(BaseModel):
     pallet_number: str | None
     box_number: str | None
     contents: str | None
+    lot_barcode: str | None
+    pallet_barcode: str | None
+    box_barcode: str | None
     files: list[BoxRequestItemFileSnapshotOut] = Field(
         default_factory=list, validation_alias="file_snapshots"
     )
@@ -675,6 +678,11 @@ class ReturnPalletContextOut(BaseModel):
     pallet_number: str | None
 
 
+class ReturnLotContextOut(BaseModel):
+    lot_id: int | None
+    lot_name: str
+
+
 class ReturnSourceOut(BaseModel):
     id: int
     warehouse_id: int
@@ -682,6 +690,7 @@ class ReturnSourceOut(BaseModel):
     origin: BoxRequestOrigin
     delivered_quantity: int
     eligible_quantity: int
+    lots: list[ReturnLotContextOut] = Field(default_factory=list)
     pallets: list[ReturnPalletContextOut] = Field(default_factory=list)
     has_unassigned_boxes: bool = False
 

@@ -144,6 +144,8 @@ def test_merge_combines_same_number_same_warehouse_and_preserves_snapshot(
     _box(session, target, target_pallet, "002")
     request = _request(session, admin, [source_box])
     source_snapshot = request.items[0].pallet
+    source_barcode = source.barcode
+    source_pallet_barcode = source_pallet.barcode
     session.commit()
 
     result = merge_lots(
@@ -167,6 +169,11 @@ def test_merge_combines_same_number_same_warehouse_and_preserves_snapshot(
     absorbed = session.get(Pallet, source_pallet.id)
     assert absorbed.is_active is False
     assert absorbed.absorbed_into_pallet_id == target_pallet.id
+    assert absorbed.barcode == source_pallet_barcode
+    assert absorbed.barcode_identity.retired_at is None
+    merged_source = session.get(Lot, source.id)
+    assert merged_source.barcode == source_barcode
+    assert merged_source.barcode_identity.retired_at is None
     assert session.scalar(
         select(PalletEvent.id).where(
             PalletEvent.pallet_id == source_pallet.id,

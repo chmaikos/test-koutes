@@ -44,6 +44,7 @@ import type {
   RequestDocumentType,
 } from "@/api/types";
 import { ExcelRowMapper } from "@/components/ExcelRowMapper";
+import { BarcodeDisplay } from "@/components/BarcodeDisplay";
 import { FileItemsEditor } from "@/components/FileItemsEditor";
 import { validateFileItems } from "@/components/fileItems";
 import { LotPicker, type LotSelection } from "@/components/LotPicker";
@@ -783,6 +784,13 @@ function ItemsSection({
                   ) : (
                     item.box_number ?? "—"
                   )}
+                  {item.box_barcode && (
+                    <BarcodeDisplay
+                      value={item.box_barcode}
+                      variant="compact"
+                      className="mt-1"
+                    />
+                  )}
                 </td>
                 <td className="px-4 py-2.5">
                   {item.lot_id ? (
@@ -791,6 +799,13 @@ function ItemsSection({
                     </Link>
                   ) : (
                     item.lot ?? "—"
+                  )}
+                  {item.lot_barcode && (
+                    <BarcodeDisplay
+                      value={item.lot_barcode}
+                      variant="compact"
+                      className="mt-1"
+                    />
                   )}
                 </td>
                 <td className="px-4 py-2.5">
@@ -801,6 +816,13 @@ function ItemsSection({
                   ) : (
                     <span className="text-amber-700">Unassigned</span>
                   )}
+                  {item.pallet_barcode && (
+                    <BarcodeDisplay
+                      value={item.pallet_barcode}
+                      variant="compact"
+                      className="mt-1"
+                    />
+                  )}
                 </td>
                 <td className="px-4 py-2.5 text-slate-600">
                   {item.files.length > 0 ? (
@@ -809,7 +831,13 @@ function ItemsSection({
                         <li key={file.id}>
                           {file.file_id ? <Link className="font-mono text-brand-700 hover:underline" to={`/files/${file.file_id}`}>{file.reference}</Link> : <span className="font-mono">{file.reference}</span>}
                           {file.description ? <span> · {file.description}</span> : null}
-                          {file.barcode ? <span className="text-xs"> · {file.barcode}</span> : null}
+                          {file.barcode ? (
+                            <BarcodeDisplay
+                              value={file.barcode}
+                              variant="compact"
+                              className="mt-0.5"
+                            />
+                          ) : null}
                           <span className="ml-1 text-xs text-slate-400">({file.snapshot_kind === "tracked_file" ? "tracked snapshot" : "legacy snapshot"})</span>
                         </li>
                       ))}
@@ -1643,7 +1671,7 @@ function CompletionDialog({
           lot: "",
           box_number: "",
           pallet_number: null,
-          files: [{ reference: "", description: "", barcode: "" }],
+          files: [{ reference: "", description: "" }],
         }))
       : [],
   );
@@ -1957,7 +1985,7 @@ function CompletionDialog({
                       lot: "",
                       box_number: "",
                       pallet_number: null,
-                      files: [{ reference: "", description: "", barcode: "" }],
+                      files: [{ reference: "", description: "" }],
                     },
                   ])
                 }
@@ -2291,7 +2319,7 @@ function InboundImpactPreview({
                   {file.source_warehouse_name ? ` · from ${file.source_warehouse_name}` : ""}
                   {file.source_status ? ` · ${STATUS_LABEL[file.source_status]}` : ""}
                   {file.description ? ` · ${file.description}` : ""}
-                  {file.barcode ? ` · barcode ${file.barcode}` : ""}
+                  {file.barcode ? ` · generated immutable barcode ${file.barcode}` : ""}
                 </span>
                 {file.blocked_message && <span className="block text-xs font-medium">{file.blocked_message}</span>}
               </li>

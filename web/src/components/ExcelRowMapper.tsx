@@ -66,7 +66,6 @@ export function ExcelRowMapper({
     useState<number | undefined>();
   const [fileDescriptionColumn, setFileDescriptionColumn] =
     useState<number | undefined>();
-  const [barcodeColumn, setBarcodeColumn] = useState<number | undefined>();
   const [contentsColumn, setContentsColumn] = useState<number | undefined>();
   const [selectedRows, setSelectedRows] = useState<Set<number>>(new Set());
   const [rowStart, setRowStart] = useState(1);
@@ -127,10 +126,6 @@ export function ExcelRowMapper({
                           ? undefined
                           : (row.cells[fileDescriptionColumn] ?? "").trim() ||
                             undefined,
-                      barcode:
-                        barcodeColumn === undefined
-                          ? undefined
-                          : (row.cells[barcodeColumn] ?? "").trim() || undefined,
                     },
                   ]
                 : [],
@@ -154,7 +149,6 @@ export function ExcelRowMapper({
     setFixedLotSelection(null);
     setFileReferenceColumn(undefined);
     setFileDescriptionColumn(undefined);
-    setBarcodeColumn(undefined);
     setContentsColumn(undefined);
     setRowStart(1);
     setIncludeRowsByDefault(true);
@@ -235,7 +229,6 @@ export function ExcelRowMapper({
     setFixedLotSelection(null);
     setFileReferenceColumn(resolved.fileReferenceColumn);
     setFileDescriptionColumn(resolved.fileDescriptionColumn);
-    setBarcodeColumn(resolved.barcodeColumn);
     setContentsColumn(resolved.contentsColumn);
     setRowStart(resolved.rowStart);
     setIncludeRowsByDefault(resolved.includeRowsByDefault);
@@ -283,7 +276,6 @@ export function ExcelRowMapper({
       fixedLot,
       fileReferenceColumn,
       fileDescriptionColumn,
-      barcodeColumn,
       contentsColumn,
       rowStart,
       includeRowsByDefault,
@@ -403,7 +395,6 @@ export function ExcelRowMapper({
       ...(contentsColumn == null ? [] : [contentsColumn]),
       fileReferenceColumn,
       ...(fileDescriptionColumn == null ? [] : [fileDescriptionColumn]),
-      ...(barcodeColumn == null ? [] : [barcodeColumn]),
       ...(palletMappingChoice === "column" && palletColumn != null
         ? [palletColumn]
         : []),
@@ -428,7 +419,6 @@ export function ExcelRowMapper({
       fixedLot,
       fileReferenceColumn,
       fileDescriptionColumn,
-      barcodeColumn,
       contentsColumn,
     });
     if (groupedResult.error) {
@@ -631,6 +621,12 @@ export function ExcelRowMapper({
             )}
           </section>
 
+          <p className="rounded-md bg-slate-50 p-3 text-xs text-slate-600">
+            Generated Lot, Pallet, Box, and File barcodes are assigned
+            automatically. Barcode workbook columns are never mapped or
+            imported.
+          </p>
+
           <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
             <label className="block">
               <span className="text-xs text-slate-500">Worksheet</span>
@@ -721,12 +717,6 @@ export function ExcelRowMapper({
               sheet={sheet}
               value={fileDescriptionColumn}
               onChange={setFileDescriptionColumn}
-            />
-            <ColumnSelect
-              label="File barcode column (optional)"
-              sheet={sheet}
-              value={barcodeColumn}
-              onChange={setBarcodeColumn}
             />
             <ColumnSelect
               label="Legacy contents column (optional)"
@@ -859,7 +849,6 @@ export function ExcelRowMapper({
                               columnIndex === palletColumn ||
                               columnIndex === fileReferenceColumn ||
                               columnIndex === fileDescriptionColumn ||
-                              columnIndex === barcodeColumn ||
                               columnIndex === contentsColumn
                                 ? "bg-amber-50"
                                 : ""

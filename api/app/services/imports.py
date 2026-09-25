@@ -64,7 +64,6 @@ _HEADER_ALIASES = {
     "reference": "file_reference",
     "file_description": "file_description",
     "file description": "file_description",
-    "barcode": "barcode",
     "warehouse_id": "warehouse_id",
     "warehouse id": "warehouse_id",
     "warehouse": "warehouse",
@@ -371,7 +370,6 @@ def import_boxes_xlsx(
         contents = contents_raw or None
         file_reference = _mapped_cell(headers, cells, "file_reference")
         file_description = _mapped_cell(headers, cells, "file_description") or None
-        barcode = _mapped_cell(headers, cells, "barcode") or None
         wh_id_raw = _mapped_cell(headers, cells, "warehouse_id")
         wh_name_raw = _mapped_cell(headers, cells, "warehouse")
 
@@ -513,7 +511,6 @@ def import_boxes_xlsx(
                     {
                         "reference": file_reference,
                         "description": file_description,
-                        "barcode": barcode,
                     }
                 ]
                 if file_reference

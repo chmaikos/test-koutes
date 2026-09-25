@@ -23,6 +23,7 @@ class LotStatusCounts(BaseModel):
 
 class LotSummaryOut(BaseModel):
     id: int
+    barcode: str
     name: str
     normalized_name: str
     version: int
@@ -68,6 +69,7 @@ class LotDetailOut(LotSummaryOut):
 
 class LotOptionOut(BaseModel):
     id: int
+    barcode: str
     name: str
     normalized_name: str
     exact_normalized_match: bool = False
@@ -112,6 +114,7 @@ class LotMerge(BaseModel):
 
 class LotIdentityOut(BaseModel):
     id: int
+    barcode: str
     name: str
     version: int
 
@@ -535,6 +538,7 @@ class LotForcePurgeConflictResponse(BaseModel):
 class MergedLotOut(BaseModel):
     state: Literal["merged"] = "merged"
     id: int
+    barcode: str
     name: str
     version: int
     merged_at: datetime

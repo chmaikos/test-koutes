@@ -114,7 +114,7 @@ export function LotPicker({
             autoComplete="off"
             disabled={disabled}
             value={query}
-            placeholder="Search existing lots"
+            placeholder="Search lot name or generated barcode"
             onFocus={() => setOpen(true)}
             onChange={(event) => {
               setQuery(event.target.value);

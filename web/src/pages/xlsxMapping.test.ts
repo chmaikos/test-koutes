@@ -58,12 +58,12 @@ describe("Excel inbound row grouping", () => {
         {
           lot: "pr100",
           box_number: "001",
-          files: [{ reference: "F-1", barcode: "BC-1" }],
+          files: [{ reference: "F-1" }],
         },
         {
           lot: "PR100",
           box_number: "1",
-          files: [{ reference: "F-1", barcode: "BC-1" }],
+          files: [{ reference: "F-1" }],
         },
       ]),
     ).toEqual([
@@ -73,8 +73,8 @@ describe("Excel inbound row grouping", () => {
         pallet_number: null,
         contents: undefined,
         files: [
-          { reference: "F-1", description: undefined, barcode: "BC-1" },
-          { reference: "F-2", description: "Second", barcode: undefined },
+          { reference: "F-1", description: undefined },
+          { reference: "F-2", description: "Second" },
         ],
       },
     ]);

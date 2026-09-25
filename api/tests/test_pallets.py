@@ -303,22 +303,24 @@ def test_pallet_summary_csv_and_xlsx_exports(client, session) -> None:
     )
     assert csv_response.status_code == 200, csv_response.text
     csv_rows = list(csv.reader(io.StringIO(csv_response.content.decode("utf-8-sig"))))
-    assert csv_rows[0][:6] == [
+    assert csv_rows[0][:7] == [
         "Pallet ID",
+        "Barcode",
         "Pallet Number",
         "Lot ID",
         "Lot",
         "Warehouse IDs",
         "Warehouses",
     ]
-    assert csv_rows[1][0:4] == [
+    assert csv_rows[1][0:5] == [
         str(pallet.id),
+        pallet.barcode,
         "Export Rack",
         str(lot.id),
         "Export Lot",
     ]
-    assert csv_rows[1][4:6] == ["1; 2", "Building 1; Building 2"]
-    assert csv_rows[1][7:9] == ["2", "2"]
+    assert csv_rows[1][5:7] == ["1; 2", "Building 1; Building 2"]
+    assert csv_rows[1][8:10] == ["2", "2"]
 
     xlsx_response = client.get(
         "/api/exports/pallets.xlsx",
@@ -328,9 +330,15 @@ def test_pallet_summary_csv_and_xlsx_exports(client, session) -> None:
     workbook = load_workbook(io.BytesIO(xlsx_response.content), read_only=True)
     try:
         rows = list(workbook["Pallet summary"].iter_rows(values_only=True))
-        assert rows[1][0:4] == (pallet.id, "Export Rack", lot.id, "Export Lot")
-        assert rows[1][4:6] == ("1; 2", "Building 1; Building 2")
-        assert rows[1][7:9] == (2, 2)
+        assert rows[1][0:5] == (
+            pallet.id,
+            pallet.barcode,
+            "Export Rack",
+            lot.id,
+            "Export Lot",
+        )
+        assert rows[1][5:7] == ("1; 2", "Building 1; Building 2")
+        assert rows[1][8:10] == (2, 2)
     finally:
         workbook.close()
 
@@ -637,7 +645,7 @@ def test_migration_metadata_offline_sql_and_single_head() -> None:
     config = Config(str(root / "alembic.ini"))
     config.set_main_option("script_location", str(root / "alembic"))
     assert ScriptDirectory.from_config(config).get_heads() == [
-        "0035_first_class_box_files"
+        "0036_barcode_registry"
     ]
     assert migration.down_revision == "0031_return_target_warehouse"
 

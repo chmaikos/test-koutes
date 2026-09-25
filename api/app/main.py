@@ -13,6 +13,7 @@ from app.jobs.scheduler import build_scheduler
 from app.routers import (
     alerts,
     auth_local,
+    barcodes,
     box_files,
     boxes,
     dashboard,
@@ -95,6 +96,7 @@ api_router.include_router(auth_local.router)
 gated = [Depends(require_credentials_set)]
 api_router.include_router(users.router, dependencies=gated)
 api_router.include_router(warehouses.router, dependencies=gated)
+api_router.include_router(barcodes.router, dependencies=gated)
 api_router.include_router(boxes.router, dependencies=gated)
 api_router.include_router(box_files.router, dependencies=gated)
 api_router.include_router(lots.router, dependencies=gated)

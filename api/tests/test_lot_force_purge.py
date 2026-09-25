@@ -10,6 +10,7 @@ from app.deps import get_current_user
 from app.events import bus
 from app.main import app
 from app.models import (
+    BarcodeIdentity,
     Box,
     BoxFile,
     BoxFileEvent,
@@ -803,6 +804,8 @@ def test_force_purge_deletes_full_graph_and_detaches_lineage(session, make_user)
     session.commit()
     deleted_id = deleted.id
     preserved_id = preserved.id
+    box_identity_id = selected.barcode_identity_id
+    lot_identity_id = selected.lot_record.barcode_identity_id
 
     preview = analyze_lot_force_purge_impact(session, lot_id=selected.lot_id)
     result = _execute_force_purge(
@@ -814,6 +817,15 @@ def test_force_purge_deletes_full_graph_and_detaches_lineage(session, make_user)
     session.expire_all()
 
     assert session.get(BoxRequest, deleted_id) is None
+    retired_identities = [
+        session.get(BarcodeIdentity, identity_id)
+        for identity_id in (lot_identity_id, box_identity_id)
+    ]
+    assert all(identity is not None for identity in retired_identities)
+    assert all(identity.retired_at is not None for identity in retired_identities)
+    assert {
+        identity.retirement_metadata["operation"] for identity in retired_identities
+    } == {"lot_force_purge"}
     adjusted = session.get(BoxRequest, preserved_id)
     assert adjusted is not None
     assert (

@@ -18,6 +18,10 @@ from app.deps import get_current_user, get_db
 from app.main import app
 from app.models.users import User, UserRole
 from app.models.warehouses import Warehouse
+from app.services.barcodes import (
+    issue_pending_barcode_identities,
+    preserve_pending_barcode_snapshots,
+)
 
 
 @pytest.fixture()
@@ -36,6 +40,15 @@ def session() -> Generator[Session, None, None]:
     Base.metadata.create_all(engine)
 
     SessionTest = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+
+    @event.listens_for(SessionTest, "before_flush")
+    def _issue_test_barcodes(test_session, _flush_context, _instances):
+        # Production creation paths will adopt the explicit primitive in the
+        # lifecycle todo. Tests get the same primitive through their isolated
+        # session so legacy direct model construction remains concise.
+        issue_pending_barcode_identities(test_session, reason="test fixture issuance")
+        preserve_pending_barcode_snapshots(test_session)
+
     s = SessionTest()
     s.add_all(
         [

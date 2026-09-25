@@ -92,6 +92,7 @@ export interface Warehouse {
 
 export interface Box {
   id: number;
+  barcode: string;
   box_number: string;
   lot: string;
   lot_id: number;
@@ -459,17 +460,20 @@ export interface BoxRequestItem {
   pallet_number: string | null;
   box_number: string | null;
   contents: string | null;
+  lot_barcode: string | null;
+  pallet_barcode: string | null;
+  box_barcode: string | null;
   files: RequestFileSnapshot[];
 }
 
 export interface FileInput {
   reference: string;
   description?: string | null;
-  barcode?: string | null;
 }
 
 export interface FileSummary extends FileInput {
   id: number;
+  barcode: string;
   position: number;
   version: number;
 }
@@ -517,6 +521,38 @@ export interface TrackedFileFilters {
   include_inactive?: boolean;
   sort_by?: FileSortField;
   sort_dir?: "asc" | "desc";
+}
+
+export type BarcodeEntityKind = "lot" | "pallet" | "box" | "file";
+
+export interface BarcodeRedirect {
+  entity_kind: BarcodeEntityKind;
+  entity_id: number;
+  barcode: string;
+  frontend_path: string;
+  display_label: string;
+}
+
+export interface BarcodeResolution {
+  entity_kind: BarcodeEntityKind;
+  entity_id: number;
+  barcode: string;
+  lifecycle_state:
+    | "active"
+    | "archived"
+    | "returned"
+    | "merged"
+    | "absorbed"
+    | "retired";
+  retired: boolean;
+  frontend_path: string | null;
+  display_label: string;
+  hierarchy: Record<string, unknown>;
+  redirect: BarcodeRedirect | null;
+  retired_at: string | null;
+  retirement_reason: string | null;
+  retirement_operation: unknown;
+  retirement_metadata: Record<string, unknown> | null;
 }
 
 export interface FileCreatePayload extends FileInput {
@@ -593,6 +629,7 @@ export interface FileIntegrity {
 export interface RequestFileSnapshot extends FileInput {
   id: number;
   file_id: number | null;
+  barcode: string | null;
   position: number;
   snapshot_kind: "tracked_file" | "legacy_contents";
 }
@@ -951,8 +988,14 @@ export interface ReturnSource {
   origin: RequestOrigin;
   delivered_quantity: number;
   eligible_quantity: number;
+  lots: ReturnLotContext[];
   pallets: ReturnPalletContext[];
   has_unassigned_boxes: boolean;
+}
+
+export interface ReturnLotContext {
+  lot_id: number | null;
+  lot_name: string;
 }
 
 export interface ReturnPalletContext {
@@ -1018,6 +1061,7 @@ export interface PalletStatusCounts extends Record<BoxStatus, number> {
 
 export interface PalletSummary {
   id: number;
+  barcode: string;
   lot_id: number;
   lot_name: string;
   warehouse_ids: number[];
@@ -1052,6 +1096,7 @@ export type PalletDetail = PalletSummary;
 
 export interface PalletOption {
   id: number;
+  barcode: string;
   pallet_number: string;
   normalized_pallet_number: string;
   lot_id: number;
@@ -1172,6 +1217,7 @@ export interface LotStatusCounts extends Record<BoxStatus, number> {
 
 export interface LotSummary {
   id: number;
+  barcode: string;
   name: string;
   normalized_name: string;
   version: number;
@@ -1213,6 +1259,7 @@ export interface LotDetail extends LotSummary {
 
 export interface LotIdentity {
   id: number;
+  barcode: string;
   name: string;
   version: number;
 }
@@ -1220,6 +1267,7 @@ export interface LotIdentity {
 export interface MergedLot {
   state: "merged";
   id: number;
+  barcode: string;
   name: string;
   version: number;
   merged_at: string;
@@ -1350,6 +1398,7 @@ export interface LotMergeResult {
 
 export interface LotOption {
   id: number;
+  barcode: string;
   name: string;
   normalized_name: string;
   exact_normalized_match: boolean;
@@ -1742,6 +1791,7 @@ export type InboundFileAction =
 
 export interface InboundFileImpact extends FileInput {
   action: InboundFileAction;
+  barcode: string | null;
   file_id: number | null;
   file_version: number | null;
   source_box_id: number | null;
@@ -1826,7 +1876,6 @@ export interface XlsxColumnMappings {
   lot?: XlsxColumnRef;
   file_reference?: XlsxColumnRef;
   file_description?: XlsxColumnRef;
-  barcode?: XlsxColumnRef;
   contents?: XlsxColumnRef;
 }
 

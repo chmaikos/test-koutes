@@ -16,7 +16,12 @@ import {
   type LotDetail,
   type MergedLot,
 } from "@/api/types";
+import { BarcodeDisplay } from "@/components/BarcodeDisplay";
 import { LotStatusBar } from "@/components/LotStatusBar";
+import {
+  PrintableLabelDialog,
+  PrintLabelButton,
+} from "@/components/PrintableLabelDialog";
 import { PurgeLotDialog } from "@/components/PurgeLotDialog";
 import { RenameLotDialog } from "@/components/RenameLotDialog";
 import { STATUS_LABEL, StatusBadge } from "@/components/StatusBadge";
@@ -33,6 +38,7 @@ export function LotDetailPage() {
   const [params, setParams] = useSearchParams();
   const isAdmin = useHasRole(["admin"]);
   const [showRename, setShowRename] = useState(false);
+  const [printLabel, setPrintLabel] = useState(false);
   const [showPurge, setShowPurge] = useState(false);
   const page = Math.max(1, Number(params.get("page")) || 1);
   const pageSize = 25;
@@ -123,11 +129,21 @@ export function LotDetailPage() {
               {summary.version}
             </p>
           </div>
-          {isAdmin && (
-            <button className="btn-secondary" onClick={() => setShowRename(true)}>
-              <Pencil className="h-4 w-4" /> Correct name
-            </button>
-          )}
+          <div className="flex flex-wrap gap-2">
+            <PrintLabelButton onClick={() => setPrintLabel(true)} />
+            {isAdmin && (
+              <button className="btn-secondary" onClick={() => setShowRename(true)}>
+                <Pencil className="h-4 w-4" /> Correct name
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div>
+          <p className="mb-2 text-xs font-medium uppercase tracking-wider text-slate-400">
+            Generated immutable barcode
+          </p>
+          <BarcodeDisplay value={summary.barcode} />
         </div>
 
         <dl className="grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
@@ -176,6 +192,20 @@ export function LotDetailPage() {
           />
         </dl>
       </header>
+      {printLabel && (
+        <PrintableLabelDialog
+          label={{
+            entityType: "Lot",
+            title: summary.name,
+            barcode: summary.barcode,
+            context: [
+              `Warehouses: ${summary.warehouse_names.join(", ") || "None visible"}`,
+              `${summary.box_count} boxes · ${summary.active_file_count} active Files`,
+            ],
+          }}
+          onClose={() => setPrintLabel(false)}
+        />
+      )}
 
       <section className="card overflow-hidden">
         <header className="border-b border-slate-100 p-4">
@@ -219,7 +249,7 @@ export function LotDetailPage() {
                 <Search className="pointer-events-none absolute left-2 top-2.5 h-4 w-4 text-slate-400" />
                 <input
                   className="input pl-8"
-                  placeholder="Box number, pallet, or item descriptions"
+                  placeholder="Box number, pallet, File, item description, or barcode"
                   value={filters.search ?? ""}
                   onChange={(event) => setParam("q", event.target.value)}
                 />

@@ -3,6 +3,7 @@ import { Link, useSearchParams } from "react-router-dom";
 import { ArrowDown, ArrowUp, ChevronLeft, ChevronRight, Plus, Search } from "lucide-react";
 import { useCreatePallet, usePallets, useWarehouses } from "@/api/hooks";
 import type { PalletSortField } from "@/api/types";
+import { BarcodeDisplay } from "@/components/BarcodeDisplay";
 import { LotPicker, type LotSelection } from "@/components/LotPicker";
 import { LotStatusBar } from "@/components/LotStatusBar";
 import { useHasRole } from "@/components/RoleGate";
@@ -64,7 +65,7 @@ export function PalletsPage() {
           <span className="text-xs text-slate-500">Search</span>
           <div className="relative">
             <Search className="pointer-events-none absolute left-2 top-2.5 h-4 w-4 text-slate-400" />
-            <input className="input pl-8" placeholder="Pallet number or lot" value={parsed.filters.search ?? ""} onChange={(e) => setParam("q", e.target.value)} />
+            <input className="input pl-8" placeholder="Pallet number, lot, or barcode" value={parsed.filters.search ?? ""} onChange={(e) => setParam("q", e.target.value)} />
           </div>
         </label>
         <LotPicker
@@ -126,7 +127,7 @@ export function PalletsPage() {
               <tbody className="divide-y divide-slate-100">
                 {pallets.data.items.map((pallet) => (
                   <tr key={pallet.id} className="hover:bg-slate-50">
-                    <td className="px-4 py-3"><Link className="font-medium text-brand-700 hover:underline" to={`/pallets/${pallet.id}`}>{pallet.pallet_number}</Link>{!pallet.is_active && <span className="ml-2 rounded bg-slate-200 px-1.5 py-0.5 text-xs">Archived</span>}<p className="mt-1 text-xs text-slate-500">{pallet.warehouse_names.length ? `Boxes currently in ${pallet.warehouse_names.join(", ")}` : "No boxes in accessible warehouses"}</p></td>
+                    <td className="px-4 py-3"><Link className="font-medium text-brand-700 hover:underline" to={`/pallets/${pallet.id}`}>{pallet.pallet_number}</Link>{!pallet.is_active && <span className="ml-2 rounded bg-slate-200 px-1.5 py-0.5 text-xs">Archived</span>}<BarcodeDisplay value={pallet.barcode} variant="compact" /><p className="mt-1 text-xs text-slate-500">{pallet.warehouse_names.length ? `Boxes currently in ${pallet.warehouse_names.join(", ")}` : "No boxes in accessible warehouses"}</p></td>
                     <td className="px-4 py-3"><Link className="text-brand-700 hover:underline" to={`/lots/${pallet.lot_id}`}>{pallet.lot_name}</Link></td>
                     <td className="px-4 py-3 tabular-nums">{pallet.box_count} boxes<Link className="block text-xs text-brand-700 hover:underline" to={`/files?lot_id=${pallet.lot_id}&pallet_id=${pallet.id}&activity=all`}>{pallet.active_file_count} active Files · {pallet.archived_file_count} archived</Link></td>
                     <td className="px-4 py-3"><LotStatusBar counts={pallet.status_counts} /></td>
@@ -140,7 +141,7 @@ export function PalletsPage() {
           <div className="divide-y divide-slate-100 md:hidden">
             {pallets.data.items.map((pallet) => (
               <article key={pallet.id} className="space-y-2 p-4">
-                <div className="flex justify-between gap-3"><div><Link className="font-semibold text-brand-700" to={`/pallets/${pallet.id}`}>{pallet.pallet_number}</Link><p className="text-xs text-slate-500">{pallet.lot_name}</p><p className="text-xs text-slate-500">{pallet.warehouse_names.length ? `Boxes currently in ${pallet.warehouse_names.join(", ")}` : "No boxes in accessible warehouses"}</p></div><strong>{palletCompletionLabel(pallet.completion_percent)}</strong></div>
+                <div className="flex justify-between gap-3"><div className="min-w-0"><Link className="font-semibold text-brand-700" to={`/pallets/${pallet.id}`}>{pallet.pallet_number}</Link><BarcodeDisplay value={pallet.barcode} variant="compact" /><p className="text-xs text-slate-500">{pallet.lot_name}</p><p className="text-xs text-slate-500">{pallet.warehouse_names.length ? `Boxes currently in ${pallet.warehouse_names.join(", ")}` : "No boxes in accessible warehouses"}</p></div><strong>{palletCompletionLabel(pallet.completion_percent)}</strong></div>
                 <LotStatusBar counts={pallet.status_counts} />
                 <p className="text-xs text-slate-600">{pallet.box_count} boxes · <Link className="text-brand-700" to={`/files?lot_id=${pallet.lot_id}&pallet_id=${pallet.id}&activity=all`}>{pallet.active_file_count} active Files · {pallet.archived_file_count} archived</Link> · {pallet.completed_box_count} completed{!pallet.is_active ? " · Archived" : ""}</p>
               </article>

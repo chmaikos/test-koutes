@@ -24,6 +24,7 @@ from sqlalchemy import (
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.models.barcode_identities import BarcodeIdentity
 from app.models.box_files import BoxFile, BoxFileEvent, BoxFileEventType
 from app.models.boxes import (
     ACTIVE_STATUSES,
@@ -64,6 +65,11 @@ from app.models.requests import (
 from app.models.users import User, UserRole
 from app.models.warehouses import Warehouse
 from app.services.acl import allowed_warehouse_ids, can_access
+from app.services.barcodes import (
+    barcode_retirement_target,
+    issue_barcode_identity,
+    retire_barcode_identities,
+)
 from app.services.object_storage import delete_document_strict
 
 
@@ -153,9 +159,11 @@ class LotPalletMergeAction:
 @dataclass(frozen=True)
 class LotMergeCandidate:
     source_id: int
+    source_barcode: str
     source_name: str
     source_version: int
     target_id: int
+    target_barcode: str
     target_name: str
     target_version: int
     merge_allowed: bool
@@ -249,6 +257,7 @@ SortDirection = Literal["asc", "desc"]
 @dataclass(frozen=True)
 class LotSummary:
     id: int
+    barcode: str
     name: str
     normalized_name: str
     version: int
@@ -274,6 +283,7 @@ class LotSummary:
 @dataclass(frozen=True)
 class LotOption:
     id: int
+    barcode: str
     name: str
     normalized_name: str
     exact_normalized_match: bool
@@ -725,6 +735,16 @@ def get_or_create_lot_result(
     )
     try:
         with db.begin_nested():
+            issue_barcode_identity(
+                db,
+                candidate,
+                actor_user_id=user.id,
+                reason="Lot created while resolving a receipt or import.",
+                metadata={
+                    "operation": "get_or_create",
+                    "warehouse_id": warehouse_id,
+                },
+            )
             db.add(candidate)
             db.flush()
             db.add(
@@ -2399,6 +2419,7 @@ def _pallet_purge_snapshots(
     return [
         {
             "id": pallet.id,
+            "barcode": pallet.barcode,
             "pallet_number": pallet.pallet_number,
             "normalized_pallet_number": pallet.normalized_pallet_number,
             "version": pallet.version,
@@ -2976,6 +2997,96 @@ def analyze_lot_purge_eligibility(
 def _delete_count(db: Session, statement) -> int:
     result = db.execute(statement.execution_options(synchronize_session=False))
     return int(result.rowcount or 0)
+
+
+def _retire_lot_graph_barcodes(
+    db: Session,
+    *,
+    user: User,
+    reason: str,
+    operation: str,
+    lot: Lot | None = None,
+    pallets: list[Pallet] | None = None,
+    boxes: list[Box] | None = None,
+    files: list[BoxFile] | None = None,
+    metadata: dict[str, object] | None = None,
+) -> None:
+    """Retire a locked destructive graph in one registry query."""
+    pallets = pallets or []
+    boxes = boxes or []
+    files = files or []
+    lot_names = {lot.id: lot.name} if lot is not None else {}
+    box_by_id = {box.id: box for box in boxes}
+    targets = []
+    if lot is not None:
+        targets.append(
+            barcode_retirement_target(
+                lot,
+                hierarchy={
+                    "lot_id": lot.id,
+                    "lot_barcode": lot.barcode,
+                    "lot_name": lot.name,
+                },
+            )
+        )
+    for pallet in pallets:
+        targets.append(
+            barcode_retirement_target(
+                pallet,
+                hierarchy={
+                    "lot_id": pallet.lot_id,
+                    "lot_barcode": pallet.lot.barcode,
+                    "lot_name": lot_names.get(pallet.lot_id),
+                    "pallet_id": pallet.id,
+                    "pallet_barcode": pallet.barcode,
+                    "pallet_number": pallet.pallet_number,
+                },
+            )
+        )
+    for box in boxes:
+        targets.append(
+            barcode_retirement_target(
+                box,
+                hierarchy={
+                    "lot_id": box.lot_id,
+                    "lot_barcode": box.lot_record.barcode,
+                    "lot_name": lot_names.get(box.lot_id),
+                    "box_id": box.id,
+                    "box_barcode": box.barcode,
+                    "box_number": box.box_number,
+                    "pallet_id": box.pallet_id,
+                    "pallet_barcode": (
+                        box.pallet.barcode if box.pallet is not None else None
+                    ),
+                    "warehouse_id": box.current_warehouse_id,
+                },
+            )
+        )
+    for file in files:
+        parent = box_by_id.get(file.box_id)
+        targets.append(
+            barcode_retirement_target(
+                file,
+                hierarchy={
+                    "lot_id": file.lot_id,
+                    "lot_barcode": file.lot.barcode,
+                    "lot_name": lot_names.get(file.lot_id),
+                    "box_id": file.box_id,
+                    "box_barcode": parent.barcode if parent is not None else None,
+                    "box_number": parent.box_number if parent is not None else None,
+                    "file_id": file.id,
+                    "file_barcode": file.barcode,
+                    "file_reference": file.reference,
+                },
+            )
+        )
+    retire_barcode_identities(
+        db,
+        targets,
+        actor_user_id=user.id,
+        reason=reason,
+        operation_metadata={"operation": operation, **(metadata or {})},
+    )
 
 
 def _delete_file_graph_for_boxes(
@@ -3654,7 +3765,13 @@ def force_purge_lot(
         {
             "id": file.id,
             "lot_id": file.lot_id,
+            "lot_barcode": file.lot.barcode,
             "box_id": file.box_id,
+            "box_barcode": file.box.barcode,
+            "pallet_id": file.box.pallet_id,
+            "pallet_barcode": (
+                file.box.pallet.barcode if file.box.pallet is not None else None
+            ),
             "reference": file.reference,
             "normalized_reference": file.normalized_reference,
             "description": file.description,
@@ -3667,6 +3784,23 @@ def force_purge_lot(
             ),
         }
         for file in force_purge_files
+    ]
+    force_box_snapshots = [
+        {
+            "id": box.id,
+            "barcode": box.barcode,
+            "box_number": box.box_number,
+            "lot_id": box.lot_id,
+            "lot_barcode": lot.barcode,
+            "pallet_id": box.pallet_id,
+            "pallet_barcode": (
+                box.pallet.barcode if box.pallet is not None else None
+            ),
+            "warehouse_id": box.current_warehouse_id,
+            "status": _enum_text(box.status),
+            "archived_at": _collision_timestamp(box.archived_at),
+        }
+        for box in boxes
     ]
     cleanup_status = (
         LotPurgeCleanupStatus.pending
@@ -3703,8 +3837,10 @@ def force_purge_lot(
             "acknowledged_blocker_codes": sorted(supplied_codes),
             "overridden_blocker_codes": sorted(required_codes),
             "warehouse_ids": warehouse_ids,
+            "lot_barcode": lot.barcode,
             "active_box_ids": locked.active_box_ids,
             "archived_box_ids": locked.archived_box_ids,
+            "box_snapshots": force_box_snapshots,
             "file_count": len(force_purge_files),
             "active_file_count": sum(
                 file.archived_at is None for file in force_purge_files
@@ -3805,6 +3941,21 @@ def force_purge_lot(
     try:
         db.add(audit)
         db.flush()
+        _retire_lot_graph_barcodes(
+            db,
+            user=user,
+            reason=cleaned_reason,
+            operation="lot_force_purge",
+            lot=lot,
+            pallets=pallets,
+            boxes=boxes,
+            files=force_purge_files,
+            metadata={
+                "purge_audit_id": audit.id,
+                "graph_signature": locked.graph_signature,
+                "force": True,
+            },
+        )
         deleted_counts = _apply_force_request_adjustments(
             db,
             user=user,
@@ -4077,6 +4228,7 @@ def purge_lot(
     )
     lot_snapshot = {
         "id": lot.id,
+        "barcode": lot.barcode,
         "name": lot.name,
         "normalized_name": lot.normalized_name,
         "version": lot.version,
@@ -4088,7 +4240,14 @@ def purge_lot(
     box_snapshots = [
         {
             "id": box.id,
+            "barcode": box.barcode,
             "box_number": box.box_number,
+            "lot_id": box.lot_id,
+            "lot_barcode": lot.barcode,
+            "pallet_id": box.pallet_id,
+            "pallet_barcode": (
+                box.pallet.barcode if box.pallet is not None else None
+            ),
             "warehouse_id": box.current_warehouse_id,
             "status": _enum_text(box.status),
             "archived_at": (
@@ -4119,7 +4278,13 @@ def purge_lot(
         {
             "id": file.id,
             "lot_id": file.lot_id,
+            "lot_barcode": file.lot.barcode,
             "box_id": file.box_id,
+            "box_barcode": file.box.barcode,
+            "pallet_id": file.box.pallet_id,
+            "pallet_barcode": (
+                file.box.pallet.barcode if file.box.pallet is not None else None
+            ),
             "reference": file.reference,
             "normalized_reference": file.normalized_reference,
             "description": file.description,
@@ -4197,6 +4362,21 @@ def purge_lot(
     try:
         db.add(audit)
         db.flush()
+        _retire_lot_graph_barcodes(
+            db,
+            user=user,
+            reason=cleaned_reason,
+            operation="lot_purge",
+            lot=lot,
+            pallets=pallets,
+            boxes=boxes,
+            files=purge_files,
+            metadata={
+                "purge_audit_id": audit.id,
+                "graph_signature": locked.graph_signature,
+                "force": False,
+            },
+        )
         deleted_counts = _delete_purge_graph(
             db,
             lot_id=lot_id,
@@ -5008,9 +5188,11 @@ def _merge_candidate(
     archived_file_collision_count = len(archived_file_collisions)
     return LotMergeCandidate(
         source_id=source.id,
+        source_barcode=source.barcode,
         source_name=source.name,
         source_version=source.version,
         target_id=target.id,
+        target_barcode=target.barcode,
         target_name=target.name,
         target_version=target.version,
         merge_allowed=(
@@ -5390,7 +5572,9 @@ def merge_lots(
         {
             "id": file.id,
             "lot_id": file.lot_id,
+            "lot_barcode": file.lot.barcode,
             "box_id": file.box_id,
+            "box_barcode": file.box.barcode,
             "reference": file.reference,
             "normalized_reference": file.normalized_reference,
             "description": file.description,
@@ -5483,6 +5667,7 @@ def merge_lots(
                 "box_number": collision.box_number,
                 "survivor": {
                     "box_id": survivor.id,
+                    "box_barcode": survivor.barcode,
                     "box_number": survivor.box_number,
                     "lot_side": collision.survivor_lot_side,
                     "status": survivor.status.value,
@@ -5490,6 +5675,7 @@ def merge_lots(
                 },
                 "removed": {
                     "box_id": removed.id,
+                    "box_barcode": removed.barcode,
                     "box_number": removed.box_number,
                     "lot_side": collision.removed_lot_side,
                     "status": removed.status.value,
@@ -5615,8 +5801,10 @@ def merge_lots(
     metadata = {
         "operation": "merge",
         "source_lot_id": source.id,
+        "source_lot_barcode": source.barcode,
         "source_lot_name": source_name,
         "target_lot_id": target.id,
+        "target_lot_barcode": target.barcode,
         "target_lot_name": target_name,
         "actor_user_id": user.id,
         "reason": cleaned_reason,
@@ -5673,6 +5861,41 @@ def merge_lots(
         "pallet_actions_truncated": (
             len(pallet_actions_metadata) > _OVERLAP_LIST_LIMIT
         ),
+        # Preview-oriented lists above remain bounded, but identity evidence
+        # is deliberately complete and survives every absorbed-row deletion.
+        "barcode_evidence": {
+            "lots": [
+                {"id": source.id, "barcode": source.barcode, "side": "source"},
+                {"id": target.id, "barcode": target.barcode, "side": "survivor"},
+            ],
+            "pallets": [
+                {
+                    "id": pallet.id,
+                    "barcode": pallet.barcode,
+                    "lot_id": pallet.lot_id,
+                }
+                for pallet in pallets
+            ],
+            "boxes": [
+                {
+                    "id": box.id,
+                    "barcode": box.barcode,
+                    "lot_id": box.lot_id,
+                    "removed": box.id in removed_id_set,
+                }
+                for box in boxes
+            ],
+            "files": [
+                {
+                    "id": file.id,
+                    "barcode": file.barcode,
+                    "lot_id": file.lot_id,
+                    "box_id": file.box_id,
+                    "removed": file.id in file_delete_id_set,
+                }
+                for file in files
+            ],
+        },
         "absorbed_pallets": _bounded_merge_ids(
             list(combined_pallet_targets)
         ),
@@ -5699,6 +5922,24 @@ def merge_lots(
 
     try:
         with db.begin_nested():
+            _retire_lot_graph_barcodes(
+                db,
+                user=user,
+                reason=cleaned_reason,
+                operation="lot_merge_archived_collision_overwrite",
+                boxes=[boxes_by_id[box_id] for box_id in removed_box_ids],
+                files=[
+                    file for file in files if file.id in file_delete_id_set
+                ],
+                metadata={
+                    "source_lot_id": source.id,
+                    "source_lot_name": source_name,
+                    "target_lot_id": target.id,
+                    "target_lot_name": target_name,
+                    "collision_signature": candidate.collision_signature,
+                    "overwrite_archived_collisions": True,
+                },
+            )
             if moved_files and db.get_bind().dialect.name == "postgresql":
                 db.execute(
                     text(
@@ -6240,7 +6481,13 @@ def _summary_statement(
     if lot_id is not None:
         stmt = stmt.where(Lot.id == lot_id)
     if search and search.strip():
-        stmt = stmt.where(Lot.name.ilike(f"%{search.strip()}%"))
+        needle = f"%{search.strip()}%"
+        stmt = stmt.where(
+            or_(
+                Lot.name.ilike(needle),
+                Lot.barcode_identity.has(BarcodeIdentity.barcode.ilike(needle)),
+            )
+        )
     if progress_state == "no_eligible":
         stmt = stmt.where(eligible == 0)
     elif progress_state == "complete":
@@ -6326,6 +6573,7 @@ def list_lot_summaries(
         summaries.append(
             LotSummary(
                 id=lot.id,
+                barcode=lot.barcode,
                 name=lot.name,
                 normalized_name=lot.normalized_name,
                 version=lot.version,
@@ -6399,6 +6647,9 @@ def list_lot_options(
             or_(
                 Lot.name.ilike(f"%{cleaned}%"),
                 Lot.normalized_name == exact_normalized,
+                Lot.barcode_identity.has(
+                    BarcodeIdentity.barcode.ilike(f"%{cleaned}%")
+                ),
             )
         )
         stmt = stmt.order_by(
@@ -6414,6 +6665,7 @@ def list_lot_options(
         [
             LotOption(
                 id=lot.id,
+                barcode=lot.barcode,
                 name=lot.name,
                 normalized_name=lot.normalized_name,
                 exact_normalized_match=lot.normalized_name == exact_normalized,

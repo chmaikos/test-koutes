@@ -53,6 +53,7 @@ def test_legacy_template_is_returned_as_incomplete(client, make_user, session):
                 "box_number": {"index": 0, "header": "Box"},
                 "lot": {"index": 1, "header": "Lot"},
                 "contents": {"index": 2, "header": "Description"},
+                "barcode": {"index": 3, "header": "Legacy file barcode"},
             },
             lot_source="column",
             row_start=2,
@@ -67,6 +68,7 @@ def test_legacy_template_is_returned_as_incomplete(client, make_user, session):
     assert response.status_code == 200
     assert response.json()[0]["is_legacy_incomplete"] is True
     assert response.json()[0]["column_mappings"]["file_reference"] is None
+    assert "barcode" not in response.json()[0]["column_mappings"]
 
 
 def test_template_acl_and_owner_only_mutations(client, make_user, session):
@@ -213,6 +215,15 @@ def test_template_config_validation_and_use_case_filtering(client, make_user):
     invalid = _payload("Invalid")
     invalid["column_mappings"].pop("lot")
     response = client.post("/api/xlsx-mapping-templates", json=invalid)
+    assert response.status_code == 422
+    retired_barcode = _payload("Retired barcode")
+    retired_barcode["column_mappings"]["barcode"] = {
+        "index": 4,
+        "header": "Barcode",
+    }
+    response = client.post(
+        "/api/xlsx-mapping-templates", json=retired_barcode
+    )
     assert response.status_code == 422
     missing_pallet = _payload("Missing pallet")
     missing_pallet["column_mappings"].pop("pallet_number")

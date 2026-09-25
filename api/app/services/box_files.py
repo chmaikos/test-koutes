@@ -29,6 +29,7 @@ from app.models.requests import (
 from app.models.users import User, UserRole
 from app.models.warehouses import Warehouse
 from app.services.acl import allowed_warehouse_ids, can_access
+from app.services.barcodes import issue_barcode_identity
 from app.services.boxes import _cancel_active_returns
 
 
@@ -70,7 +71,6 @@ class InheritedBoxChange:
 class IntakeFile:
     reference: str
     description: str | None = None
-    barcode: str | None = None
     legacy: bool = False
 
 
@@ -119,7 +119,6 @@ def intake_file_values(
             IntakeFile(
                 reference=str(item.reference),  # type: ignore[attr-defined]
                 description=_clean_optional(getattr(item, "description", None)),
-                barcode=_clean_optional(getattr(item, "barcode", None)),
             )
             for item in files
         ]
@@ -140,7 +139,6 @@ def intake_file_values(
         canonical = IntakeFile(
             reference=" ".join(value.reference.split()),
             description=_clean_optional(value.description),
-            barcode=_clean_optional(value.barcode),
             legacy=value.legacy,
         )
         existing = unique.get(normalized)
@@ -811,17 +809,14 @@ def reconcile_intake_box_files(
             old_details = (
                 existing.reference,
                 existing.description,
-                existing.barcode,
             )
             existing.reference = value.reference
             existing.description = value.description
-            existing.barcode = value.barcode
             existing.updated_by_user_id = user.id
             existing.updated_at = now
             if old_details != (
                 existing.reference,
                 existing.description,
-                existing.barcode,
             ) and existing not in outcome.moved:
                 outcome.updated.append(existing)
             touched.append(existing)
@@ -831,7 +826,6 @@ def reconcile_intake_box_files(
             box_id=box.id,
             reference=value.reference,
             description=value.description,
-            barcode=value.barcode,
             position=max((item.position for item in target_files), default=0)
             + len(outcome.created)
             + 1,
@@ -839,6 +833,17 @@ def reconcile_intake_box_files(
             updated_by_user_id=user.id,
             created_at=now,
             updated_at=now,
+        )
+        issue_barcode_identity(
+            db,
+            file,
+            actor_user_id=user.id,
+            reason="File created during box intake reconciliation.",
+            metadata={
+                "operation": "intake_reconciliation",
+                "lot_id": box.lot_id,
+                "box_id": box.id,
+            },
         )
         db.add(file)
         target_files.append(file)
@@ -919,7 +924,7 @@ def snapshot_request_item_files(
         for position, file in enumerate(active, start=1):
             snapshots.append(
                 BoxRequestItemFileSnapshot(
-                    request_item_id=item.id,
+                    request_item=item,
                     file_id=file.id,
                     reference=file.reference,
                     description=file.description,
@@ -932,11 +937,11 @@ def snapshot_request_item_files(
         for position, value in enumerate(values, start=1):
             snapshots.append(
                 BoxRequestItemFileSnapshot(
-                    request_item_id=item.id,
+                    request_item=item,
                     file_id=None,
                     reference=value.reference,
                     description=value.description,
-                    barcode=value.barcode,
+                    barcode=None,
                     position=position,
                     snapshot_kind=(
                         BoxRequestItemFileSnapshotKind.legacy_contents
@@ -956,7 +961,6 @@ def create_box_file(
     box_id: int,
     reference: str,
     description: str | None = None,
-    barcode: str | None = None,
     position: int | None = None,
 ) -> BoxFile:
     box, lot = _lock_box(db, box_id)
@@ -979,7 +983,6 @@ def create_box_file(
         box_id=box.id,
         reference=reference,
         description=_clean_optional(description),
-        barcode=_clean_optional(barcode),
         position=max((item.position for item in files), default=0) + 1,
         created_by_user_id=user.id,
         updated_by_user_id=user.id,
@@ -988,6 +991,17 @@ def create_box_file(
     )
     try:
         with db.begin_nested():
+            issue_barcode_identity(
+                db,
+                file,
+                actor_user_id=user.id,
+                reason="File created through the file API.",
+                metadata={
+                    "operation": "create_box_file",
+                    "lot_id": lot.id,
+                    "box_id": box.id,
+                },
+            )
             db.add(file)
             db.flush()
             orders = {box.id: _insert_at(files + [file], file, position)}
@@ -1059,8 +1073,6 @@ def update_box_file(
         file.reference = str(values["reference"])
     if "description" in values:
         file.description = _clean_optional(values["description"])  # type: ignore[arg-type]
-    if "barcode" in values:
-        file.barcode = _clean_optional(values["barcode"])  # type: ignore[arg-type]
     file.updated_by_user_id = user.id
     file.updated_at = now
     try:
@@ -1268,6 +1280,13 @@ def restore_box_file(
     _check_version(file, expected_version)
     if file.archived_at is None:
         raise BoxFileConflictError("file is already active")
+    issue_barcode_identity(
+        db,
+        file,
+        actor_user_id=user.id,
+        reason="Legacy file identity finalized during restoration.",
+        metadata={"operation": "restore_legacy_missing_identity"},
+    )
     files = _files_for_boxes(db, [box.id])[box.id]
     before = {item.id: _snapshot(db, item, box=box, lot=lot) for item in files}
     now = datetime.now(UTC)

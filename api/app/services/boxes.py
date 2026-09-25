@@ -34,6 +34,11 @@ from app.models.requests import (
 from app.models.users import User, UserRole
 from app.models.warehouses import Warehouse
 from app.services.acl import can_access
+from app.services.barcodes import (
+    barcode_retirement_target,
+    issue_barcode_identity,
+    retire_barcode_identities,
+)
 from app.services.lots import LotRuleError, lock_lots_exclusively, resolve_lot
 from app.services.request_notifications import enqueue_request_event
 from app.services.warehouses import WarehouseRuleError, ensure_active_warehouse
@@ -483,6 +488,18 @@ def create_box(
     )
     try:
         with db.begin_nested():
+            issue_barcode_identity(
+                db,
+                box,
+                actor_user_id=user.id,
+                reason="Box created through receipt intake.",
+                metadata={
+                    "operation": "box_receipt",
+                    "lot_id": lot_record.id,
+                    "warehouse_id": warehouse_id,
+                    "origin": "direct_or_reconciled_receipt",
+                },
+            )
             db.add(box)
             db.flush()
             if target_pallet is not None:
@@ -597,6 +614,13 @@ def restore_archived_box(
         raise BoxConflictError(
             f"archived box {box.id} still has an active return reservation"
         )
+    issue_barcode_identity(
+        db,
+        box,
+        actor_user_id=user.id,
+        reason="Legacy box identity finalized during restoration.",
+        metadata={"operation": "restore_legacy_missing_identity"},
+    )
     pallet_number = clean_optional_pallet_number(pallet_number)
     if pallet_id is not None and pallet_number is None:
         raise BoxRuleError("pallet_id requires pallet_number")
@@ -1722,6 +1746,16 @@ def delete_box(
         )
         archived = True
     else:
+        retire_barcode_identities(
+            db,
+            [barcode_retirement_target(box)],
+            actor_user_id=user.id,
+            reason=(reason or "").strip() or "Ordinary eligible box deletion.",
+            operation_metadata={
+                "operation": "ordinary_box_hard_delete",
+                "force": force,
+            },
+        )
         db.delete(box)
         archived = False
     if commit:

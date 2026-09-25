@@ -235,7 +235,7 @@ def test_merge_migration_is_single_head() -> None:
     config = Config(str(root / "alembic.ini"))
     config.set_main_option("script_location", str(root / "alembic"))
     assert ScriptDirectory.from_config(config).get_heads() == [
-        "0035_first_class_box_files"
+        "0036_barcode_registry"
     ]
     migration = _load_merge_migration()
     assert migration.down_revision == "0027_first_class_lots"

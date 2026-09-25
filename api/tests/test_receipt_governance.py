@@ -12,6 +12,8 @@ from app.models.requests import (
     BoxRequest,
     BoxRequestDocument,
     BoxRequestDocumentType,
+    BoxRequestEvent,
+    BoxRequestEventType,
     BoxRequestOrigin,
     BoxRequestStatus,
 )
@@ -85,6 +87,7 @@ def test_policy_update_is_audited_and_manual_entry_is_staged(
             "lot": "GOVERNED",
             "pallet_number": "PALLET-GOVERNED",
             "warehouse_id": 1,
+            "files": [{"reference": "GOV-FILE", "description": "evidence"}],
         },
     )
     assert staged.status_code == 201
@@ -97,6 +100,10 @@ def test_policy_update_is_audited_and_manual_entry_is_staged(
     assert request.items[0].box_id is None
     assert request.items[0].lot_id is not None
     assert request.items[0].lot == "GOVERNED"
+    assert request.items[0].lot_barcode.startswith("LOT-")
+    assert request.items[0].pallet_barcode.startswith("PAL-")
+    assert request.items[0].box_barcode is None
+    assert request.items[0].file_snapshots[0].barcode is None
     assert session.scalar(select(func.count(Box.id))) == 0
 
     missing = client.post(
@@ -112,9 +119,26 @@ def test_policy_update_is_audited_and_manual_entry_is_staged(
     )
     assert approved.status_code == 200
     assert approved.json()["items"][0]["lot_id"] == request.items[0].lot_id
+    completed_item = approved.json()["items"][0]
+    assert completed_item["lot_barcode"] == request.items[0].lot_barcode
+    assert completed_item["pallet_barcode"] == request.items[0].pallet_barcode
+    assert completed_item["box_barcode"].startswith("BOX-")
+    assert completed_item["files"][0]["barcode"].startswith("FIL-")
     box = session.scalar(select(Box))
     assert box is not None
     assert box.status == BoxStatus.quarantined
+    completion = session.scalar(
+        select(BoxRequestEvent)
+        .where(
+            BoxRequestEvent.request_id == request_id,
+            BoxRequestEvent.event_type == BoxRequestEventType.completed,
+        )
+        .order_by(BoxRequestEvent.id.desc())
+    )
+    assert completion is not None
+    evidence = completion.event_metadata["barcode_snapshots"][0]
+    assert evidence["box_barcode"] == completed_item["box_barcode"]
+    assert evidence["file_barcodes"] == [completed_item["files"][0]["barcode"]]
 
 
 def test_two_person_threshold_boundary_and_atomic_capacity(

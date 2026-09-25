@@ -51,14 +51,13 @@ def test_file_api_crud_normalization_hierarchy_and_events(client, session) -> No
             "box_id": boxes[0].id,
             "reference": "  Client   Record  ",
             "description": "  Original  ",
-            "barcode": " BC-1 ",
         },
     )
     assert created.status_code == 201
     body = created.json()
     assert body["reference"] == "Client Record"
     assert body["description"] == "Original"
-    assert body["barcode"] == "BC-1"
+    assert body["barcode"].startswith("FIL-")
     assert body["lot_id"] == lot.id
     assert body["lot"] == lot.name
     assert body["box"] == "001"
@@ -67,12 +66,36 @@ def test_file_api_crud_normalization_hierarchy_and_events(client, session) -> No
     assert body["is_active"] is True
     assert body["created_by_user_id"] is not None
 
+    rejected_create_barcode = client.post(
+        "/api/files",
+        json={
+            "box_id": boxes[0].id,
+            "reference": "Writable barcode attempt",
+            "barcode": "FIL-000000000001-7",
+        },
+    )
+    assert rejected_create_barcode.status_code == 422
+    rejected_intake_barcode = client.post(
+        "/api/boxes",
+        json={
+            "box_number": "099",
+            "lot_id": lot.id,
+            "warehouse_id": 1,
+            "files": [
+                {
+                    "reference": "Writable intake barcode",
+                    "barcode": "FIL-000000000001-7",
+                }
+            ],
+        },
+    )
+    assert rejected_intake_barcode.status_code == 422
+
     duplicate = client.post(
         "/api/files",
         json={
             "box_id": boxes[1].id,
             "reference": "client record",
-            "barcode": "BC-1",
         },
     )
     assert duplicate.status_code == 409
@@ -81,7 +104,6 @@ def test_file_api_crud_normalization_hierarchy_and_events(client, session) -> No
         json={
             "box_id": boxes[1].id,
             "reference": "Different record",
-            "barcode": "BC-1",
         },
     )
     assert same_barcode.status_code == 201
@@ -92,13 +114,21 @@ def test_file_api_crud_normalization_hierarchy_and_events(client, session) -> No
         json={
             "expected_version": body["version"],
             "description": "Revised",
-            "barcode": None,
         },
     )
     assert updated.status_code == 200
     updated_body = updated.json()
     assert updated_body["description"] == "Revised"
-    assert updated_body["barcode"] is None
+    assert updated_body["barcode"] == body["barcode"]
+
+    rejected_update_barcode = client.patch(
+        f"/api/files/{file_id}",
+        json={
+            "expected_version": updated_body["version"],
+            "barcode": "FIL-000000000001-7",
+        },
+    )
+    assert rejected_update_barcode.status_code == 422
 
     stale = client.patch(
         f"/api/files/{file_id}",

@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -23,6 +24,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 from app.db import Base
 
 if TYPE_CHECKING:
+    from app.models.barcode_identities import BarcodeIdentity
     from app.models.boxes import Box
     from app.models.lots import Lot
 
@@ -97,6 +99,12 @@ class Pallet(Base):
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    barcode_identity_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("barcode_identities.id", ondelete="RESTRICT"),
+        nullable=False,
+        unique=True,
+    )
     lot_id: Mapped[int] = mapped_column(
         ForeignKey("lots.id", ondelete="RESTRICT"), nullable=False
     )
@@ -139,6 +147,11 @@ class Pallet(Base):
     __mapper_args__ = {"version_id_col": version}
 
     lot: Mapped[Lot] = relationship(back_populates="pallets")
+    barcode_identity: Mapped[BarcodeIdentity] = relationship(
+        "BarcodeIdentity",
+        foreign_keys=[barcode_identity_id],
+        lazy="joined",
+    )
     boxes: Mapped[list[Box]] = relationship(back_populates="pallet")
     events: Mapped[list[PalletEvent]] = relationship(
         back_populates="pallet",
@@ -155,6 +168,10 @@ class Pallet(Base):
         cleaned = clean_pallet_number(value)
         self.normalized_pallet_number = cleaned.lower()
         return cleaned
+
+    @property
+    def barcode(self) -> str:
+        return self.barcode_identity.barcode
 
 
 class PalletEvent(Base):

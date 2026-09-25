@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Generator
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
@@ -28,6 +28,25 @@ engine = create_engine(
 )
 
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False, future=True)
+
+
+@event.listens_for(SessionLocal, "before_flush")
+def _finalize_pending_barcode_identities(
+    session: Session,
+    _flush_context: object,
+    _instances: object,
+) -> None:
+    """Enforce the live-entity identity invariant for indirect producers."""
+    from app.services.barcodes import (
+        issue_pending_barcode_identities,
+        preserve_pending_barcode_snapshots,
+    )
+
+    issue_pending_barcode_identities(
+        session,
+        reason="Production safety-net issuance for an indirect creation path.",
+    )
+    preserve_pending_barcode_snapshots(session)
 
 
 class Base(DeclarativeBase):

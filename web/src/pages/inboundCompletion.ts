@@ -95,7 +95,6 @@ export function inboundCompletionItems(
               files: row.files?.map((file) => ({
                 reference: file.reference.trim().replace(/\s+/g, " "),
                 description: file.description?.trim() || undefined,
-                barcode: file.barcode?.trim() || undefined,
               })),
             },
           ]
@@ -128,7 +127,6 @@ export function inboundCompletionFingerprint(input: {
         row.files?.map((file) => ({
           reference: file.reference.trim().replace(/\s+/g, " "),
           description: file.description?.trim() || null,
-          barcode: file.barcode?.trim() || null,
         })) ?? null,
       lotConfirmation: input.lotConfirmations[index]
         ? {

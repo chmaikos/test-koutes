@@ -8,6 +8,7 @@ from sqlalchemy import Float, case, cast, func, or_, select, union_all
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.models.barcode_identities import BarcodeIdentity
 from app.models.box_files import BoxFile
 from app.models.boxes import ACTIVE_STATUSES, Box, BoxStatus
 from app.models.lots import Lot
@@ -22,6 +23,7 @@ from app.models.requests import BoxRequest, BoxRequestItem, BoxRequestOrigin, Bo
 from app.models.users import User, UserRole
 from app.models.warehouses import Warehouse
 from app.services.acl import allowed_warehouse_ids, can_access
+from app.services.barcodes import issue_barcode_identity
 from app.services.boxes import set_box_pallet_assignment
 
 PalletProgressState = Literal["active", "in_progress", "complete", "no_eligible"]
@@ -64,6 +66,7 @@ class PalletArchiveConflictError(PalletConflictError):
 @dataclass(frozen=True)
 class PalletSummary:
     id: int
+    barcode: str
     lot_id: int
     lot_name: str
     warehouse_ids: list[int]
@@ -97,6 +100,7 @@ class PalletSummary:
 @dataclass(frozen=True)
 class PalletOption:
     id: int
+    barcode: str
     pallet_number: str
     normalized_pallet_number: str
     lot_id: int
@@ -369,6 +373,9 @@ def list_pallet_summaries(
         stmt = stmt.where(
             or_(
                 Pallet.pallet_number.ilike(f"%{cleaned_search}%"),
+                Pallet.barcode_identity.has(
+                    BarcodeIdentity.barcode.ilike(f"%{cleaned_search}%")
+                ),
                 Lot.name.ilike(f"%{cleaned_search}%"),
                 Pallet.id.in_(
                     select(scoped_boxes.c.pallet_id)
@@ -414,6 +421,7 @@ def list_pallet_summaries(
         summaries.append(
             PalletSummary(
                 id=pallet.id,
+                barcode=pallet.barcode,
                 lot_id=pallet.lot_id,
                 lot_name=values["lot_name"],
                 warehouse_ids=warehouse_values[pallet.id][0],
@@ -514,6 +522,9 @@ def list_pallet_options(
             or_(
                 Pallet.pallet_number.ilike(f"%{cleaned}%"),
                 Pallet.normalized_pallet_number == exact_normalized,
+                Pallet.barcode_identity.has(
+                    BarcodeIdentity.barcode.ilike(f"%{cleaned}%")
+                ),
                 Lot.name.ilike(f"%{cleaned}%"),
                 Pallet.id.in_(
                     select(scoped_boxes.c.pallet_id)
@@ -540,6 +551,7 @@ def list_pallet_options(
         [
             PalletOption(
                 id=pallet.id,
+                barcode=pallet.barcode,
                 pallet_number=pallet.pallet_number,
                 normalized_pallet_number=pallet.normalized_pallet_number,
                 lot_id=pallet.lot_id,
@@ -663,6 +675,17 @@ def resolve_or_create_active_pallet(
     )
     try:
         with db.begin_nested():
+            issue_barcode_identity(
+                db,
+                pallet,
+                actor_user_id=user.id,
+                reason="Pallet created while resolving a receipt.",
+                metadata={
+                    "operation": "receipt_resolve_or_create",
+                    "lot_id": lot_id,
+                    "authorization_warehouse_id": warehouse_id,
+                },
+            )
             db.add(pallet)
             db.flush()
             db.add(
@@ -716,6 +739,17 @@ def create_pallet(
         pallet_number=cleaned,
         created_by_user_id=user.id,
         updated_by_user_id=user.id,
+    )
+    issue_barcode_identity(
+        db,
+        pallet,
+        actor_user_id=user.id,
+        reason="Pallet created through the pallet API.",
+        metadata={
+            "operation": "create",
+            "lot_id": lot_id,
+            "authorization_warehouse_id": warehouse_id,
+        },
     )
     db.add(pallet)
     try:
@@ -831,6 +865,13 @@ def archive_pallet(
             f"pallet version conflict: expected {expected_version}, "
             f"current {pallet.version}"
         )
+    issue_barcode_identity(
+        db,
+        pallet,
+        actor_user_id=user.id,
+        reason="Legacy pallet identity finalized during restoration.",
+        metadata={"operation": "restore_legacy_missing_identity"},
+    )
     box_count = int(
         db.scalar(select(func.count(Box.id)).where(Box.pallet_id == pallet.id)) or 0
     )

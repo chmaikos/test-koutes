@@ -291,7 +291,8 @@ export function ExportsPage() {
           <h2 className="font-semibold">Box inventory</h2>
           <p className="text-xs text-slate-500">
             Box-granular rows with lot, pallet, status, physical File count and
-            File summary matching the selected filters.
+            File summary matching the selected filters. Generated barcode
+            columns are immutable identifiers.
           </p>
         </div>
         <div className="grid gap-4 md:grid-cols-2">
@@ -375,7 +376,7 @@ export function ExportsPage() {
           <h2 className="font-semibold">Physical Files</h2>
           <p className="text-xs text-slate-500">
             Export one row per tracked physical File. This does not export
-            uploaded ERP documents.
+            uploaded ERP documents. The generated barcode column is immutable.
           </p>
         </div>
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
@@ -400,12 +401,12 @@ export function ExportsPage() {
           <h2 className="font-semibold">Pallet summary</h2>
           <p className="text-xs text-slate-500">
             Export ACL-scoped pallet organization across box warehouses,
-            including lots, box counts, status distribution, completion, and
-            latest activity.
+            including generated immutable barcodes, lots, box counts, status
+            distribution, completion, and latest activity.
           </p>
         </div>
         <div className="grid gap-4 md:grid-cols-2">
-          <label className="block"><span className="text-xs text-slate-500">Search</span><input className="input" placeholder="Pallet number or lot" value={palletSearch} onChange={(event) => setPalletSearch(event.target.value)} /></label>
+          <label className="block"><span className="text-xs text-slate-500">Search</span><input className="input" placeholder="Pallet number, lot, or barcode" value={palletSearch} onChange={(event) => setPalletSearch(event.target.value)} /></label>
           <label className="block"><span className="text-xs text-slate-500">Progress</span><select className="input" value={palletProgress} onChange={(event) => setPalletProgress(event.target.value as PalletProgressState | "")}><option value="">All</option><option value="active">Active</option><option value="in_progress">In progress</option><option value="complete">Complete</option><option value="no_eligible">No eligible boxes</option></select></label>
         </div>
         <div className="flex flex-wrap gap-3">
@@ -418,8 +419,9 @@ export function ExportsPage() {
         <div>
           <h2 className="font-semibold">Lot summary</h2>
           <p className="text-xs text-slate-500">
-            Export ACL-scoped lot counts, completion, status distribution,
-            warehouses, staged receipts, and last activity.
+            Export ACL-scoped generated immutable barcodes, lot counts,
+            completion, status distribution, warehouses, staged receipts, and
+            last activity.
           </p>
         </div>
         <div className="grid gap-4 md:grid-cols-3">
@@ -427,7 +429,7 @@ export function ExportsPage() {
             <span className="text-xs text-slate-500">Search</span>
             <input
               className="input"
-              placeholder="Lot name"
+              placeholder="Lot name or barcode"
               value={lotSearch}
               onChange={(event) => setLotSearch(event.target.value)}
             />

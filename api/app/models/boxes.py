@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     DateTime,
     Enum,
     ForeignKey,
@@ -23,6 +24,7 @@ from app.db import Base
 from app.models.lots import Lot
 
 if TYPE_CHECKING:
+    from app.models.barcode_identities import BarcodeIdentity
     from app.models.box_files import BoxFile
     from app.models.pallets import Pallet
 
@@ -88,11 +90,22 @@ class Box(Base):
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    barcode_identity_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("barcode_identities.id", ondelete="RESTRICT"),
+        nullable=False,
+        unique=True,
+    )
     box_number: Mapped[str] = mapped_column(String(64), index=True)
     lot_id: Mapped[int] = mapped_column(
         ForeignKey("lots.id", ondelete="RESTRICT"), nullable=False, index=True
     )
     lot_record: Mapped[Lot] = relationship(back_populates="boxes", lazy="joined")
+    barcode_identity: Mapped[BarcodeIdentity] = relationship(
+        "BarcodeIdentity",
+        foreign_keys=[barcode_identity_id],
+        lazy="joined",
+    )
     pallet_id: Mapped[int | None] = mapped_column(
         ForeignKey("pallets.id", ondelete="SET NULL"), nullable=True, index=True
     )
@@ -136,6 +149,10 @@ class Box(Base):
     def lot_name(self) -> str:
         """Current display name; this is derived from the authoritative lot row."""
         return self.lot_record.name
+
+    @property
+    def barcode(self) -> str:
+        return self.barcode_identity.barcode
 
     @hybrid_property
     def lot(self) -> str:

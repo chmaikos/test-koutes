@@ -8,8 +8,10 @@ from fastapi import HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import Select, and_, or_
 
+from app.models.barcode_identities import BarcodeIdentity
 from app.models.box_files import BoxFile
 from app.models.boxes import Box, BoxStatus
+from app.models.lots import Lot
 from app.models.pallets import Pallet
 from app.models.warehouses import Warehouse
 
@@ -125,8 +127,24 @@ def apply_box_filters(
         stmt = stmt.where(
             or_(
                 Box.box_number.ilike(like),
+                Box.barcode_identity.has(BarcodeIdentity.barcode.ilike(like)),
                 Box.lot.ilike(like),
-                Box.pallet.has(Pallet.pallet_number.ilike(like)),
+                Box.lot_record.has(
+                    or_(
+                        Lot.name.ilike(like),
+                        Lot.barcode_identity.has(
+                            BarcodeIdentity.barcode.ilike(like)
+                        ),
+                    )
+                ),
+                Box.pallet.has(
+                    or_(
+                        Pallet.pallet_number.ilike(like),
+                        Pallet.barcode_identity.has(
+                            BarcodeIdentity.barcode.ilike(like)
+                        ),
+                    )
+                ),
                 Box.contents.ilike(like),
                 Box.files.any(
                     and_(

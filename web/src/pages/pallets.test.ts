@@ -23,6 +23,7 @@ import { manualReceiptPayload } from "@/pages/manualReceipt";
 
 const option: PalletOption = {
   id: 7,
+  barcode: "PAL-000000000007-9",
   pallet_number: "PAL 01",
   normalized_pallet_number: "pal 01",
   lot_id: 2,
@@ -97,7 +98,7 @@ describe("pallet list and picker helpers", () => {
     ).toEqual({
       box_number: "001",
       lot_id: 2,
-      files: [{ reference: "FILE 1", description: "Notes", barcode: undefined }],
+      files: [{ reference: "FILE 1", description: "Notes" }],
       warehouse_id: 3,
     });
     expect(

@@ -62,7 +62,6 @@ def _inventory(session):
             box_id=boxes[0].id,
             reference="FILE-ALPHA",
             description="Needle description",
-            barcode="BAR-ALPHA",
             position=1,
         ),
         BoxFile(
@@ -121,6 +120,7 @@ def test_box_search_file_filters_counts_and_acl_exports(
     )
     assert len(box_rows) == 3
     exported_box = next(row for row in box_rows if row["Box Number"] == "001")
+    assert exported_box["Barcode"].startswith("BOX-0000000000")
     assert exported_box["File Count"] == "1"
     assert exported_box["Archived File Count"] == "1"
     assert "FILE-ALPHA" in exported_box["File Summary"]
@@ -135,6 +135,7 @@ def test_box_search_file_filters_counts_and_acl_exports(
     assert response.status_code == 200
     rows = list(csv.DictReader(io.StringIO(response.content.decode("utf-8-sig"))))
     assert {row["Reference"] for row in rows} == {"FILE-ALPHA"}
+    assert rows[0]["Barcode"].startswith("FIL-0000000000")
     assert rows[0]["Warehouse"] == "Building 1"
 
 

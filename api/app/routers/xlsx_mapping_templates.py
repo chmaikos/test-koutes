@@ -44,6 +44,7 @@ def _error(exc: XlsxTemplateRuleError) -> HTTPException:
 
 
 def _out(template: XlsxMappingTemplate, user: CurrentUser) -> XlsxMappingTemplateOut:
+    has_retired_barcode_mapping = "barcode" in template.column_mappings
     return XlsxMappingTemplateOut(
         id=template.id,
         owner_user_id=template.owner_user_id,
@@ -54,7 +55,11 @@ def _out(template: XlsxMappingTemplate, user: CurrentUser) -> XlsxMappingTemplat
         sheet_pattern=template.sheet_pattern,
         filename_fingerprint=template.filename_fingerprint,
         header_fingerprint=template.header_fingerprint,
-        column_mappings=template.column_mappings,
+        column_mappings={
+            key: value
+            for key, value in template.column_mappings.items()
+            if key != "barcode"
+        },
         lot_source=template.lot_source,
         fixed_lot=template.fixed_lot,
         row_start=template.row_start,
@@ -65,8 +70,9 @@ def _out(template: XlsxMappingTemplate, user: CurrentUser) -> XlsxMappingTemplat
         updated_at=template.updated_at,
         is_owner=template.owner_user_id == user.id,
         is_shared=template.warehouse_id is not None,
-        is_legacy_incomplete=not bool(
-            template.column_mappings.get("file_reference")
+        is_legacy_incomplete=(
+            has_retired_barcode_mapping
+            or not bool(template.column_mappings.get("file_reference"))
         ),
     )
 

@@ -351,6 +351,9 @@ class BoxRequestItem(Base):
     pallet: Mapped[str | None] = mapped_column(String(64))
     box_number: Mapped[str | None] = mapped_column(String(64))
     contents: Mapped[str | None] = mapped_column(Text)
+    lot_barcode: Mapped[str | None] = mapped_column(String(18))
+    pallet_barcode: Mapped[str | None] = mapped_column(String(18))
+    box_barcode: Mapped[str | None] = mapped_column(String(18))
 
     request: Mapped[BoxRequest] = relationship(back_populates="items")
     lot_record: Mapped[Lot | None] = relationship()
@@ -380,6 +383,23 @@ class BoxRequestItem(Base):
     ) -> str | None:
         if "pallet" in self.__dict__ and self.__dict__["pallet"] != value:
             raise ValueError("request item pallet snapshot is immutable")
+        return value
+
+    @validates("lot_barcode", "pallet_barcode", "box_barcode")
+    def _keep_barcode_snapshot_write_once(
+        self,
+        key: str,
+        value: str | None,
+    ) -> str | None:
+        previous = self.__dict__.get(key)
+        if key in self.__dict__ and previous != value:
+            if previous is not None or value is None:
+                raise ValueError(f"request item {key} snapshot is write-once")
+            from app.services.barcodes import parse_barcode
+
+            kind, _ = parse_barcode(value)
+            if kind.value != key.removesuffix("_barcode"):
+                raise ValueError(f"request item {key} has the wrong barcode kind")
         return value
 
     @property
@@ -457,10 +477,18 @@ class BoxRequestItemFileSnapshot(Base):
         # Completion may attach that snapshot once; an established link cannot
         # subsequently be redirected.
         if (
-            key == "file_id"
+            key in {"file_id", "barcode"}
             and self.__dict__.get(key) is None
-            and isinstance(value, int)
+            and value is not None
         ):
+            if key == "file_id" and not isinstance(value, int):
+                raise ValueError("request item file_id snapshot must be an integer")
+            if key == "barcode":
+                from app.services.barcodes import parse_barcode
+
+                kind, _ = parse_barcode(str(value))
+                if kind.value != "file":
+                    raise ValueError("request item file barcode has the wrong kind")
             return value
         if key in self.__dict__ and self.__dict__[key] != value:
             raise ValueError(f"request item file {key} snapshot is immutable")

@@ -111,6 +111,10 @@ def validate_mapping_config(
     column_mappings: dict,
     require_file_reference: bool = False,
 ) -> None:
+    if "barcode" in column_mappings:
+        raise XlsxTemplateRuleError(
+            "file barcode mapping is retired; review and save the template without it"
+        )
     if "box_number" not in column_mappings:
         raise XlsxTemplateRuleError("box number mapping is required")
     if lot_source == "fixed":
@@ -123,9 +127,9 @@ def validate_mapping_config(
         raise XlsxTemplateRuleError("invalid lot source")
     if require_file_reference and not column_mappings.get("file_reference"):
         raise XlsxTemplateRuleError("file_reference mapping is required")
-    if (
-        column_mappings.get("file_description") or column_mappings.get("barcode")
-    ) and not column_mappings.get("file_reference"):
+    if column_mappings.get("file_description") and not column_mappings.get(
+        "file_reference"
+    ):
         raise XlsxTemplateRuleError(
             "file_reference mapping is required for file details"
         )

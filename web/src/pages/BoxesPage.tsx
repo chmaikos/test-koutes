@@ -38,6 +38,7 @@ import {
   type BulkResultSkipRow,
 } from "@/components/BulkResultDialog";
 import { ImportBoxesDialog } from "@/components/ImportBoxesDialog";
+import { BarcodeDisplay } from "@/components/BarcodeDisplay";
 import { FileItemsEditor } from "@/components/FileItemsEditor";
 import { validateFileItems } from "@/components/fileItems";
 import { LotPicker, type LotSelection } from "@/components/LotPicker";
@@ -1137,6 +1138,7 @@ function BoxRow({
         <Link className="text-brand-700 hover:underline" to={`/boxes/${box.id}`}>
           {box.box_number}
         </Link>
+        <BarcodeDisplay value={box.barcode} variant="compact" />
       </td>
       <td className="px-4 py-2.5">
         <Link className="text-brand-700 hover:underline" to={`/lots/${box.lot_id}`}>
@@ -1238,6 +1240,7 @@ function BoxCard({
             </Link>
             <StatusBadge status={box.status} />
           </div>
+          <BarcodeDisplay value={box.barcode} variant="compact" />
           <dl className="mt-2 grid grid-cols-[5.5rem_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
             <dt className="text-slate-500">Lot</dt>
             <dd className="truncate">
@@ -1298,7 +1301,7 @@ function CreateBoxModal({ onClose }: { onClose: () => void }) {
   const [lot, setLot] = useState<LotSelection | null>(null);
   const [pallet, setPallet] = useState<PalletSelection | null>(null);
   const [palletNumber, setPalletNumber] = useState("");
-  const [files, setFiles] = useState<FileInput[]>([{ reference: "", description: "", barcode: "" }]);
+  const [files, setFiles] = useState<FileInput[]>([{ reference: "", description: "" }]);
   const [warehouseId, setWarehouseId] = useState<number | "">("");
   const [error, setError] = useState<string | null>(null);
 

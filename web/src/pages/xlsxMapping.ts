@@ -16,7 +16,6 @@ export interface ResolvedXlsxMapping {
   fixedLot: string;
   fileReferenceColumn: number | undefined;
   fileDescriptionColumn: number | undefined;
-  barcodeColumn: number | undefined;
   contentsColumn: number | undefined;
   rowStart: number;
   includeRowsByDefault: boolean;
@@ -131,13 +130,6 @@ export function resolveXlsxTemplate(
     "File description",
     warnings,
   );
-  const barcodeColumn = resolveColumn(
-    template.column_mappings.barcode,
-    headers,
-    sheet.max_columns,
-    "File barcode",
-    warnings,
-  );
   if (!template.column_mappings.file_reference) {
     warnings.push(
       "Legacy template: choose a File reference column before saving or applying.",
@@ -161,7 +153,6 @@ export function resolveXlsxTemplate(
     fixedLot: template.fixed_lot ?? "",
     fileReferenceColumn,
     fileDescriptionColumn,
-    barcodeColumn,
     contentsColumn,
     rowStart: template.row_start,
     includeRowsByDefault: template.include_rows_by_default,
@@ -184,7 +175,6 @@ export function xlsxTemplateInput(input: {
   fixedLot: string;
   fileReferenceColumn: number;
   fileDescriptionColumn?: number;
-  barcodeColumn?: number;
   contentsColumn?: number;
   rowStart: number;
   includeRowsByDefault: boolean;
@@ -213,9 +203,6 @@ export function xlsxTemplateInput(input: {
               headers,
             ),
           }
-        : {}),
-      ...(input.barcodeColumn !== undefined
-        ? { barcode: xlsxColumnRef(input.barcodeColumn, headers) }
         : {}),
       ...(input.contentsColumn !== undefined
         ? { contents: xlsxColumnRef(input.contentsColumn, headers) }
@@ -312,7 +299,6 @@ export function groupInboundItems(
         const canonicalFile = {
           reference: file.reference.trim().replace(/\s+/g, " "),
           description: file.description?.trim() || undefined,
-          barcode: file.barcode?.trim() || undefined,
         };
         const fileIdentity = `${lot.toLowerCase()}\u0000${normalizedReference}`;
         const existingTarget = fileTargets.get(fileIdentity);
@@ -410,7 +396,6 @@ export function mapXlsxInboundRows(input: {
   fixedLot: string;
   fileReferenceColumn?: number;
   fileDescriptionColumn?: number;
-  barcodeColumn?: number;
   contentsColumn?: number;
 }): { items: InboundRequestItemInput[]; error: string | null } {
   const mapped: InboundRequestItemInput[] = [];
@@ -449,10 +434,6 @@ export function mapXlsxInboundRows(input: {
       input.fileDescriptionColumn === undefined
         ? undefined
         : (row.cells[input.fileDescriptionColumn] ?? "").trim() || undefined;
-    const barcode =
-      input.barcodeColumn === undefined
-        ? undefined
-        : (row.cells[input.barcodeColumn] ?? "").trim() || undefined;
     if (input.fileReferenceColumn !== undefined && !fileReference) {
       return {
         items: [],
@@ -467,7 +448,7 @@ export function mapXlsxInboundRows(input: {
       ...(input.fileReferenceColumn !== undefined
         ? {
             files: fileReference
-              ? [{ reference: fileReference, description: fileDescription, barcode }]
+              ? [{ reference: fileReference, description: fileDescription }]
               : [],
           }
         : {}),

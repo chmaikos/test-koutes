@@ -16,11 +16,16 @@ import {
 } from "@/api/hooks";
 import { ALL_BOX_STATUSES } from "@/api/types";
 import type { BoxStatus } from "@/api/types";
+import { BarcodeDisplay } from "@/components/BarcodeDisplay";
 import { STATUS_LABEL, StatusBadge } from "@/components/StatusBadge";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { LotPicker, type LotSelection } from "@/components/LotPicker";
 import { PalletPicker, type PalletSelection } from "@/components/PalletPicker";
 import { useHasRole } from "@/components/RoleGate";
+import {
+  PrintableLabelDialog,
+  PrintLabelButton,
+} from "@/components/PrintableLabelDialog";
 import {
   formatCancelledRequestIds,
   hasRequiredOverrideReason,
@@ -74,6 +79,7 @@ export function BoxDetailPage() {
     number[] | null
   >(null);
   const [relocationError, setRelocationError] = useState<string | null>(null);
+  const [printLabel, setPrintLabel] = useState(false);
 
   if (!box) {
     return <p className="text-sm text-slate-500">Loading...</p>;
@@ -127,10 +133,17 @@ export function BoxDetailPage() {
               </Link>
             </p>
           </div>
-          <div className="flex flex-col items-end gap-1">
+          <div className="flex flex-col items-end gap-2">
+            <PrintLabelButton onClick={() => setPrintLabel(true)} />
             <StatusBadge status={box.status} />
             <span className="text-xs text-slate-500">at {warehouseName}</span>
           </div>
+        </div>
+        <div>
+          <p className="mb-2 text-xs font-medium uppercase tracking-wider text-slate-400">
+            Generated immutable barcode
+          </p>
+          <BarcodeDisplay value={box.barcode} />
         </div>
         <dl className="grid gap-3 text-sm sm:grid-cols-2">
           <Field label="Received">
@@ -239,6 +252,21 @@ export function BoxDetailPage() {
           </p>
         )}
       </header>
+      {printLabel && (
+        <PrintableLabelDialog
+          label={{
+            entityType: "Box",
+            title: box.box_number,
+            barcode: box.barcode,
+            context: [
+              `Lot: ${box.lot}`,
+              `Pallet: ${box.pallet_number ?? "Unassigned"}`,
+              `Warehouse: ${warehouseName}`,
+            ],
+          }}
+          onClose={() => setPrintLabel(false)}
+        />
+      )}
 
       {canWrite && !box.archived_at && (
         <section className="card card-pad">
@@ -665,8 +693,9 @@ function BoxFilesPanel({
               <Link className="font-mono font-medium text-brand-700 hover:underline" to={`/files/${file.id}`}>{file.reference}</Link>
               {!file.is_active && <span className="ml-2 rounded bg-slate-200 px-1.5 py-0.5 text-xs">Archived</span>}
               <p className="truncate text-xs text-slate-500" title={file.description ?? undefined}>
-                {file.description || "No description"}{file.barcode ? ` · ${file.barcode}` : ""}
+                {file.description || "No description"}
               </p>
+              <BarcodeDisplay value={file.barcode} variant="compact" />
             </div>
             <span className="text-xs text-slate-400">Position {file.position}</span>
             <Link className="btn-ghost" to={`/files/${file.id}`}>Open</Link>
@@ -695,7 +724,6 @@ function BoxFileDialog({
   const archive = useArchiveFile();
   const [reference, setReference] = useState(file?.reference ?? "");
   const [description, setDescription] = useState(file?.description ?? "");
-  const [barcode, setBarcode] = useState(file?.barcode ?? "");
   const [archiveReason, setArchiveReason] = useState("");
   const [showArchive, setShowArchive] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -711,7 +739,6 @@ function BoxFileDialog({
             expected_version: file.version,
             reference: reference.trim(),
             description: description.trim() || null,
-            barcode: barcode.trim() || null,
           },
         });
       } else {
@@ -719,7 +746,6 @@ function BoxFileDialog({
           box_id: boxId,
           reference: reference.trim(),
           description: description.trim() || undefined,
-          barcode: barcode.trim() || undefined,
         });
       }
       onClose();
@@ -735,7 +761,9 @@ function BoxFileDialog({
         <div className="mt-4 space-y-3">
           <label className="block"><span className="text-xs text-slate-500">Reference *</span><input required className="input" maxLength={255} value={reference} onChange={(event) => setReference(event.target.value)} /></label>
           <label className="block"><span className="text-xs text-slate-500">Description</span><textarea className="input" rows={3} maxLength={10000} value={description} onChange={(event) => setDescription(event.target.value)} /></label>
-          <label className="block"><span className="text-xs text-slate-500">Barcode</span><input className="input" maxLength={255} value={barcode} onChange={(event) => setBarcode(event.target.value)} /></label>
+          <p className="rounded-md bg-slate-50 p-3 text-xs text-slate-600">
+            The immutable File barcode is generated automatically after creation and cannot be edited.
+          </p>
         </div>
         {file && showArchive && (
           <label className="mt-4 block rounded-lg border border-amber-200 bg-amber-50 p-3"><span className="text-xs font-medium text-amber-900">Required archive reason</span><textarea required className="input mt-1 bg-white" rows={2} maxLength={2000} value={archiveReason} onChange={(event) => setArchiveReason(event.target.value)} /></label>

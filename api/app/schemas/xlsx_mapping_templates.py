@@ -14,12 +14,13 @@ class XlsxColumnRef(BaseModel):
 
 
 class XlsxColumnMappings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     box_number: XlsxColumnRef
     pallet_number: XlsxColumnRef | None = None
     lot: XlsxColumnRef | None = None
     file_reference: XlsxColumnRef | None = None
     file_description: XlsxColumnRef | None = None
-    barcode: XlsxColumnRef | None = None
     # Deprecated compatibility mapping. It is never treated as a file
     # description unless an explicit file_reference mapping is also present.
     contents: XlsxColumnRef | None = None

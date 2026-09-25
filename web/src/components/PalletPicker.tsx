@@ -174,8 +174,8 @@ export function PalletPicker({
               !lotId && !hasUnscopedNumber
                 ? "Choose lot first"
                 : required
-                  ? "Search or enter pallet number"
-                  : "Optional — leave blank if unassigned"
+                  ? "Search pallet number or generated barcode"
+                  : "Optional pallet number/barcode — blank is unassigned"
             }
             value={query}
             onFocus={() => {

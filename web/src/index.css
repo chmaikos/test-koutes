@@ -72,3 +72,32 @@
     padding-bottom: env(safe-area-inset-bottom);
   }
 }
+
+@media print {
+  @page {
+    margin: 8mm;
+  }
+
+  body * {
+    visibility: hidden !important;
+  }
+
+  .print-label,
+  .print-label * {
+    visibility: visible !important;
+  }
+
+  .print-label {
+    position: fixed;
+    inset: 0 auto auto 0;
+    width: 100%;
+    border: 2px solid #0f172a !important;
+    box-shadow: none !important;
+    break-inside: avoid;
+  }
+
+  .no-print,
+  .print-label button {
+    display: none !important;
+  }
+}

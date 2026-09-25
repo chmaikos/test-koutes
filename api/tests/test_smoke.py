@@ -300,6 +300,7 @@ def test_xlsx_export_with_timezone_aware_timestamps():
 
     box = SimpleNamespace(
         box_number="001",
+        barcode="BOX-000000000001-7",
         lot="Acme",
         contents=None,
         current_warehouse_id=1,
@@ -314,6 +315,7 @@ def test_xlsx_export_with_timezone_aware_timestamps():
     wb = load_workbook(BytesIO(payload))
     rows = list(wb.active.iter_rows(values_only=True))
     assert len(rows) == 2, f"expected header + 1 data row, got {len(rows)}"
+    assert rows[1][rows[0].index("Barcode")] == "BOX-000000000001-7"
     received_idx = rows[0].index("Received At")
     assert isinstance(rows[1][received_idx], datetime)
     assert rows[1][received_idx].tzinfo is None

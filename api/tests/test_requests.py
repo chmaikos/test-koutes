@@ -413,6 +413,9 @@ def test_return_workflow_reserves_and_returns_specific_boxes(
     source = next(item for item in sources.json() if item["id"] == source_id)
     assert source["delivered_quantity"] == 3
     assert source["eligible_quantity"] == 3
+    assert source["lots"] == [
+        {"lot_id": boxes[0].lot_id, "lot_name": "RETURN-SOURCE"}
+    ]
     candidates = client.get(f"/api/requests/{source_id}/return-candidates")
     assert candidates.status_code == 200
     assert [item["box_id"] for item in candidates.json()] == [

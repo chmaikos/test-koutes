@@ -5,6 +5,7 @@ import {
   returnCandidateIds,
   palletCandidateIds,
   returnSourceLabel,
+  returnSourceLotsLabel,
   toggleReturnBox,
   toggleReturnPallet,
 } from "@/pages/returnSelection";
@@ -67,5 +68,18 @@ describe("partial return selection", () => {
     expect(returnSourceLabel("legacy_backfill")).toBe(
       "Legacy inventory receipt",
     );
+  });
+
+  it("shows the inbound source lot or lots in the return selector", () => {
+    expect(
+      returnSourceLotsLabel([{ lot_id: 1, lot_name: "LOT-A" }]),
+    ).toBe("Lot LOT-A");
+    expect(
+      returnSourceLotsLabel([
+        { lot_id: 1, lot_name: "LOT-A" },
+        { lot_id: 2, lot_name: "LOT-B" },
+      ]),
+    ).toBe("Lots LOT-A, LOT-B");
+    expect(returnSourceLotsLabel([])).toBe("Lot unavailable");
   });
 });

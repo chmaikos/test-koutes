@@ -232,6 +232,7 @@ def test_lot_api_search_sort_filter_pagination_exports_and_options(client):
     assert csv_response.status_code == 200
     assert "Alpha Lot" in csv_response.text
     assert "Gamma Lot" not in csv_response.text
+    assert "LOT-0000000000" in csv_response.text
     assert "Completion Percent" in csv_response.text
 
     xlsx_response = client.get("/api/exports/lots.xlsx")

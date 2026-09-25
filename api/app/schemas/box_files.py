@@ -16,7 +16,6 @@ class FileInput(BaseModel):
 
     reference: str = Field(min_length=1, max_length=255)
     description: str | None = Field(default=None, max_length=10000)
-    barcode: str | None = Field(default=None, max_length=255)
 
     @field_validator("reference")
     @classmethod
@@ -30,7 +29,7 @@ class FileSummaryOut(BaseModel):
     id: int
     reference: str
     description: str | None
-    barcode: str | None
+    barcode: str
     position: int
     version: int
 
@@ -39,7 +38,7 @@ class FileListOut(BaseModel):
     id: int
     reference: str
     description: str | None
-    barcode: str | None
+    barcode: str
     position: int
     lot_id: int
     lot: str
@@ -71,7 +70,6 @@ class FileCreate(BaseModel):
     box_id: int = Field(ge=1)
     reference: str = Field(min_length=1, max_length=255)
     description: str | None = Field(default=None, max_length=10000)
-    barcode: str | None = Field(default=None, max_length=255)
     position: int | None = Field(default=None, ge=1)
 
     @field_validator("reference")
@@ -86,7 +84,6 @@ class FileUpdate(BaseModel):
     expected_version: int = Field(ge=1)
     reference: str | None = Field(default=None, min_length=1, max_length=255)
     description: str | None = Field(default=None, max_length=10000)
-    barcode: str | None = Field(default=None, max_length=255)
     force: bool = False
     reason: str | None = Field(default=None, max_length=2000)
 

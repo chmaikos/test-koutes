@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { useLots, useWarehouses } from "@/api/hooks";
 import type { LotSortField, LotSummary } from "@/api/types";
+import { BarcodeDisplay } from "@/components/BarcodeDisplay";
 import { LotStatusBar } from "@/components/LotStatusBar";
 import { RenameLotDialog } from "@/components/RenameLotDialog";
 import { useHasRole } from "@/components/RoleGate";
@@ -73,7 +74,7 @@ export function LotsPage() {
             <Search className="pointer-events-none absolute left-2 top-2.5 h-4 w-4 text-slate-400" />
             <input
               className="input pl-8"
-              placeholder="Lot name"
+              placeholder="Lot name or barcode"
               value={parsed.filters.search ?? ""}
               onChange={(event) => setParam("q", event.target.value)}
             />
@@ -196,6 +197,7 @@ export function LotsPage() {
                       >
                         {lot.name}
                       </Link>
+                      <BarcodeDisplay value={lot.barcode} variant="compact" />
                       {lot.staged_receipt_count > 0 && (
                         <div className="mt-1 text-xs text-amber-700">
                           {lot.staged_receipt_count} staged receipt
@@ -253,6 +255,7 @@ export function LotsPage() {
                     >
                       {lot.name}
                     </Link>
+                    <BarcodeDisplay value={lot.barcode} variant="compact" />
                     <p className="text-xs text-slate-500">
                       {lot.box_count} boxes · {lot.active_file_count} active Files · {lot.archived_file_count} archived · {lot.warehouse_names.join(", ") || "No warehouse"}
                     </p>

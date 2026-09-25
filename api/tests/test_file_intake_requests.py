@@ -37,7 +37,6 @@ def test_manual_receipt_structured_files_override_legacy_and_snapshot(
                 {
                     "reference": " FILE-2 ",
                     "description": "Second",
-                    "barcode": "BC-2",
                 },
                 {"reference": "FILE-1", "description": "First"},
             ],
@@ -113,7 +112,7 @@ def test_mapped_import_groups_file_rows_and_rejects_duplicate_targets(
                 {
                     "box_number": "091",
                     "lot": "mapped files",
-                    "files": [{"reference": "F-2", "barcode": "BC-2"}],
+                    "files": [{"reference": "F-2"}],
                 },
             ],
         },
@@ -176,13 +175,12 @@ def test_direct_xlsx_import_maps_first_class_file_columns(client) -> None:
     )
     assert response.status_code == 200, response.text
     assert len(response.json()["created"]) == 1
-    assert {
-        (file["reference"], file["description"], file["barcode"])
-        for file in response.json()["created"][0]["files"]
-    } == {
-        ("D-1", "First", "BC-1"),
-        ("D-2", "Second", None),
+    files = response.json()["created"][0]["files"]
+    assert {(file["reference"], file["description"]) for file in files} == {
+        ("D-1", "First"),
+        ("D-2", "Second"),
     }
+    assert all(file["barcode"].startswith("FIL-") for file in files)
 
 
 def test_return_request_snapshots_current_files_and_keeps_them_immutable(

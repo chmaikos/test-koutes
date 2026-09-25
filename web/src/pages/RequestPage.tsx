@@ -37,6 +37,7 @@ import {
   canSubmitReturnSelection,
   returnCandidateIds,
   returnSourceLabel,
+  returnSourceLotsLabel,
   palletCandidateIds,
   toggleReturnBox,
   toggleReturnPallet,
@@ -636,6 +637,9 @@ function CreateRequestDialog({ onClose }: { onClose: () => void }) {
     direction === "return" &&
     !!returnSources.data &&
     !returnSources.data.some((source) => source.eligible_quantity > 0);
+  const selectedReturnSource = returnSources.data?.find(
+    (source) => source.id === sourceInboundRequestId,
+  );
 
   return (
     <div className="modal-backdrop" role="presentation">
@@ -933,6 +937,7 @@ function CreateRequestDialog({ onClose }: { onClose: () => void }) {
                         disabled={source.eligible_quantity === 0}
                       >
                         {returnSourceLabel(source.origin)} #{source.id} ·{" "}
+                        {returnSourceLotsLabel(source.lots)} ·{" "}
                         {source.eligible_quantity} of{" "}
                         {source.delivered_quantity} boxes ready ·{" "}
                         {source.pallets.length} pallet
@@ -943,6 +948,17 @@ function CreateRequestDialog({ onClose }: { onClose: () => void }) {
                     ))}
                   </select>
                 </label>
+
+                {selectedReturnSource && (
+                  <div className="rounded-lg border border-brand-200 bg-brand-50 px-3 py-2">
+                    <p className="text-xs font-medium uppercase tracking-wide text-brand-700">
+                      Inbound request lot
+                    </p>
+                    <p className="mt-1 text-sm font-semibold text-brand-900">
+                      {returnSourceLotsLabel(selectedReturnSource.lots)}
+                    </p>
+                  </div>
+                )}
 
                 {sourceInboundRequestId && (
                   <div className="rounded-lg border border-slate-200">

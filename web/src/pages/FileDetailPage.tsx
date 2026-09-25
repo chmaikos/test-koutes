@@ -12,6 +12,11 @@ import {
   useWarehouses,
 } from "@/api/hooks";
 import type { TrackedFile } from "@/api/types";
+import { BarcodeDisplay } from "@/components/BarcodeDisplay";
+import {
+  PrintableLabelDialog,
+  PrintLabelButton,
+} from "@/components/PrintableLabelDialog";
 import { useHasRole } from "@/components/RoleGate";
 import { STATUS_LABEL, StatusBadge } from "@/components/StatusBadge";
 
@@ -25,6 +30,7 @@ export function FileDetailPage() {
   const events = useFileEvents(fileId);
   const canWrite = useHasRole(["admin", "operator"]);
   const [action, setAction] = useState<Action | null>(null);
+  const [printLabel, setPrintLabel] = useState(false);
 
   if (file.isLoading) return <p role="status" className="text-sm text-slate-500">Loading physical File…</p>;
   if (file.isError || !file.data) {
@@ -62,6 +68,7 @@ export function FileDetailPage() {
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
+            <PrintLabelButton onClick={() => setPrintLabel(true)} />
             {canWrite && item.is_active && (
               <>
                 <button className="btn-secondary" onClick={() => setAction("edit")}><Pencil className="h-4 w-4" /> Edit</button>
@@ -74,9 +81,14 @@ export function FileDetailPage() {
             )}
           </div>
         </div>
+        <div>
+          <p className="mb-2 text-xs font-medium uppercase tracking-wider text-slate-400">
+            Generated immutable barcode
+          </p>
+          <BarcodeDisplay value={item.barcode} />
+        </div>
         <dl className="grid gap-4 text-sm sm:grid-cols-2 lg:grid-cols-4">
           <Field label="Description">{item.description || "—"}</Field>
-          <Field label="Barcode"><span className="font-mono">{item.barcode || "—"}</span></Field>
           <Field label="Inherited warehouse">{item.warehouse}</Field>
           <Field label="Inherited Box status"><StatusBadge status={item.status} /></Field>
           <Field label="Position in Box">{item.position}</Field>
@@ -113,6 +125,22 @@ export function FileDetailPage() {
       </section>
 
       {action && <FileActionDialog file={item} action={action} onClose={() => setAction(null)} />}
+      {printLabel && (
+        <PrintableLabelDialog
+          label={{
+            entityType: "File",
+            title: item.reference,
+            barcode: item.barcode,
+            context: [
+              `Lot: ${item.lot}`,
+              `Pallet: ${item.pallet ?? "Unassigned"}`,
+              `Box: ${item.box}`,
+              `Warehouse: ${item.warehouse}`,
+            ],
+          }}
+          onClose={() => setPrintLabel(false)}
+        />
+      )}
     </div>
   );
 }
@@ -139,7 +167,6 @@ function FileActionDialog({
   const warehouses = useWarehouses(true);
   const [reference, setReference] = useState(file.reference);
   const [description, setDescription] = useState(file.description ?? "");
-  const [barcode, setBarcode] = useState(file.barcode ?? "");
   const [boxId, setBoxId] = useState<number | "">(file.box_id);
   const [reason, setReason] = useState("");
   const [force, setForce] = useState(false);
@@ -166,7 +193,6 @@ function FileActionDialog({
             expected_version: file.version,
             reference: reference.trim(),
             description: description.trim() || null,
-            barcode: barcode.trim() || null,
             force: effectiveForce,
             reason: effectiveForce ? reason.trim() || undefined : undefined,
           },
@@ -207,7 +233,9 @@ function FileActionDialog({
           <div className="mt-4 space-y-3">
             <label className="block"><span className="text-xs text-slate-500">Reference</span><input required className="input" maxLength={255} value={reference} onChange={(event) => setReference(event.target.value)} /></label>
             <label className="block"><span className="text-xs text-slate-500">Description</span><textarea className="input" rows={3} maxLength={10000} value={description} onChange={(event) => setDescription(event.target.value)} /></label>
-            <label className="block"><span className="text-xs text-slate-500">Barcode</span><input className="input" maxLength={255} value={barcode} onChange={(event) => setBarcode(event.target.value)} /></label>
+            <p className="rounded-md bg-slate-50 p-3 text-xs text-slate-600">
+              The immutable File barcode is generated automatically and cannot be edited.
+            </p>
           </div>
         )}
         {action === "move" && (

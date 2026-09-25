@@ -24,6 +24,7 @@ class PalletStatusCounts(BaseModel):
 
 class PalletSummaryOut(BaseModel):
     id: int
+    barcode: str
     lot_id: int
     lot_name: str
     warehouse_ids: list[int]
@@ -60,6 +61,7 @@ class PalletDetailOut(PalletSummaryOut):
 
 class PalletOptionOut(BaseModel):
     id: int
+    barcode: str
     pallet_number: str
     normalized_pallet_number: str
     lot_id: int

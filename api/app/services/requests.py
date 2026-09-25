@@ -134,7 +134,6 @@ def _staged_file_values(item: InboundBoxItem) -> list[IntakeFile]:
             IntakeFile(
                 reference=file.reference,
                 description=file.description,
-                barcode=file.barcode,
             )
             for file in item.files
         ]
@@ -242,6 +241,7 @@ class ReturnSource:
     origin: BoxRequestOrigin
     delivered_quantity: int
     eligible_quantity: int
+    lots: list[dict[str, object]]
     pallets: list[dict[str, object]]
     has_unassigned_boxes: bool
 
@@ -734,6 +734,11 @@ def list_return_sources(
             for item in source.items
             if item.pallet_id is not None or item.pallet is not None
         }
+        lot_contexts = {
+            (item.lot_id, item.lot)
+            for item in source.items
+            if item.lot_id is not None or item.lot
+        }
         results.append(
             ReturnSource(
                 id=source.id,
@@ -742,6 +747,17 @@ def list_return_sources(
                 origin=source.origin,
                 delivered_quantity=delivered_quantity,
                 eligible_quantity=eligible_quantity,
+                lots=[
+                    {"lot_id": lot_id, "lot_name": lot_name}
+                    for lot_id, lot_name in sorted(
+                        lot_contexts,
+                        key=lambda value: (
+                            (value[1] or "").casefold(),
+                            value[0] or 0,
+                        ),
+                    )
+                    if lot_name
+                ],
                 pallets=[
                     {"pallet_id": pallet_id, "pallet_number": pallet_number}
                     for pallet_id, pallet_number in sorted(
@@ -772,6 +788,20 @@ def _event(
     occurred_at: datetime | None = None,
     metadata: dict[str, object] | None = None,
 ) -> BoxRequestEvent:
+    barcode_snapshots = [
+        {
+            "request_item_id": item.id,
+            "lot_barcode": item.lot_barcode,
+            "pallet_barcode": item.pallet_barcode,
+            "box_barcode": item.box_barcode,
+            "file_barcodes": [
+                snapshot.barcode
+                for snapshot in item.file_snapshots
+                if snapshot.barcode is not None
+            ],
+        }
+        for item in sorted(request.items, key=lambda candidate: candidate.position)
+    ]
     return BoxRequestEvent(
         request_id=request.id,
         event_type=event_type,
@@ -780,7 +810,10 @@ def _event(
         user_id=user.id,
         note=note,
         occurred_at=occurred_at or datetime.now(UTC),
-        event_metadata=metadata or {},
+        event_metadata={
+            **(metadata or {}),
+            "barcode_snapshots": barcode_snapshots,
+        },
     )
 
 
@@ -849,9 +882,12 @@ def create_completed_receipt(
             box_id=box.id,
             lot_id=box.lot_id,
             lot=box.lot,
+            lot_barcode=box.lot_record.barcode,
             pallet_id=box.pallet_id,
             pallet=_pallet_number_for_box(db, box),
+            pallet_barcode=box.pallet.barcode if box.pallet is not None else None,
             box_number=box.box_number,
+            box_barcode=box.barcode,
             contents=box.contents,
         )
         db.add(item)
@@ -991,8 +1027,10 @@ def create_staged_receipt(
             position=position,
             lot_id=lot_record.id,
             lot=lot_record.name,
+            lot_barcode=lot_record.barcode,
             pallet_id=pallet.id if pallet is not None else None,
             pallet=pallet.pallet_number if pallet is not None else None,
+            pallet_barcode=pallet.barcode if pallet is not None else None,
             box_number=item.box_number,
             contents=item.contents,
         )
@@ -1161,7 +1199,6 @@ def finalize_staged_receipt(
                     FileInput(
                         reference=snapshot.reference,
                         description=snapshot.description,
-                        barcode=snapshot.barcode,
                     )
                     for snapshot in item.file_snapshots
                 ]
@@ -1210,6 +1247,11 @@ def finalize_staged_receipt(
             if box is None:
                 raise RequestConflictError("archived box disappeared during finalization")
             item.box_id = box.id
+            item.box_barcode = box.barcode
+            if item.lot_barcode is None:
+                item.lot_barcode = box.lot_record.barcode
+            if item.pallet_barcode is None and box.pallet is not None:
+                item.pallet_barcode = box.pallet.barcode
             current_files = _active_files_by_box_ids(db, [box.id], lock=True)[box.id]
             by_reference = {
                 file.normalized_reference: file for file in current_files
@@ -1223,6 +1265,7 @@ def finalize_staged_receipt(
                         f"staged file {snapshot.reference!r} was not created"
                     )
                 snapshot.file_id = file.id
+                snapshot.barcode = file.barcode
     except (BoxRuleError, IntegrityError) as exc:
         db.rollback()
         detail = (
@@ -1443,9 +1486,14 @@ def create_request(
                 box_id=box.id,
                 lot_id=box.lot_id,
                 lot=box.lot,
+                lot_barcode=box.lot_record.barcode,
                 pallet_id=box.pallet_id,
                 pallet=_pallet_number_for_box(db, box),
+                pallet_barcode=(
+                    box.pallet.barcode if box.pallet is not None else None
+                ),
                 box_number=box.box_number,
+                box_barcode=box.barcode,
                 contents=box.contents,
             )
             db.add(item)
@@ -2574,7 +2622,6 @@ def _inbound_file_values(item: InboundBoxItem) -> list[IntakeFile]:
             IntakeFile(
                 reference=file.reference,
                 description=file.description,
-                barcode=file.barcode,
             )
             for file in item.files
         ]
@@ -3073,7 +3120,6 @@ def _classify_inbound_completion(
                 changed = (
                     existing_file.reference != value.reference
                     or existing_file.description != value.description
-                    or existing_file.barcode != value.barcode
                 )
                 action = "update" if changed else "preserve"
                 file_blocked_code = None
@@ -3112,7 +3158,11 @@ def _classify_inbound_completion(
                     action=action,
                     reference=value.reference,
                     description=value.description,
-                    barcode=value.barcode,
+                    barcode=(
+                        existing_file.barcode
+                        if existing_file is not None
+                        else None
+                    ),
                     file_id=existing_file.id if existing_file is not None else None,
                     file_version=(
                         existing_file.version if existing_file is not None else None
@@ -3717,9 +3767,14 @@ def complete_request(
                     box_id=box.id,
                     lot_id=box.lot_id,
                     lot=box.lot,
+                    lot_barcode=box.lot_record.barcode,
                     pallet_id=box.pallet_id,
                     pallet=_pallet_number_for_box(db, box),
+                    pallet_barcode=(
+                        box.pallet.barcode if box.pallet is not None else None
+                    ),
                     box_number=box.box_number,
+                    box_barcode=box.barcode,
                     contents=box.contents,
                 )
                 db.add(request_item)
@@ -4078,9 +4133,12 @@ def submit_follow_up_draft(
             box_id=box.id,
             lot_id=box.lot_id,
             lot=box.lot,
+            lot_barcode=box.lot_record.barcode,
             pallet_id=box.pallet_id,
             pallet=_pallet_number_for_box(db, box),
+            pallet_barcode=box.pallet.barcode if box.pallet is not None else None,
             box_number=box.box_number,
+            box_barcode=box.barcode,
             contents=box.contents,
         )
         db.add(item)

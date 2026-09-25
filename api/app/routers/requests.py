@@ -25,7 +25,11 @@ from sqlalchemy.orm import aliased
 from app.config import get_settings
 from app.deps import CurrentUser, DbSession, require_warehouse_mover
 from app.events import bus, publish_notification_event
+from app.models.barcode_identities import BarcodeIdentity
+from app.models.boxes import Box
+from app.models.lots import Lot
 from app.models.notifications import RequestNotificationKind
+from app.models.pallets import Pallet
 from app.models.requests import (
     BoxRequest,
     BoxRequestAttachment,
@@ -39,6 +43,7 @@ from app.models.requests import (
     BoxRequestEventType,
     BoxRequestExceptionKind,
     BoxRequestItem,
+    BoxRequestItemFileSnapshot,
     BoxRequestOrigin,
     BoxRequestPriority,
     BoxRequestStatus,
@@ -566,6 +571,36 @@ def list_requests(
                         or_(
                             BoxRequestItem.pallet.ilike(needle),
                             cast(BoxRequestItem.pallet_id, String).ilike(needle),
+                            BoxRequestItem.box_id.in_(
+                                select(Box.id).where(
+                                    Box.barcode_identity.has(
+                                        BarcodeIdentity.barcode.ilike(needle)
+                                    )
+                                )
+                            ),
+                            BoxRequestItem.lot_id.in_(
+                                select(Lot.id).where(
+                                    Lot.barcode_identity.has(
+                                        BarcodeIdentity.barcode.ilike(needle)
+                                    )
+                                )
+                            ),
+                            BoxRequestItem.pallet_id.in_(
+                                select(Pallet.id).where(
+                                    Pallet.barcode_identity.has(
+                                        BarcodeIdentity.barcode.ilike(needle)
+                                    )
+                                )
+                            ),
+                            BoxRequestItem.id.in_(
+                                select(
+                                    BoxRequestItemFileSnapshot.request_item_id
+                                ).where(
+                                    BoxRequestItemFileSnapshot.barcode.ilike(
+                                        needle
+                                    )
+                                )
+                            ),
                         )
                     )
                 ),

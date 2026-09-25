@@ -8,7 +8,6 @@ export function cleanFileItems(items: FileInput[]): FileInput[] {
   return items.map((item) => ({
     reference: item.reference.trim().replace(/\s+/g, " "),
     description: item.description?.trim() || undefined,
-    barcode: item.barcode?.trim() || undefined,
   }));
 }
 

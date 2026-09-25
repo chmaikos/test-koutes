@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     CheckConstraint,
     DateTime,
     Enum,
@@ -17,12 +18,15 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    select,
 )
+from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 
 from app.db import Base
 
 if TYPE_CHECKING:
+    from app.models.barcode_identities import BarcodeIdentity
     from app.models.boxes import Box
     from app.models.lots import Lot
     from app.models.requests import BoxRequestItemFileSnapshot
@@ -98,10 +102,15 @@ class BoxFile(Base):
         ),
         Index("ix_box_files_lot_archived", "lot_id", "archived_at"),
         Index("ix_box_files_box_archived", "box_id", "archived_at"),
-        Index("ix_box_files_barcode", "barcode"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    barcode_identity_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("barcode_identities.id", ondelete="RESTRICT"),
+        nullable=False,
+        unique=True,
+    )
     lot_id: Mapped[int] = mapped_column(ForeignKey("lots.id", ondelete="RESTRICT"), nullable=False)
     box_id: Mapped[int] = mapped_column(nullable=False)
     reference: Mapped[str] = mapped_column(String(MAX_BOX_FILE_REFERENCE_LENGTH), nullable=False)
@@ -109,7 +118,6 @@ class BoxFile(Base):
         String(MAX_BOX_FILE_REFERENCE_LENGTH), nullable=False
     )
     description: Mapped[str | None] = mapped_column(Text)
-    barcode: Mapped[str | None] = mapped_column(String(255))
     position: Mapped[int] = mapped_column(Integer, nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -136,6 +144,11 @@ class BoxFile(Base):
     __mapper_args__ = {"version_id_col": version}
 
     lot: Mapped[Lot] = relationship(back_populates="files", overlaps="box,files")
+    barcode_identity: Mapped[BarcodeIdentity] = relationship(
+        "BarcodeIdentity",
+        foreign_keys=[barcode_identity_id],
+        lazy="joined",
+    )
     box: Mapped[Box] = relationship(back_populates="files", overlaps="files,lot")
     events: Mapped[list[BoxFileEvent]] = relationship(
         back_populates="file",
@@ -152,6 +165,21 @@ class BoxFile(Base):
         cleaned = clean_box_file_reference(value)
         self.normalized_reference = cleaned.lower()
         return cleaned
+
+    @hybrid_property
+    def barcode(self) -> str:
+        return self.barcode_identity.barcode
+
+    @barcode.inplace.expression
+    @classmethod
+    def _barcode_expression(cls):
+        from app.models.barcode_identities import BarcodeIdentity
+
+        return (
+            select(BarcodeIdentity.barcode)
+            .where(BarcodeIdentity.id == cls.barcode_identity_id)
+            .scalar_subquery()
+        )
 
 
 class BoxFileEvent(Base):

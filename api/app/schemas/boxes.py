@@ -14,6 +14,7 @@ class BoxOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    barcode: str
     box_number: str
     lot: str
     lot_id: int

@@ -30,7 +30,8 @@ export function FileItemsEditor({
       <legend className="px-1 text-sm font-semibold text-slate-800">{label}</legend>
       <p className="text-xs text-slate-600">
         Track the physical Files contained in this Box. These are inventory
-        items, not uploaded ERP documents.
+        items, not uploaded ERP documents. Each immutable File barcode is
+        generated automatically after save.
       </p>
       {value.map((item, index) => (
         <div
@@ -64,16 +65,6 @@ export function FileItemsEditor({
               }
             />
           </label>
-          <label className="block">
-            <span className="text-xs font-medium text-slate-600">Barcode</span>
-            <input
-              className="input"
-              maxLength={255}
-              value={item.barcode ?? ""}
-              disabled={disabled}
-              onChange={(event) => update(index, { barcode: event.target.value })}
-            />
-          </label>
           <button
             type="button"
             className="btn-ghost self-end text-rose-600"
@@ -95,7 +86,7 @@ export function FileItemsEditor({
           type="button"
           className="btn-secondary"
           disabled={disabled}
-          onClick={() => onChange([...value, { reference: "", description: "", barcode: "" }])}
+          onClick={() => onChange([...value, { reference: "", description: "" }])}
         >
           <Plus className="h-4 w-4" /> Add File
         </button>

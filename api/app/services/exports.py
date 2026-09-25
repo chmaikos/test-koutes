@@ -20,6 +20,7 @@ from app.services.productivity import EmployeeAverages
 
 EXPORT_COLUMNS = [
     "Box Number",
+    "Barcode",
     "Lot",
     "Pallet ID",
     "Pallet Number",
@@ -38,7 +39,7 @@ EXPORT_COLUMNS = [
 
 # Indices of columns whose values are datetimes. Used by the XLSX writer to
 # apply a date number_format and by the CSV writer to format them as text.
-_DATETIME_COLUMN_INDICES = (11, 12, 13, 14)
+_DATETIME_COLUMN_INDICES = (12, 13, 14, 15)
 
 STATUS_LABELS: dict[BoxStatus, str] = {
     BoxStatus.quarantined: "Quarantined",
@@ -117,6 +118,7 @@ REQUEST_ANALYTICS_COLUMNS = [
 
 LOT_SUMMARY_COLUMNS = [
     "Lot ID",
+    "Barcode",
     "Lot",
     "Physical Box Count",
     "Total Non-Archived Boxes",
@@ -143,6 +145,7 @@ LOT_SUMMARY_COLUMNS = [
 
 PALLET_SUMMARY_COLUMNS = [
     "Pallet ID",
+    "Barcode",
     "Pallet Number",
     "Lot ID",
     "Lot",
@@ -232,6 +235,7 @@ def _row_for(box: Box, warehouses: Mapping[int, str]) -> list:
         summary = f"'{summary}"
     return [
         box.box_number,
+        box.barcode,
         box.lot,
         getattr(box, "pallet_id", None),
         getattr(box, "pallet_number", None) or "",
@@ -361,6 +365,7 @@ def _lot_summary_row(summary: LotSummary) -> list:
     counts = summary.status_counts
     return [
         summary.id,
+        summary.barcode,
         summary.name,
         summary.physical_box_count,
         summary.box_count,
@@ -414,6 +419,7 @@ def lot_summaries_to_xlsx(summaries: Iterable[LotSummary]) -> bytes:
 def _pallet_summary_row(summary: PalletSummary) -> list:
     return [
         summary.id,
+        summary.barcode,
         summary.pallet_number,
         summary.lot_id,
         summary.lot_name,

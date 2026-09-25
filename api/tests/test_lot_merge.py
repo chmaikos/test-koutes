@@ -11,6 +11,7 @@ from app.deps import get_current_user
 from app.events import bus
 from app.main import app
 from app.models import (
+    BarcodeIdentity,
     Box,
     BoxEvent,
     BoxEventType,
@@ -573,6 +574,7 @@ def test_archived_overwrite_executes_with_active_source_survivor(
     source = _box(client, "9", "Overwrite Source")
     target = _box(client, "9", "Overwrite Target")
     target_box = session.get(Box, target["id"])
+    removed_identity_id = target_box.barcode_identity_id
     target_box.archived_at = datetime.now(UTC)
     session.commit()
     source_lot = session.get(Lot, source["lot_id"])
@@ -611,6 +613,14 @@ def test_archived_overwrite_executes_with_active_source_survivor(
     session.expire_all()
     assert session.get(Box, source["id"]).lot_id == target_lot.id
     assert session.get(Box, target["id"]) is None
+    removed_identity = session.get(BarcodeIdentity, removed_identity_id)
+    assert removed_identity is not None
+    assert removed_identity.retired_at is not None
+    assert (
+        removed_identity.retirement_metadata["operation"]
+        == "lot_merge_archived_collision_overwrite"
+    )
+    assert removed_identity.retirement_metadata["hierarchy"]["box_id"] == target["id"]
     assert session.get(Lot, source_lot.id).merged_into_lot_id == target_lot.id
     target_items = session.scalars(
         select(BoxRequestItem).where(BoxRequestItem.box_id == source["id"])

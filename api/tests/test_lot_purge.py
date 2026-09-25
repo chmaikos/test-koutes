@@ -11,6 +11,8 @@ from app.deps import get_current_user
 from app.events import bus
 from app.main import app
 from app.models import (
+    BarcodeEntityKind,
+    BarcodeIdentity,
     Box,
     BoxEvent,
     BoxRequest,
@@ -574,6 +576,7 @@ def test_transactional_purge_deletes_complete_owned_graph_and_preserves_sibling(
     admin = make_user(UserRole.admin)
     lot_id = lot.id
     box_ids = [box.id for box in boxes]
+    identity_ids = [lot.barcode_identity_id, *[box.barcode_identity_id for box in boxes]]
     request_ids = [request.id for request in requests]
     deleted_keys: list[str] = []
     monkeypatch.setattr(
@@ -605,6 +608,21 @@ def test_transactional_purge_deletes_complete_owned_graph_and_preserves_sibling(
     assert session.get(Lot, lot_id) is None
     assert session.get(BoxRequest, sibling_request.id) is not None
     assert session.get(Box, sibling.id) is not None
+    retired_identities = list(
+        session.scalars(
+            select(BarcodeIdentity)
+            .where(BarcodeIdentity.id.in_(identity_ids))
+            .order_by(BarcodeIdentity.id)
+        ).all()
+    )
+    assert len(retired_identities) == len(identity_ids)
+    assert all(identity.retired_at is not None for identity in retired_identities)
+    assert {
+        identity.retirement_metadata["operation"] for identity in retired_identities
+    } == {"lot_purge"}
+    assert {
+        identity.entity_kind for identity in retired_identities
+    } == {BarcodeEntityKind.lot, BarcodeEntityKind.box}
     for model in (
         BoxRequestItem,
         BoxRequestEvent,

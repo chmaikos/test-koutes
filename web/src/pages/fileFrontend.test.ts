@@ -58,10 +58,10 @@ describe("physical File filters and validation", () => {
     ).toMatch(/duplicated/i);
     expect(
       cleanFileItems([
-        { reference: " FILE  1 ", description: " Notes ", barcode: " 123 " },
+        { reference: " FILE  1 ", description: " Notes " },
       ]),
     ).toEqual([
-      { reference: "FILE 1", description: "Notes", barcode: "123" },
+      { reference: "FILE 1", description: "Notes" },
     ]);
   });
 });

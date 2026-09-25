@@ -25,6 +25,10 @@ import {
 import clsx from "clsx";
 import { useDashboard, useMe } from "@/api/hooks";
 import { useLiveStream } from "@/hooks/useLiveStream";
+import {
+  BarcodeScannerDialog,
+  ScanBarcodeButton,
+} from "@/components/BarcodeScannerDialog";
 import { NotificationCenter } from "@/components/NotificationCenter";
 
 interface NavItem {
@@ -76,6 +80,7 @@ export function AppShell() {
   useLiveStream();
 
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [scannerOpen, setScannerOpen] = useState(false);
   const location = useLocation();
 
   // Auto-close the drawer on every navigation so an in-drawer NavLink
@@ -103,6 +108,9 @@ export function AppShell() {
         <div className="flex-1 overflow-y-auto bg-slate-50">
           <AlertsBanner count={openAlerts} />
           <div className="mx-auto max-w-7xl px-4 py-5 pb-24 md:p-6 md:pb-6">
+            <div className="mb-4 flex justify-end">
+              <ScanBarcodeButton onClick={() => setScannerOpen(true)} />
+            </div>
             <Outlet />
           </div>
         </div>
@@ -115,6 +123,9 @@ export function AppShell() {
         items={items}
         openAlerts={openAlerts}
       />
+      {scannerOpen && (
+        <BarcodeScannerDialog onClose={() => setScannerOpen(false)} />
+      )}
     </div>
   );
 }

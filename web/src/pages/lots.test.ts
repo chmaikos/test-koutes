@@ -53,8 +53,8 @@ function mergeCandidateFixture(
   overrides: Partial<LotMergeCandidate> = {},
 ): LotMergeCandidate {
   return {
-    source: { id: 1, name: "Source", version: 3 },
-    target: { id: 2, name: "Target", version: 5 },
+    source: { id: 1, barcode: "LOT-000000000001-7", name: "Source", version: 3 },
+    target: { id: 2, barcode: "LOT-000000000002-4", name: "Target", version: 5 },
     merge_allowed: true,
     overlapping_box_numbers: [],
     overlapping_box_count: 0,
@@ -144,6 +144,7 @@ describe("lot picker identity", () => {
   const options: LotOption[] = [
     {
       id: 7,
+      barcode: "LOT-000000000007-9",
       name: "Spring Intake",
       normalized_name: "spring intake",
       exact_normalized_match: true,
@@ -282,8 +283,8 @@ describe("audited lot changes", () => {
 
   it("hard-blocks active overlaps and parses refreshed merge candidates", () => {
     const blocked = mergeCandidateFixture({
-      source: { id: 1, name: "Source", version: 4 },
-      target: { id: 2, name: "Target", version: 6 },
+      source: { id: 1, barcode: "LOT-000000000001-7", name: "Source", version: 4 },
+      target: { id: 2, barcode: "LOT-000000000002-4", name: "Target", version: 6 },
       merge_allowed: false,
       overlapping_box_numbers: ["001", "009"],
       overlapping_box_count: 2,

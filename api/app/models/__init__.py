@@ -4,6 +4,12 @@ from app.models.alerts import (
     AlertNotificationKind,
     AlertType,
 )
+from app.models.barcode_identities import (
+    BarcodeEntityKind,
+    BarcodeFileMigrationAudit,
+    BarcodeIdentity,
+    BarcodeIssuanceCounter,
+)
 from app.models.box_files import BoxFile, BoxFileEvent, BoxFileEventType
 from app.models.boxes import Box, BoxEvent, BoxEventType, BoxStatus
 from app.models.employees import (
@@ -58,6 +64,10 @@ __all__ = [
     "AlertNotification",
     "AlertNotificationKind",
     "AlertType",
+    "BarcodeEntityKind",
+    "BarcodeFileMigrationAudit",
+    "BarcodeIdentity",
+    "BarcodeIssuanceCounter",
     "Box",
     "BoxFile",
     "BoxFileEvent",
