@@ -135,6 +135,7 @@ class Lot(Base):
         "BarcodeIdentity",
         foreign_keys=[barcode_identity_id],
         lazy="joined",
+        innerjoin=True,
     )
     files: Mapped[list[BoxFile]] = relationship(
         back_populates="lot",

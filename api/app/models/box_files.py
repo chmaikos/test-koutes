@@ -148,6 +148,7 @@ class BoxFile(Base):
         "BarcodeIdentity",
         foreign_keys=[barcode_identity_id],
         lazy="joined",
+        innerjoin=True,
     )
     box: Mapped[Box] = relationship(back_populates="files", overlaps="files,lot")
     events: Mapped[list[BoxFileEvent]] = relationship(

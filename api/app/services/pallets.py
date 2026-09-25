@@ -239,7 +239,7 @@ def _visible_pallet(
         _scoped_boxes, represented = _visibility_sources(user)
         stmt = stmt.where(Pallet.lot_id.in_(select(represented.c.lot_id)))
     if lock:
-        stmt = stmt.with_for_update()
+        stmt = stmt.with_for_update(of=Pallet)
     pallet = db.scalar(stmt)
     if pallet is None:
         raise PalletNotFoundError(f"pallet {pallet_id} not found")

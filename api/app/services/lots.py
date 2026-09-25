@@ -622,7 +622,7 @@ def _active_lot_use_statement(lot_ids: list[int]):
             Lot.merged_into_lot_id.is_(None),
         )
         .order_by(Lot.id)
-        .with_for_update(read=True)
+        .with_for_update(read=True, of=Lot)
     )
 
 
@@ -632,7 +632,7 @@ def _exclusive_lot_statement(lot_ids: list[int]):
         select(Lot)
         .where(Lot.id.in_(sorted(set(lot_ids))))
         .order_by(Lot.id)
-        .with_for_update()
+        .with_for_update(of=Lot)
         .execution_options(populate_existing=True)
     )
 
@@ -5258,7 +5258,9 @@ def rename_lot(
         raise LotRuleError("a reason is required to rename a lot")
     cleaned_name = validate_lot_name(new_name)
     normalized = normalize_lot_name(cleaned_name)
-    lot = db.scalar(select(Lot).where(Lot.id == lot_id).with_for_update())
+    lot = db.scalar(
+        select(Lot).where(Lot.id == lot_id).with_for_update(of=Lot)
+    )
     if lot is None:
         raise LotNotFoundError(f"lot {lot_id} not found")
     if lot.merged_into_lot_id is not None:

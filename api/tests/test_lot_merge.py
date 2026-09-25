@@ -6,6 +6,7 @@ import pytest
 from pydantic import ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.dialects import postgresql, sqlite
+from sqlalchemy.orm import joinedload
 
 from app.deps import get_current_user
 from app.events import bus
@@ -89,10 +90,22 @@ def test_lot_identity_lock_sql_is_postgresql_specific_and_ordered():
 
     assert "lots.id IN (3, 9)" in shared
     assert "ORDER BY lots.id" in shared
-    assert shared.endswith("FOR SHARE")
-    assert exclusive.endswith("FOR UPDATE")
+    assert shared.endswith("FOR SHARE OF lots")
+    assert exclusive.endswith("FOR UPDATE OF lots")
     assert "FOR SHARE" not in sqlite_shared
     assert "FOR UPDATE" not in sqlite_shared
+
+    eager = str(
+        _active_lot_use_statement([9, 3])
+        .options(joinedload(Lot.barcode_identity))
+        .compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    assert "INNER JOIN barcode_identities" in eager
+    assert "LEFT OUTER JOIN barcode_identities" not in eager
+    assert eager.endswith("FOR SHARE OF lots")
 
 
 def test_box_lock_targets_boxes_when_eager_lot_join_is_present():

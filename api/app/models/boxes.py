@@ -105,6 +105,7 @@ class Box(Base):
         "BarcodeIdentity",
         foreign_keys=[barcode_identity_id],
         lazy="joined",
+        innerjoin=True,
     )
     pallet_id: Mapped[int | None] = mapped_column(
         ForeignKey("pallets.id", ondelete="SET NULL"), nullable=True, index=True

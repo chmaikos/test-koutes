@@ -151,6 +151,7 @@ class Pallet(Base):
         "BarcodeIdentity",
         foreign_keys=[barcode_identity_id],
         lazy="joined",
+        innerjoin=True,
     )
     boxes: Mapped[list[Box]] = relationship(back_populates="pallet")
     events: Mapped[list[PalletEvent]] = relationship(
