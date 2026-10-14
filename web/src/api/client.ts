@@ -12,8 +12,18 @@ const baseURL = (import.meta.env.VITE_API_BASE_URL as string) || "/api";
 
 export const api = axios.create({ baseURL });
 
+function authIdentity(): string | null {
+  const local = getLocalToken();
+  if (local) return `local:${local}`;
+  const account = msalInstance.getActiveAccount() ?? msalInstance.getAllAccounts()[0];
+  return account ? `sso:${account.homeAccountId}` : null;
+}
+
+type SessionConfig = InternalAxiosRequestConfig & { warehouseAuthIdentity?: string | null };
+
 api.interceptors.request.use(
   async (config: InternalAxiosRequestConfig) => {
+    (config as SessionConfig).warehouseAuthIdentity = authIdentity();
     config.headers = config.headers ?? {};
     const localToken = getLocalToken();
     if (localToken) {
@@ -25,10 +35,10 @@ api.interceptors.request.use(
       // the API will return 401 and the AuthGate will be visible already.
       return config;
     }
-    const accounts = msalInstance.getAllAccounts();
-    if (accounts.length > 0) {
+    const account = msalInstance.getActiveAccount() ?? msalInstance.getAllAccounts()[0];
+    if (account) {
       try {
-        const token = await acquireApiToken(accounts[0]);
+        const token = await acquireApiToken(account);
         config.headers.Authorization = `Bearer ${token}`;
       } catch (err) {
         console.warn("[api] failed to acquire token", err);
@@ -51,6 +61,11 @@ api.interceptors.response.use(
   (error) => {
     const status = error?.response?.status;
     if (status === 401) {
+      // A delayed rejection from the previous account must not sign out the
+      // session that replaced it while this request was in flight.
+      if (error.config?.warehouseAuthIdentity !== authIdentity()) {
+        return Promise.reject(error);
+      }
       const hadLocal = getLocalToken() !== null;
       if (hadLocal) {
         clearLocalSession();

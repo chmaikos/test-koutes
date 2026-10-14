@@ -77,13 +77,9 @@ def list_employees(
     stmt = apply_warehouse_filter(stmt, user, Employee.warehouse_id)
     # Count BEFORE pagination so ``total`` reflects every row that
     # matches the filters, not just the current page.
-    total = int(
-        db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    )
+    total = int(db.scalar(select(func.count()).select_from(stmt.subquery())) or 0)
     rows = db.scalars(
-        stmt.order_by(Employee.full_name)
-        .offset((page - 1) * page_size)
-        .limit(page_size)
+        stmt.order_by(Employee.full_name).offset((page - 1) * page_size).limit(page_size)
     ).all()
     return EmployeePage(
         items=[EmployeeOut.model_validate(e) for e in rows],
@@ -114,8 +110,7 @@ async def preview_employee_import(
                 name=sheet.name,
                 max_columns=sheet.max_columns,
                 rows=[
-                    XlsxPreviewRow(row_number=row.row_number, cells=row.cells)
-                    for row in sheet.rows
+                    XlsxPreviewRow(row_number=row.row_number, cells=row.cells) for row in sheet.rows
                 ],
             )
             for sheet in sheets
@@ -188,7 +183,7 @@ def update_employee(
     db: DbSession,
     user: Annotated[CurrentUser, Depends(require_admin)],
 ) -> EmployeeOut:
-    emp = db.get(Employee, employee_id)
+    emp = db.scalar(select(Employee).where(Employee.id == employee_id).with_for_update())
     if emp is None:
         raise HTTPException(status_code=404, detail="employee not found")
     _ensure_warehouse(db, emp.warehouse_id)
@@ -226,7 +221,7 @@ def delete_employee(
     Admins who really want a hard delete can do it from the database
     directly; the API intentionally does not expose that path.
     """
-    emp = db.get(Employee, employee_id)
+    emp = db.scalar(select(Employee).where(Employee.id == employee_id).with_for_update())
     if emp is None:
         raise HTTPException(status_code=404, detail="employee not found")
     # ACL parity with the rest of the API: even admins are blocked from

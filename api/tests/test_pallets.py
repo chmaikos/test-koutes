@@ -644,9 +644,11 @@ def test_migration_metadata_offline_sql_and_single_head() -> None:
     root = Path(__file__).parents[1]
     config = Config(str(root / "alembic.ini"))
     config.set_main_option("script_location", str(root / "alembic"))
-    assert ScriptDirectory.from_config(config).get_heads() == [
-        "0036_barcode_registry"
-    ]
+    script = ScriptDirectory.from_config(config)
+    heads = script.get_heads()
+    assert len(heads) == 1
+    revisions = {revision.revision for revision in script.iterate_revisions(heads[0], "base")}
+    assert migration.revision in revisions
     assert migration.down_revision == "0031_return_target_warehouse"
 
 

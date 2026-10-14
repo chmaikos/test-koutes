@@ -6,10 +6,8 @@ import path from "node:path";
 export default defineConfig({
   plugins: [
     react(),
-    // Workbox-backed PWA: precaches the bundled app shell, runtime-caches
-    // GET /api/* with NetworkFirst (so a poor warehouse Wi-Fi still shows
-    // the last-loaded list), and explicitly opts the SSE endpoint and the
-    // MSAL redirect URLs out so they aren't ever served from cache.
+    // Precache the app shell; authenticated warehouse APIs always need the
+    // network so a shared device cannot reuse another account's responses.
     VitePWA({
       registerType: "autoUpdate",
       includeAssets: [
@@ -66,43 +64,12 @@ export default defineConfig({
           // those should hit the network so MSAL can parse the response.
           /[?&](code|state|error)=/,
         ],
+        importScripts: ["purge-api-caches.js"],
         runtimeCaching: [
           {
-            // Long-poll stream: never cache. Without this Workbox would
-            // try to range-fetch a request that never completes.
-            urlPattern: ({ url }) => url.pathname.startsWith("/api/stream"),
+            // Warehouse data and identity are authorization-sensitive.
+            urlPattern: ({ url }) => url.pathname.startsWith("/api/"),
             handler: "NetworkOnly",
-          },
-          {
-            // Binary downloads must always come from the API. Caching these
-            // responses can preserve a partial/stale PDF and bypass the
-            // backend's object-integrity check on later download attempts.
-            urlPattern: ({ url }) =>
-              /\/api\/requests\/\d+\/documents\/\d+\/download$/.test(
-                url.pathname,
-              ) ||
-              /\/api\/requests\/\d+\/attachments\/\d+\/download$/.test(
-                url.pathname,
-              ) ||
-              url.pathname.startsWith("/api/exports/"),
-            handler: "NetworkOnly",
-          },
-          {
-            // Read APIs: NetworkFirst keeps the SPA snappy when online and
-            // gives us a last-known-good payload offline. Mutations are
-            // explicitly excluded -- writes always need the network.
-            urlPattern: ({ url, request }) =>
-              url.pathname.startsWith("/api/") && request.method === "GET",
-            handler: "NetworkFirst",
-            options: {
-              cacheName: "warehouse-api-get-v2",
-              networkTimeoutSeconds: 3,
-              expiration: {
-                maxEntries: 100,
-                maxAgeSeconds: 60 * 60 * 24, // 1 day
-              },
-              cacheableResponse: { statuses: [0, 200] },
-            },
           },
         ],
       },

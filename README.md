@@ -161,10 +161,10 @@ The API exposes its OpenAPI docs at <http://localhost:8000/api/docs>.
 ## Install on iOS / Android
 
 The web app is a Progressive Web App: warehouse staff can pin it to their home
-screen, run it full-screen without browser chrome, and read the last-loaded
-boxes/alerts list even when their Wi-Fi drops momentarily (writes still need
-the network — there's no offline mutation queue). Installation is a one-time
-action per device.
+screen and run it full-screen without browser chrome. The application shell
+is available offline, but warehouse data and identity require the network.
+Authenticated responses are never cached across accounts on shared devices;
+there is no offline mutation queue. Installation is a one-time action per device.
 
 ### iOS / iPadOS (Safari)
 
@@ -503,6 +503,31 @@ SSO is unavailable (Entra outage, mis-configured app registration, etc.).
   credentials" wizard automatically.
 - Provisioning is idempotent: restarting the API after the admin has rotated
   their password does **not** reset it.
+- Changing local credentials immediately revokes existing local tokens and
+  returns a replacement token to the browser. Passwords are limited to 72
+  UTF-8 bytes, including multibyte characters. Failed logins are throttled per
+  peer within each API process; use the trusted proxy for a distributed limit.
+
+### Deploying the review fixes
+
+Drain old API instances, back up PostgreSQL, and run `alembic upgrade head`
+before starting the updated API. Migrations `0037`–`0039` add local session
+versions, durable productivity correction history, and daily email claims.
+Old replicas must not remain active because they cannot enforce token revocation.
+Existing local passwords longer than 72 UTF-8 bytes require an administrator
+reset; they are no longer accepted through bcrypt's silent truncation behavior.
+
+The API image installs hash-checked dependencies from `api/uv.lock`, and the
+web image uses `npm ci`. RustFS is pinned by digest. Compose publishes API and
+RustFS ports on loopback; the bundled web proxy remains the public entry point.
+Supply non-default object-storage credentials. External proxies must redact
+the `/api/stream` token query or disable logging for that route.
+
+Productivity reports retry after the configured local report hour, up to eight
+automatic attempts per date with backoff. Durable leases coordinate workers;
+a crash after Graph accepts a message but before finalization may still cause
+a duplicate during recovery. Live events remain in-process and need a shared
+event bus before scaling to multiple API workers.
 
 ## Roles & access control
 

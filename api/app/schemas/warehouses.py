@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.models.warehouses import ReceiptMode
 
@@ -68,12 +68,22 @@ class WarehouseUpdate(BaseModel):
     quarantine_manual_receipts: bool | None = None
     two_person_approval_threshold: int | None = Field(default=None, gt=0)
 
+    @field_validator("name", mode="before")
+    @classmethod
+    def strip_name(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
 
 class WarehouseCreate(WarehousePlanningFields):
     name: str = Field(min_length=1, max_length=80)
     min_inventory: int = Field(default=0, ge=0)
     max_capacity: int = Field(default=1000, ge=1)
     min_pages_per_day: int | None = Field(default=None, gt=0)
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def strip_name(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
 
 
 class WarehousePolicyEventOut(BaseModel):

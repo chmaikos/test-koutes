@@ -1,7 +1,7 @@
 """FastAPI dependencies: DB session, current user, role gates."""
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from fastapi import Depends, Header, HTTPException, status
@@ -40,6 +40,13 @@ def _resolve_local_user(db: Session, token: str) -> User:
     if user is None or not user.is_local:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="local user not found"
+        )
+    # Pre-migration tokens have no claim and are valid only until the first
+    # credential rotation. Never coerce strings/bools from malformed tokens.
+    version = claims.get("session_version", 0)
+    if type(version) is not int or version != user.local_session_version:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="local session revoked"
         )
     if not user.is_active:
         raise HTTPException(
@@ -100,7 +107,12 @@ async def resolve_user_from_token(db: Session, token: str) -> User:
         if not user.role_override and user.role != role_from_token:
             user.role = role_from_token
             changed = True
-        user.last_login_at = now
+        previous_login = user.last_login_at
+        if previous_login is not None and previous_login.tzinfo is None:
+            previous_login = previous_login.replace(tzinfo=UTC)
+        if previous_login is None or now - previous_login >= timedelta(minutes=5):
+            user.last_login_at = now
+            changed = True
         if changed:
             db.commit()
             db.refresh(user)

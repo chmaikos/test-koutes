@@ -21,6 +21,7 @@ from fastapi import (
 )
 from sqlalchemy import String, and_, case, cast, func, or_, select
 from sqlalchemy.orm import aliased
+from starlette.concurrency import run_in_threadpool
 
 from app.config import get_settings
 from app.deps import CurrentUser, DbSession, require_warehouse_mover
@@ -1461,6 +1462,8 @@ async def upload_discrepancy_photo(
     )
     if request is None or not can_access(user, request.warehouse_id):
         raise HTTPException(status_code=404, detail="not found")
+    if not _can_attach(user, request):
+        raise HTTPException(status_code=403, detail="not permitted to upload photos")
     discrepancy = db.get(BoxRequestDiscrepancy, discrepancy_id)
     if discrepancy is None or discrepancy.request_id != request.id:
         raise HTTPException(status_code=404, detail="discrepancy not found")
@@ -1493,7 +1496,8 @@ async def upload_discrepancy_photo(
         f"{uuid.uuid4().hex}{suffix}"
     )
     try:
-        put_document(
+        await run_in_threadpool(
+            put_document,
             object_key=object_key,
             content=content,
             content_type=content_type,
@@ -1537,7 +1541,7 @@ async def upload_discrepancy_photo(
         db.refresh(photo)
     except Exception:
         db.rollback()
-        delete_document(object_key)
+        await run_in_threadpool(delete_document, object_key)
         raise
     await _publish(request)
     return RequestDiscrepancyPhotoOut.model_validate(photo)
@@ -1657,7 +1661,8 @@ async def upload_request_attachment(
     digest = hashlib.sha256(content).hexdigest()
     object_key = f"requests/{request.id}/support/{uuid.uuid4().hex}{suffix}"
     try:
-        put_document(
+        await run_in_threadpool(
+            put_document,
             object_key=object_key,
             content=content,
             content_type=content_type,
@@ -1705,7 +1710,7 @@ async def upload_request_attachment(
         db.refresh(attachment)
     except Exception:
         db.rollback()
-        delete_document(object_key)
+        await run_in_threadpool(delete_document, object_key)
         raise
     await _publish(request)
     await publish_notification_event(
@@ -1859,7 +1864,8 @@ async def upload_document(
         f"{uuid.uuid4().hex}{suffix}"
     )
     try:
-        put_document(
+        await run_in_threadpool(
+            put_document,
             object_key=object_key,
             content=content,
             content_type=content_type,
@@ -1925,7 +1931,7 @@ async def upload_document(
         db.refresh(document)
     except Exception:
         db.rollback()
-        delete_document(object_key)
+        await run_in_threadpool(delete_document, object_key)
         raise
     await _publish(request)
     await publish_notification_event(

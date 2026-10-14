@@ -75,6 +75,9 @@ class User(Base):
         String(64), unique=True, index=True, nullable=True
     )
     password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    local_session_version: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
     is_local: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     must_change_credentials: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False

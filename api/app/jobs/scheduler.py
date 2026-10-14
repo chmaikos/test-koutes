@@ -67,10 +67,14 @@ def _productivity_tick() -> None:
     matching what operators saw on the dashboard.
     """
     tz = _resolve_app_tz()
-    today = datetime.now(tz).date()
+    now = datetime.now(tz)
+    hour = max(0, min(23, get_settings().productivity_report_hour))
+    if now.hour < hour:
+        return
+    today = now.date()
     db = SessionLocal()
     try:
-        outcome = send_daily_reports_safe(db, on_date=today)
+        outcome = send_daily_reports_safe(db, on_date=today, due_only=True)
         logger.info(
             "productivity report run for %s: sent=%s failed=%s "
             "skipped_empty=%s skipped_already_sent=%s skipped_no_recipients=%s",
@@ -128,6 +132,16 @@ def build_scheduler() -> AsyncIOScheduler:
             hour=productivity_hour, minute=0, timezone=_resolve_app_tz()
         ),
         id="productivity-daily-report",
+        max_instances=1,
+        coalesce=True,
+    )
+    # Recover missed cron executions, retry transient failures, and recover
+    # expired leases. The tick runs only after today's configured report hour.
+    scheduler.add_job(
+        _productivity_tick,
+        trigger="interval",
+        seconds=60,
+        id="productivity-report-retry",
         max_instances=1,
         coalesce=True,
     )

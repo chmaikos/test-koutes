@@ -19,6 +19,8 @@ node_modules/
 dist/
 .vite/
 *.tsbuildinfo
+web/playwright-report/
+web/test-results/
 
 # IDE / OS
 .idea/
@@ -31,3 +33,5 @@ postgres-data/
 *.log
 docs/*
 !docs/FIRST_CLASS_BOX_FILES_DEPLOYMENT.md
+!docs/CODEBASE_REVIEW.md
+!docs/REVIEW_FIX_PLAN.md

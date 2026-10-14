@@ -1,4 +1,5 @@
 """Productivity entry upsert, validation, and ACL gating."""
+
 from __future__ import annotations
 
 from datetime import date
@@ -196,13 +197,9 @@ def test_inactive_employee_rejected(client, session, employee_w1):
     assert "inactive" in resp.json()["detail"].lower()
 
 
-def test_operator_cannot_post_outside_acl(
-    client, session, make_user, restore_user_override
-):
+def test_operator_cannot_post_outside_acl(client, session, make_user, restore_user_override):
     # Employee in warehouse 2.
-    emp = Employee(
-        warehouse_id=2, full_name="Bob", default_hours_per_day=Decimal("8")
-    )
+    emp = Employee(warehouse_id=2, full_name="Bob", default_hours_per_day=Decimal("8"))
     session.add(emp)
     session.commit()
     session.refresh(emp)
@@ -227,9 +224,7 @@ def test_operator_cannot_post_outside_acl(
     assert resp.status_code == 404
 
 
-def test_list_entries_scoped_by_acl(
-    client, session, make_user, restore_user_override
-):
+def test_list_entries_scoped_by_acl(client, session, make_user, restore_user_override):
     emp1 = Employee(warehouse_id=1, full_name="Alice", default_hours_per_day=Decimal("8"))
     emp2 = Employee(warehouse_id=2, full_name="Bob", default_hours_per_day=Decimal("8"))
     session.add_all([emp1, emp2])
@@ -283,3 +278,57 @@ def test_delete_entry(client, session, employee_w1):
     resp = client.delete(f"/api/productivity/entries/{entry.id}")
     assert resp.status_code == 204
     assert session.get(ProductivityEntry, entry.id) is None
+
+
+def test_transferred_employee_history_uses_original_warehouse_acl(
+    client, session, employee_w1, make_user
+):
+    from sqlalchemy import select
+
+    from app.models.employees import ProductivityEntryEvent
+
+    payload = {
+        "employee_id": employee_w1.id,
+        "entry_date": "2026-05-10",
+        "pages": 100,
+        "hours_worked": 4,
+    }
+    original = client.post("/api/productivity/entries", json=payload).json()
+    assert (
+        client.patch(f"/api/employees/{employee_w1.id}", json={"warehouse_id": 2}).status_code
+        == 200
+    )
+    new_operator = make_user(UserRole.operator)
+    new_operator.warehouses = [session.get(Warehouse, 2)]
+    session.commit()
+    _impersonate(new_operator)
+    assert client.get("/api/productivity/entries").json() == []
+    denied = client.post("/api/productivity/entries", json={**payload, "pages": 999})
+    assert denied.status_code == 404
+    session.expire_all()
+    assert session.get(ProductivityEntry, original["id"]).pages == 100
+
+    original_operator = make_user(UserRole.operator)
+    original_operator.warehouses = [session.get(Warehouse, 1)]
+    session.commit()
+    _impersonate(original_operator)
+    correction = client.post("/api/productivity/entries", json={**payload, "pages": 200})
+    assert correction.status_code == 201, correction.text
+    corrected = correction.json()
+    assert corrected["warehouse_id"] == 1
+    assert corrected["created_by_user_id"] == original["created_by_user_id"]
+    events = session.scalars(
+        select(ProductivityEntryEvent).order_by(ProductivityEntryEvent.id)
+    ).all()
+    assert len(events) == 2
+    assert events[-1].actor_user_id == original_operator.id
+    assert events[-1].old_values["pages"] == 100
+    assert events[-1].new_values["pages"] == 200
+    assert events[-1].warehouse_id == 1
+    assert client.delete(f"/api/productivity/entries/{original['id']}").status_code == 204
+    events = session.scalars(
+        select(ProductivityEntryEvent).order_by(ProductivityEntryEvent.id)
+    ).all()
+    assert len(events) == 3
+    assert events[-1].event_type == "deleted"
+    assert events[-1].old_values["pages"] == 200

@@ -3,6 +3,7 @@
 For <10 concurrent users this trivially fits in a single uvicorn worker. If we
 ever need to scale horizontally this is the seam to swap for Redis Pub/Sub.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -17,6 +18,11 @@ class EventBus:
     def __init__(self) -> None:
         self._subscribers: set[asyncio.Queue[str]] = set()
         self._lock = asyncio.Lock()
+        self._loop: asyncio.AbstractEventLoop | None = None
+
+    def bind_loop(self, loop: asyncio.AbstractEventLoop | None) -> None:
+        """Register the application loop during lifespan startup/shutdown."""
+        self._loop = loop
 
     async def subscribe(self) -> asyncio.Queue[str]:
         queue: asyncio.Queue[str] = asyncio.Queue(maxsize=256)
@@ -39,16 +45,23 @@ class EventBus:
                 logger.warning("dropping event for slow subscriber: %s", event_type)
 
     def publish_threadsafe(self, event_type: str, data: dict[str, Any]) -> None:
-        """Publish from a synchronous context (e.g. APScheduler worker thread).
-
-        We need a *running* loop to schedule on; if there isn't one (e.g. during
-        unit tests), drop the event silently.
-        """
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
+        """Schedule thread-originated events on the application's live loop."""
+        loop = self._loop
+        if loop is None or loop.is_closed() or not loop.is_running():
+            logger.debug("event loop unavailable; dropping %s", event_type)
             return
-        asyncio.run_coroutine_threadsafe(self.publish(event_type, data), loop)
+        coroutine = self.publish(event_type, data)
+        try:
+            future = asyncio.run_coroutine_threadsafe(coroutine, loop)
+        except RuntimeError:
+            coroutine.close()
+            return
+
+        def report_failure(done):
+            if not done.cancelled() and done.exception() is not None:
+                logger.error("thread event publication failed", exc_info=done.exception())
+
+        future.add_done_callback(report_failure)
 
 
 bus = EventBus()

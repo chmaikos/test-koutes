@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 
 import pytest
@@ -103,7 +104,9 @@ def test_lot_identity_lock_sql_is_postgresql_specific_and_ordered():
             compile_kwargs={"literal_binds": True},
         )
     )
-    assert "INNER JOIN barcode_identities" in eager
+    # SQLAlchemy renders an inner join as JOIN or INNER JOIN.
+    assert re.search(r"\b(?:INNER )?JOIN barcode_identities\b", eager)
+    assert re.search(r"ON barcode_identities_\d+\.id = lots.barcode_identity_id", eager)
     assert "LEFT OUTER JOIN barcode_identities" not in eager
     assert eager.endswith("FOR SHARE OF lots")
 
@@ -117,7 +120,9 @@ def test_box_lock_targets_boxes_when_eager_lot_join_is_present():
         )
     )
 
-    assert "LEFT OUTER JOIN lots" in postgres_sql
+    # Nested eager inner joins may parenthesize the lots/barcode subtree.
+    assert re.search(r"LEFT OUTER JOIN \(?lots\b", postgres_sql)
+    assert re.search(r"ON lots_\d+\.id = boxes.lot_id", postgres_sql)
     assert postgres_sql.endswith("FOR UPDATE OF boxes")
     for statement, table_name in (
         (_merge_request_item_lock_statement(3, [8, 4]), "box_request_items"),

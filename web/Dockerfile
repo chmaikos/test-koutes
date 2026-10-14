@@ -1,4 +1,4 @@
-FROM node:20-alpine AS build
+FROM node:22-alpine AS build
 WORKDIR /app
 
 ARG VITE_ENTRA_TENANT_ID
@@ -10,8 +10,8 @@ ENV VITE_ENTRA_TENANT_ID=$VITE_ENTRA_TENANT_ID \
     VITE_API_SCOPE=$VITE_API_SCOPE \
     VITE_API_BASE_URL=$VITE_API_BASE_URL
 
-COPY package.json package-lock.json* ./
-RUN npm install --no-audit --no-fund
+COPY package.json package-lock.json ./
+RUN npm ci --no-audit --no-fund
 
 COPY tsconfig.json vite.config.ts tailwind.config.js postcss.config.js index.html ./
 COPY public ./public

@@ -3,7 +3,14 @@ import { useMe } from "@/api/hooks";
 import { ChangeCredentialsPage } from "@/pages/ChangeCredentialsPage";
 
 export function CredentialsGate({ children }: { children: ReactNode }) {
-  const { data: user, isLoading } = useMe();
+  const { data: user, isLoading, isError, refetch } = useMe();
+
+  if (isError) {
+    return <div role="alert" className="flex h-full flex-col items-center justify-center gap-3 text-sm text-slate-600">
+      <p>Your account could not be loaded. Check your connection and access permissions.</p>
+      <button className="btn-secondary" onClick={() => void refetch()}>Try again</button>
+    </div>;
+  }
 
   if (isLoading || !user) {
     return (

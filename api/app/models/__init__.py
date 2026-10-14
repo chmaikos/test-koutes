@@ -15,6 +15,7 @@ from app.models.boxes import Box, BoxEvent, BoxEventType, BoxStatus
 from app.models.employees import (
     Employee,
     ProductivityEntry,
+    ProductivityEntryEvent,
     ProductivityReportRun,
 )
 from app.models.lots import (
@@ -87,6 +88,7 @@ __all__ = [
     "PalletEvent",
     "PalletEventType",
     "ProductivityEntry",
+    "ProductivityEntryEvent",
     "ProductivityReportRun",
     "BoxRequest",
     "BoxRequestAttachment",

@@ -9,7 +9,7 @@ from sqlalchemy import select
 
 from app.config import get_settings
 from app.deps import CurrentUser, DbSession, require_operator
-from app.models.employees import Employee, ProductivityEntry
+from app.models.employees import Employee, ProductivityEntry, ProductivityEntryEvent
 from app.models.warehouses import Warehouse
 from app.schemas.employees import (
     EmployeeAverageOut,
@@ -146,13 +146,24 @@ def list_entries(
         stmt = stmt.where(ProductivityEntry.entry_date >= from_date)
     if to_date is not None:
         stmt = stmt.where(ProductivityEntry.entry_date <= to_date)
-    stmt = apply_warehouse_filter(
-        stmt, user, ProductivityEntry.warehouse_id
-    ).order_by(
+    stmt = apply_warehouse_filter(stmt, user, ProductivityEntry.warehouse_id).order_by(
         ProductivityEntry.entry_date.desc(), ProductivityEntry.id.desc()
     )
     rows = db.scalars(stmt).all()
     return [ProductivityEntryOut.model_validate(e) for e in rows]
+
+
+def _entry_snapshot(entry: ProductivityEntry) -> dict[str, object]:
+    return {
+        "employee_id": entry.employee_id,
+        "warehouse_id": entry.warehouse_id,
+        "entry_date": entry.entry_date.isoformat(),
+        "pages": entry.pages,
+        "hours_worked": str(entry.hours_worked),
+        "note": entry.note,
+        "excluded_from_metrics": entry.excluded_from_metrics,
+        "created_by_user_id": entry.created_by_user_id,
+    }
 
 
 @router.post(
@@ -172,27 +183,33 @@ def upsert_entry(
     re-create the row, which is annoying *and* loses the audit trail.
     Upserting on the unique constraint is much friendlier.
     """
-    emp = db.get(Employee, payload.employee_id)
+    # Lock before reading the unique employee/date pair so PostgreSQL
+    # serializes concurrent upserts and warehouse transfers.
+    emp = db.scalar(select(Employee).where(Employee.id == payload.employee_id).with_for_update())
     if emp is None:
         raise HTTPException(status_code=404, detail="employee not found")
-    if not can_access(user, emp.warehouse_id):
-        raise HTTPException(status_code=404, detail="employee not found")
+    existing = db.scalar(
+        select(ProductivityEntry)
+        .where(
+            ProductivityEntry.employee_id == payload.employee_id,
+            ProductivityEntry.entry_date == payload.entry_date,
+        )
+        .with_for_update()
+    )
+    warehouse_id = existing.warehouse_id if existing is not None else emp.warehouse_id
+    if not can_access(user, warehouse_id):
+        raise HTTPException(status_code=404, detail="employee entry not found")
     if not emp.is_active:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="cannot log productivity for an inactive employee",
         )
     try:
-        ensure_active_warehouse(db, emp.warehouse_id)
+        ensure_active_warehouse(db, warehouse_id)
     except WarehouseRuleError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    existing = db.scalar(
-        select(ProductivityEntry).where(
-            ProductivityEntry.employee_id == payload.employee_id,
-            ProductivityEntry.entry_date == payload.entry_date,
-        )
-    )
+    old_values = _entry_snapshot(existing) if existing is not None else None
     if existing is None:
         entry = ProductivityEntry(
             employee_id=emp.id,
@@ -210,9 +227,18 @@ def upsert_entry(
         existing.hours_worked = payload.hours_worked
         existing.note = payload.note
         existing.excluded_from_metrics = payload.excluded_from_metrics
-        existing.warehouse_id = emp.warehouse_id
-        existing.created_by_user_id = user.id
         entry = existing
+    db.flush()
+    db.add(
+        ProductivityEntryEvent(
+            entry_id=entry.id,
+            warehouse_id=entry.warehouse_id,
+            actor_user_id=user.id,
+            event_type="created" if existing is None else "corrected",
+            old_values=old_values,
+            new_values=_entry_snapshot(entry),
+        )
+    )
     db.commit()
     db.refresh(entry)
     return ProductivityEntryOut.model_validate(entry)
@@ -228,9 +254,21 @@ def delete_entry(
     db: DbSession,
     user: Annotated[CurrentUser, Depends(require_operator)],
 ) -> Response:
-    entry = db.get(ProductivityEntry, entry_id)
+    entry = db.scalar(
+        select(ProductivityEntry).where(ProductivityEntry.id == entry_id).with_for_update()
+    )
     if entry is None or not can_access(user, entry.warehouse_id):
         raise HTTPException(status_code=404, detail="entry not found")
+    db.add(
+        ProductivityEntryEvent(
+            entry_id=entry.id,
+            warehouse_id=entry.warehouse_id,
+            actor_user_id=user.id,
+            event_type="deleted",
+            old_values=_entry_snapshot(entry),
+            new_values=None,
+        )
+    )
     db.delete(entry)
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
