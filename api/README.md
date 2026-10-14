@@ -25,11 +25,16 @@ OpenAPI docs at <http://localhost:8000/api/docs>.
 ## Tests / lint
 
 ```bash
-ruff check app alembic
-pytest
+uv sync --extra dev --frozen
+uv run --extra dev ruff check app tests
+uv run --extra dev pytest
+
+# Optional real PostgreSQL migrations and concurrency, isolated by test schema:
+TEST_DATABASE_URL=postgresql+psycopg://review:review-only@localhost:5432/review \
+  uv run --extra dev pytest tests/test_postgresql_review.py
 
 # Optional real RustFS round-trip (uses the OBJECT_STORAGE_* variables above)
-RUN_RUSTFS_INTEGRATION=1 pytest tests/test_rustfs_integration.py
+RUN_RUSTFS_INTEGRATION=1 uv run --extra dev pytest tests/test_rustfs_integration.py
 ```
 
 ## Layout

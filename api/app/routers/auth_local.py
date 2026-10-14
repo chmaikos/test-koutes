@@ -6,10 +6,13 @@ issued by us (HS256, `iss="warehouse-local"`).
 """
 from __future__ import annotations
 
+from collections import OrderedDict
 from datetime import UTC, datetime
+from threading import Lock
+from time import monotonic
 
-from fastapi import APIRouter, HTTPException, status
-from pydantic import BaseModel, ConfigDict, Field
+from fastapi import APIRouter, HTTPException, Request, Response, status
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import select
 
 from app.config import get_settings
@@ -17,20 +20,54 @@ from app.deps import CurrentUser, DbSession
 from app.models.users import User
 from app.schemas.users import UserOut
 from app.security import (
+    DUMMY_PASSWORD_HASH,
     LocalAuthDisabled,
     hash_password,
     issue_local_token,
+    validate_password_length,
     verify_password,
 )
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 MIN_PASSWORD_LENGTH = 12
+_LOGIN_WINDOW_SECONDS = 60
+_LOGIN_MAX_FAILURES = 10
+_LOGIN_MAX_PEERS = 4096
+_login_failures: OrderedDict[str, tuple[float, int]] = OrderedDict()
+_login_lock = Lock()
+
+
+def _check_login_rate(peer: str) -> None:
+    now = monotonic()
+    with _login_lock:
+        while _login_failures:
+            first = next(iter(_login_failures))
+            if now - _login_failures[first][0] < _LOGIN_WINDOW_SECONDS:
+                break
+            _login_failures.pop(first)
+        entry = _login_failures.get(peer)
+        if entry is not None and entry[1] >= _LOGIN_MAX_FAILURES:
+            retry = max(1, int(_LOGIN_WINDOW_SECONDS - (now - entry[0])) + 1)
+            raise HTTPException(
+                status_code=429, detail="too many failed login attempts",
+                headers={"Retry-After": str(retry)},
+            )
+
+
+def _record_login_failure(peer: str) -> None:
+    with _login_lock:
+        start, count = _login_failures.get(peer, (monotonic(), 0))
+        _login_failures[peer] = (start, count + 1)
+        if len(_login_failures) > _LOGIN_MAX_PEERS:
+            _login_failures.popitem(last=False)
 
 
 class LoginRequest(BaseModel):
     username: str = Field(min_length=1, max_length=64)
     password: str = Field(min_length=1, max_length=255)
+
+    _password_bytes = field_validator("password")(validate_password_length)
 
 
 class LoginResponse(BaseModel):
@@ -48,6 +85,10 @@ class ChangeCredentialsRequest(BaseModel):
     new_password: str = Field(min_length=MIN_PASSWORD_LENGTH, max_length=255)
     new_username: str | None = Field(default=None, min_length=1, max_length=64)
 
+    _password_bytes = field_validator("current_password", "new_password")(
+        validate_password_length
+    )
+
 
 @router.get("/me", response_model=UserOut)
 def me(user: CurrentUser) -> UserOut:
@@ -58,10 +99,15 @@ def me(user: CurrentUser) -> UserOut:
 
 
 @router.post("/login", response_model=LoginResponse)
-def login(payload: LoginRequest, db: DbSession) -> LoginResponse:
+def login(payload: LoginRequest, db: DbSession, request: Request) -> LoginResponse:
     settings = get_settings()
     if not settings.local_auth_enabled:
         raise LocalAuthDisabled()
+
+    # Process-local defense in depth; deployments with multiple workers should
+    # also rate-limit at the trusted reverse proxy. Ignore client-supplied XFF.
+    peer = request.client.host if request.client else "unknown"
+    _check_login_rate(peer)
 
     user = db.scalar(
         select(User).where(
@@ -70,15 +116,13 @@ def login(payload: LoginRequest, db: DbSession) -> LoginResponse:
     )
     # Always go through the bcrypt path even on missing user, so timing
     # leaks don't tell an attacker which usernames exist.
-    if user is None:
-        verify_password(payload.password, "$2b$12$invalidinvalidinvalidinvalidinvalid")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="invalid username or password",
-        )
-    if not user.is_active:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="user is disabled")
-    if not verify_password(payload.password, user.password_hash):
+    password_ok = verify_password(
+        payload.password,
+        (user.password_hash or DUMMY_PASSWORD_HASH)
+        if user is not None and user.is_active else DUMMY_PASSWORD_HASH,
+    )
+    if user is None or not user.is_active or not password_ok:
+        _record_login_failure(peer)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="invalid username or password",
@@ -92,6 +136,7 @@ def login(payload: LoginRequest, db: DbSession) -> LoginResponse:
         user_id=user.id,
         role=user.role.value,
         must_change=user.must_change_credentials,
+        session_version=user.local_session_version,
     )
     return LoginResponse(
         access_token=token,
@@ -106,12 +151,18 @@ def change_credentials(
     payload: ChangeCredentialsRequest,
     db: DbSession,
     user: CurrentUser,
+    response: Response,
 ) -> UserOut:
     if not user.is_local:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="only local users can change credentials here",
         )
+    # Serialize concurrent rotations before checking the current password.
+    user = db.scalar(
+        select(User).where(User.id == user.id).with_for_update()
+        .execution_options(populate_existing=True)
+    )
     if not verify_password(payload.current_password, user.password_hash):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -140,6 +191,10 @@ def change_credentials(
 
     user.password_hash = hash_password(payload.new_password)
     user.must_change_credentials = False
+    user.local_session_version += 1
     db.commit()
     db.refresh(user)
+    response.headers["X-Local-Access-Token"] = issue_local_token(
+        user.id, user.role.value, user.must_change_credentials, user.local_session_version
+    )
     return UserOut.model_validate(user)

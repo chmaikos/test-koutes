@@ -1,5 +1,7 @@
 FROM python:3.12-slim AS base
 
+COPY --from=ghcr.io/astral-sh/uv:0.13.1 /uv /usr/local/bin/uv
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -11,9 +13,10 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends curl \
  && rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml ./
-RUN pip install --upgrade pip \
- && pip install .
+COPY pyproject.toml uv.lock ./
+RUN uv export --frozen --no-dev --no-emit-project --format requirements-txt \
+      --output-file /tmp/requirements.txt > /dev/null \
+ && uv pip install --system --require-hashes -r /tmp/requirements.txt
 
 COPY alembic.ini ./
 COPY alembic ./alembic

@@ -11,9 +11,9 @@ import time
 from typing import Any
 
 import httpx
+import jwt
 from fastapi import HTTPException, status
-from jose import jwt
-from jose.exceptions import JWTError
+from jwt import InvalidTokenError, PyJWK, PyJWTError
 
 from app.config import Settings, get_settings
 from app.models.users import UserRole
@@ -90,13 +90,17 @@ async def validate_access_token(token: str) -> TokenClaims:
         )
     try:
         unverified_header = jwt.get_unverified_header(token)
-    except JWTError as exc:
+    except InvalidTokenError as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"invalid token header: {exc}",
         ) from exc
 
     kid = unverified_header.get("kid")
+    if unverified_header.get("alg") != "RS256":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="unsupported token algorithm"
+        )
     if not kid:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="missing kid"
@@ -114,8 +118,7 @@ async def validate_access_token(token: str) -> TokenClaims:
             status_code=status.HTTP_401_UNAUTHORIZED, detail="signing key not found"
         )
 
-    # python-jose 3.3.0's jwt.decode() raises JWTError("audience must be a
-    # string or None") if you pass a list. Entra issues v2 access tokens with
+    # Entra issues v2 access tokens with
     # `aud` = the API URI (api://<client-id>) and v1 tokens with `aud` = the
     # client GUID, so we have to try each candidate audience separately
     # against each candidate issuer (v1 vs v2) and accept the first
@@ -124,20 +127,29 @@ async def validate_access_token(token: str) -> TokenClaims:
         a for a in (settings.entra_api_audience, settings.entra_client_id) if a
     ] or [None]
 
+    try:
+        signing_key = PyJWK.from_dict(key, algorithm="RS256").key
+    except (PyJWTError, ValueError, TypeError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid signing key"
+        ) from exc
+
     last_error: Exception | None = None
     for issuer in (settings.issuer, settings.issuer_v1):
         for audience in audience_candidates:
             try:
                 payload = jwt.decode(
                     token,
-                    key,
-                    algorithms=[unverified_header.get("alg") or "RS256"],
+                    signing_key,
+                    algorithms=["RS256"],
                     audience=audience,
                     issuer=issuer,
-                    options={"verify_at_hash": False},
+                    options={"require": ["iss", "aud", "exp", "oid"]},
                 )
+                if not isinstance(payload["oid"], str) or not payload["oid"]:
+                    raise InvalidTokenError("invalid oid")
                 return TokenClaims(payload)
-            except JWTError as exc:
+            except InvalidTokenError as exc:
                 last_error = exc
                 continue
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class EmployeeOut(BaseModel):
@@ -22,10 +22,13 @@ class EmployeeOut(BaseModel):
 class EmployeeCreate(BaseModel):
     warehouse_id: int = Field(ge=1)
     full_name: str = Field(min_length=1, max_length=160)
-    default_hours_per_day: Decimal = Field(
-        default=Decimal("8.00"), gt=0, le=24
-    )
+    default_hours_per_day: Decimal = Field(default=Decimal("8.00"), gt=0, le=24)
     excluded_from_metrics: bool = False
+
+    @field_validator("full_name", mode="before")
+    @classmethod
+    def strip_name(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
 
 
 class EmployeeUpdate(BaseModel):
@@ -34,6 +37,11 @@ class EmployeeUpdate(BaseModel):
     is_active: bool | None = None
     excluded_from_metrics: bool | None = None
     warehouse_id: int | None = Field(default=None, ge=1)
+
+    @field_validator("full_name", mode="before")
+    @classmethod
+    def strip_name(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
 
 
 class EmployeePage(BaseModel):
@@ -57,6 +65,11 @@ class EmployeeImportItem(BaseModel):
     default_hours_per_day: Decimal | None = Field(default=None, gt=0, le=24)
     is_active: bool | None = None
     excluded_from_metrics: bool | None = None
+
+    @field_validator("full_name", mode="before")
+    @classmethod
+    def strip_name(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
 
 
 class EmployeeImportRequest(BaseModel):

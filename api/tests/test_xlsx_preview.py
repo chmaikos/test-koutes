@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from io import BytesIO
 
+import pytest
 from openpyxl import Workbook
 
 from app.deps import get_current_user
 from app.main import app
 from app.models.users import UserRole
+from app.services.boxes import BoxRuleError
 from app.services.xlsx_preview import preview_xlsx
 
 
@@ -40,9 +42,7 @@ def test_preview_preserves_sheet_rows_and_does_not_assume_headers():
     assert sheets[1].rows[1].cells == ["3", "LOT-B"]
 
 
-def test_requester_can_preview_and_other_users_cannot(
-    client, make_user, monkeypatch
-):
+def test_requester_can_preview_and_other_users_cannot(client, make_user, monkeypatch):
     requester = make_user(UserRole.viewer)
     mover = make_user(UserRole.warehouse_mover)
     _as_user(requester)
@@ -100,3 +100,31 @@ def test_requester_can_preview_and_other_users_cannot(
         files={"file": ("boxes.xlsx", _workbook_bytes())},
     )
     assert denied.status_code == 403
+
+
+@pytest.mark.parametrize("row,column,limit", [(5002, 1, "5000-row"), (2, 51, "50-column")])
+def test_preview_rejects_data_outside_supported_dimensions(row, column, limit):
+    workbook = Workbook()
+    workbook.active.append(["Box", "Lot"])
+    workbook.active.cell(row=row, column=column, value="must not disappear")
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    with pytest.raises(BoxRuleError, match=limit):
+        preview_xlsx(output.getvalue())
+
+
+def test_preview_rejects_missing_dimensions_instead_of_omitting_rows():
+    import re
+    from zipfile import ZipFile
+
+    original = _workbook_bytes()
+    output = BytesIO()
+    with ZipFile(BytesIO(original)) as source, ZipFile(output, "w") as target:
+        for member in source.infolist():
+            data = source.read(member.filename)
+            if member.filename == "xl/worksheets/sheet1.xml":
+                data = re.sub(rb'<dimension[^>]*/>', b"", data)
+            target.writestr(member, data)
+    with pytest.raises(BoxRuleError, match="no declared dimensions"):
+        preview_xlsx(output.getvalue())

@@ -1,0 +1,74 @@
+name: Verify
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main, fix/codebase-review-hardening]
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: review
+          POSTGRES_PASSWORD: review-only
+          POSTGRES_DB: review
+        ports: [5432:5432]
+        options: >-
+          --health-cmd "pg_isready -U review -d review"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      rustfs:
+        image: rustfs/rustfs@sha256:41fe89380f4120a337790c02af192c3fe7bb55c3edc2e6e9357b487b47c6ab21
+        env:
+          RUSTFS_VOLUMES: /data
+          RUSTFS_ACCESS_KEY: review-access-key
+          RUSTFS_SECRET_KEY: review-only-secret-key
+        ports: [9000:9000]
+    env:
+      TEST_DATABASE_URL: postgresql+psycopg://review:review-only@localhost:5432/review
+      RUN_RUSTFS_INTEGRATION: '1'
+      OBJECT_STORAGE_ENDPOINT: http://localhost:9000
+      OBJECT_STORAGE_BUCKET: warehouse-review-tests
+      OBJECT_STORAGE_ACCESS_KEY: review-access-key
+      OBJECT_STORAGE_SECRET_KEY: review-only-secret-key
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.13.1'
+          python-version: '3.12'
+      - run: uv sync --project api --extra dev --frozen
+      - run: uv run --extra dev ruff check app tests
+        working-directory: api
+      - run: uv run --project api --extra dev pytest api/tests -q
+      - name: Audit locked runtime dependencies
+        run: |
+          uv export --project api --frozen --no-dev --no-emit-project --format requirements-txt --output-file /tmp/api-requirements.txt > /dev/null
+          uv run --no-project --with pip-audit python -m pip_audit --disable-pip --no-deps -r /tmp/api-requirements.txt
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci --no-fund
+      - run: npm run lint
+      - run: npx tsc -p tsconfig.e2e.json
+      - run: npm test
+      - run: npm run build
+      - run: npm audit --omit=dev
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e

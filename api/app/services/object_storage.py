@@ -40,8 +40,8 @@ def _client() -> BaseClient:
 
 def ensure_bucket() -> None:
     settings = get_settings()
-    client = _client()
     try:
+        client = _client()
         client.head_bucket(Bucket=settings.object_storage_bucket)
     except ClientError as exc:
         code = str(exc.response.get("Error", {}).get("Code", ""))
@@ -49,7 +49,13 @@ def ensure_bucket() -> None:
             raise StorageUnavailableError("unable to access document bucket") from exc
         try:
             client.create_bucket(Bucket=settings.object_storage_bucket)
-        except BotoCoreError as create_exc:
+        except (BotoCoreError, ClientError) as create_exc:
+            # Another process may have created our bucket after head_bucket.
+            if (
+                isinstance(create_exc, ClientError)
+                and create_exc.response.get("Error", {}).get("Code") == "BucketAlreadyOwnedByYou"
+            ):
+                return
             raise StorageUnavailableError("unable to create document bucket") from create_exc
     except BotoCoreError as exc:
         raise StorageUnavailableError("unable to access document bucket") from exc
@@ -72,7 +78,7 @@ def put_document(
             ContentType=content_type,
             Metadata=metadata,
         )
-    except BotoCoreError as exc:
+    except (BotoCoreError, ClientError) as exc:
         raise StorageUnavailableError("document upload failed") from exc
 
 
@@ -83,7 +89,7 @@ def get_document(object_key: str) -> tuple[ReadableBody, int]:
             Bucket=settings.object_storage_bucket,
             Key=object_key,
         )
-    except BotoCoreError as exc:
+    except (BotoCoreError, ClientError) as exc:
         raise StorageUnavailableError("document download failed") from exc
     return response["Body"], int(response.get("ContentLength") or 0)
 
@@ -92,7 +98,7 @@ def delete_document(object_key: str) -> None:
     settings = get_settings()
     try:
         _client().delete_object(Bucket=settings.object_storage_bucket, Key=object_key)
-    except (BotoCoreError, StorageUnavailableError):
+    except (BotoCoreError, ClientError, StorageUnavailableError):
         # Best-effort cleanup after a DB failure; an orphan is preferable to
         # masking the original transactional error.
         return

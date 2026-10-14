@@ -1,7 +1,7 @@
 """End-of-day report dispatch: idempotency, recipient routing, no-op when graph is off."""
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -181,3 +181,86 @@ def test_recipients_routed_per_warehouse(
     # Each warehouse received its own per-warehouse report.
     assert "Building 1" in by_to["ops-1@example.com"]
     assert "Building 2" in by_to["ops-2@example.com"]
+
+
+def test_claim_lease_recovery_and_fenced_completion(session):
+    now = datetime(2026, 5, 13, 18, tzinfo=UTC)
+    kwargs = {"warehouse_id": 1, "report_date": REF_DATE}
+    token = dispatch_module._claim_run(session, **kwargs, now=now)
+    assert token
+    assert dispatch_module._claim_run(session, **kwargs, now=now) is None
+    later = now + dispatch_module.CLAIM_LEASE + timedelta(seconds=1)
+    replacement = dispatch_module._claim_run(session, **kwargs, now=later)
+    assert replacement and replacement != token
+    assert not dispatch_module._finish_run(
+        session, **kwargs, claim_token=token, now=later,
+        ok=True, recipients=["obsolete@example.com"], error=None,
+    )
+    assert dispatch_module._finish_run(
+        session, **kwargs, claim_token=replacement, now=later,
+        ok=True, recipients=["correct@example.com"], error=None,
+    )
+    assert dispatch_module._claim_run(session, **kwargs, now=later) is None
+    run = session.get(ProductivityReportRun, (1, REF_DATE))
+    assert run.ok and run.attempts == 2
+    assert run.recipients == "correct@example.com"
+
+
+def test_automatic_retry_backoff_and_attempt_cap(session):
+    now = datetime(2026, 5, 13, 18, tzinfo=UTC)
+    kwargs = {"warehouse_id": 1, "report_date": REF_DATE, "due_only": True}
+    for attempt in range(dispatch_module.MAX_AUTOMATIC_ATTEMPTS):
+        token = dispatch_module._claim_run(session, **kwargs, now=now)
+        assert token
+        assert dispatch_module._finish_run(
+            session, warehouse_id=1, report_date=REF_DATE,
+            claim_token=token, now=now, ok=False, recipients=[], error="retryable",
+        )
+        assert dispatch_module._claim_run(session, **kwargs, now=now) is None
+        run = session.get(ProductivityReportRun, (1, REF_DATE))
+        assert run.attempts == attempt + 1
+        now = run.next_attempt_at.replace(tzinfo=UTC)
+    assert dispatch_module._claim_run(session, **kwargs, now=now) is None
+    # An explicit operator-triggered retry may override automatic backoff/cap.
+    assert dispatch_module._claim_run(
+        session, warehouse_id=1, report_date=REF_DATE, now=now, due_only=False,
+    )
+
+
+def test_second_worker_cannot_send_while_graph_call_running(
+    client, session, force_graph_configured, stub_recipients, monkeypatch,
+):
+    from sqlalchemy.orm import Session
+
+    _add_entry(session, warehouse_id=1)
+    sends = []
+
+    def send(**kwargs):
+        sends.append(kwargs)
+        assert not session.in_transaction()
+        with Session(bind=session.get_bind()) as other:
+            outcome = send_daily_reports(other, on_date=REF_DATE)
+        assert outcome.sent == 0
+        assert outcome.skipped_claimed == 1
+        return True, None
+
+    monkeypatch.setattr(dispatch_module, "send_alert_email", send)
+    assert send_daily_reports(session, on_date=REF_DATE).sent == 1
+    assert len(sends) == 1
+
+
+def test_unexpected_sender_error_releases_claim_and_schedules_retry(
+    client, session, force_graph_configured, stub_recipients, monkeypatch,
+):
+    _add_entry(session, warehouse_id=1)
+
+    def raise_error(**kwargs):
+        raise RuntimeError("transport unavailable")
+
+    monkeypatch.setattr(dispatch_module, "send_alert_email", raise_error)
+    assert send_daily_reports(session, on_date=REF_DATE, due_only=True).failed == 1
+    run = session.get(ProductivityReportRun, (1, REF_DATE))
+    assert run.claim_token is None and run.claimed_at is None
+    assert run.next_attempt_at is not None
+    assert "transport unavailable" in run.error
+    assert send_daily_reports(session, on_date=REF_DATE, due_only=True).skipped_claimed == 1

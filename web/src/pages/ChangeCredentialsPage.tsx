@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { KeyRound, ShieldAlert } from "lucide-react";
-import { changeLocalCredentials } from "@/auth/local";
+import { changeLocalCredentials, localAuthError } from "@/auth/local";
 import { queryKeys } from "@/api/hooks";
 import type { User } from "@/api/types";
 
@@ -65,10 +65,7 @@ export function ChangeCredentialsPage({ user }: Props) {
               });
               qc.invalidateQueries({ queryKey: queryKeys.me });
             } catch (err: unknown) {
-              const detail =
-                (err as { response?: { data?: { detail?: string } } })?.response
-                  ?.data?.detail ?? "Failed to update credentials";
-              setError(detail);
+              setError(localAuthError(err, "Failed to update credentials"));
             } finally {
               setSubmitting(false);
             }

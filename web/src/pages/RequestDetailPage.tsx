@@ -969,7 +969,7 @@ function DiscrepanciesSection({ request }: { request: BoxRequest }) {
                 {photo.original_filename}
               </button>
             ))}
-            <div className="flex flex-wrap items-center gap-2">
+            {request.permissions.can_attach && <div className="flex flex-wrap items-center gap-2">
               <input
                 type="file"
                 accept="image/jpeg,image/png"
@@ -1004,7 +1004,7 @@ function DiscrepanciesSection({ request }: { request: BoxRequest }) {
               >
                 Upload photo
               </button>
-            </div>
+            </div>}
           </div>
         ))}
       </div>

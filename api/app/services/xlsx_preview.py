@@ -37,9 +37,7 @@ def preview_xlsx(file_bytes: bytes) -> list[PreviewSheet]:
     if not file_bytes:
         raise BoxRuleError("workbook is empty")
     if len(file_bytes) > MAX_XLSX_BYTES:
-        raise BoxRuleError(
-            f"file is larger than {MAX_XLSX_BYTES // (1024 * 1024)} MB"
-        )
+        raise BoxRuleError(f"file is larger than {MAX_XLSX_BYTES // (1024 * 1024)} MB")
     try:
         workbook = load_workbook(
             io.BytesIO(file_bytes),
@@ -53,6 +51,22 @@ def preview_xlsx(file_bytes: bytes) -> list[PreviewSheet]:
     total_rows = 0
     try:
         for worksheet in workbook.worksheets:
+            if worksheet.max_row is None or worksheet.max_column is None:
+                raise BoxRuleError(
+                    f"sheet {worksheet.title!r} has no declared dimensions; "
+                    "resave the workbook before previewing it"
+                )
+            # Reject sparse/formatted sheets outside supported dimensions:
+            # a successful preview must never silently omit mapped data.
+            if (worksheet.max_row or 1) > MAX_PREVIEW_ROWS:
+                raise BoxRuleError(
+                    f"sheet {worksheet.title!r} exceeds the {MAX_PREVIEW_ROWS}-row preview limit"
+                )
+            if (worksheet.max_column or 1) > MAX_PREVIEW_COLUMNS:
+                raise BoxRuleError(
+                    f"sheet {worksheet.title!r} exceeds the "
+                    f"{MAX_PREVIEW_COLUMNS}-column preview limit"
+                )
             rows: list[PreviewRow] = []
             max_columns = 0
             for row_number, raw_row in enumerate(
@@ -74,9 +88,7 @@ def preview_xlsx(file_bytes: bytes) -> list[PreviewSheet]:
                     continue
                 total_rows += 1
                 if total_rows > MAX_PREVIEW_ROWS:
-                    raise BoxRuleError(
-                        f"workbook exceeds the {MAX_PREVIEW_ROWS}-row preview limit"
-                    )
+                    raise BoxRuleError(f"workbook exceeds the {MAX_PREVIEW_ROWS}-row preview limit")
                 max_columns = max(max_columns, len(cells))
                 rows.append(PreviewRow(row_number=row_number, cells=cells))
             if rows:

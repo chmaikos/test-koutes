@@ -1,3 +1,5 @@
+import { EventType } from "@azure/msal-browser";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useIsAuthenticated, useMsal } from "@azure/msal-react";
 import { AlertTriangle, Boxes, KeyRound, Lock, LogIn } from "lucide-react";
@@ -14,15 +16,18 @@ import {
 import {
   getLocalToken,
   localLogin,
+  localAuthError,
   subscribeLocalAuth,
 } from "@/auth/local";
 
 type Tab = "sso" | "local";
 
 export function AuthGate({ children }: { children: ReactNode }) {
-  const { instance, inProgress } = useMsal();
+  const { instance, inProgress, accounts } = useMsal();
   const ssoAuthed = useIsAuthenticated();
-  const [hasLocal, setHasLocal] = useState<boolean>(getLocalToken() !== null);
+  const [, refreshIdentity] = useState(0);
+  const [localToken, setLocalToken] = useState(getLocalToken);
+  const hasLocal = localToken !== null;
   const ssoOn = useMemo(() => ssoAvailable(), []);
   const [tab, setTab] = useState<Tab>(ssoOn ? "sso" : "local");
   const [ssoError, setSsoErrorState] = useState<SsoErrorDetails | null>(
@@ -30,7 +35,24 @@ export function AuthGate({ children }: { children: ReactNode }) {
   );
 
   useEffect(() => {
-    return subscribeLocalAuth(() => setHasLocal(getLocalToken() !== null));
+    const callback = instance.addEventCallback((event) => {
+      if ([
+        EventType.ACTIVE_ACCOUNT_CHANGED,
+        EventType.ACCOUNT_ADDED,
+        EventType.ACCOUNT_REMOVED,
+        EventType.LOGIN_SUCCESS,
+        EventType.LOGOUT_SUCCESS,
+      ].some((type) => type === event.eventType)) {
+        refreshIdentity((version) => version + 1);
+      }
+    });
+    return () => {
+      if (callback) instance.removeEventCallback(callback);
+    };
+  }, [instance]);
+
+  useEffect(() => {
+    return subscribeLocalAuth(() => setLocalToken(getLocalToken()));
   }, []);
 
   useEffect(() => {
@@ -50,7 +72,10 @@ export function AuthGate({ children }: { children: ReactNode }) {
   }
 
   if (ssoAuthed || hasLocal) {
-    return <>{children}</>;
+    const identity = localToken
+      ? `local:${localToken}`
+      : `sso:${(instance.getActiveAccount() ?? accounts[0])?.homeAccountId}`;
+    return <AuthenticatedSession key={identity}>{children}</AuthenticatedSession>;
   }
 
   return (
@@ -135,7 +160,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
             </button>
           </>
         ) : (
-          <LocalLoginForm onSuccess={() => setHasLocal(true)} />
+          <LocalLoginForm onSuccess={() => setLocalToken(getLocalToken())} />
         )}
 
         {(!ssoOn || tab === "local") && (
@@ -166,10 +191,7 @@ function LocalLoginForm({ onSuccess }: { onSuccess: () => void }) {
           await localLogin(username.trim(), password);
           onSuccess();
         } catch (err: unknown) {
-          const detail =
-            (err as { response?: { data?: { detail?: string } } })?.response
-              ?.data?.detail ?? "Sign-in failed";
-          setError(detail);
+          setError(localAuthError(err, "Sign-in failed"));
         } finally {
           setSubmitting(false);
         }
@@ -252,4 +274,19 @@ function SsoErrorBanner({ err }: { err: SsoErrorDetails }) {
       </div>
     </div>
   );
+}
+
+// A separate client per session makes late responses from an old account unable
+// to populate the new account's cache. The keyed boundary also closes its SSE.
+function AuthenticatedSession({ children }: { children: ReactNode }) {
+  const [client] = useState(() => new QueryClient({
+    defaultOptions: {
+      queries: { staleTime: 10_000, retry: 1, refetchOnWindowFocus: false },
+    },
+  }));
+  useEffect(() => () => {
+    void client.cancelQueries();
+    client.clear();
+  }, [client]);
+  return <QueryClientProvider client={client}>{children}</QueryClientProvider>;
 }

@@ -29,7 +29,10 @@ DEFAULT_PASSWORD = "ChangeMe!2026"
 
 @pytest.fixture(autouse=True)
 def _override_settings(monkeypatch):
-    monkeypatch.setenv("LOCAL_JWT_SECRET", "test-secret-please-rotate")
+    from app.routers.auth_local import _login_failures
+
+    _login_failures.clear()
+    monkeypatch.setenv("LOCAL_JWT_SECRET", "test-secret-please-rotate-at-least-32-bytes")
     monkeypatch.setenv("BOOTSTRAP_ADMIN_USERNAME", DEFAULT_USERNAME)
     monkeypatch.setenv("BOOTSTRAP_ADMIN_PASSWORD", DEFAULT_PASSWORD)
     get_settings.cache_clear()
@@ -297,7 +300,104 @@ def test_inactive_local_user_cannot_log_in(local_client):
         s.close()
 
     resp = _login(local_client, DEFAULT_USERNAME, DEFAULT_PASSWORD)
-    assert resp.status_code == 403
+    assert resp.status_code == 401
+    assert resp.json()["detail"] == "invalid username or password"
+
+
+def test_rotation_revokes_old_token_and_returns_working_replacement(local_client):
+    old_token = _login(local_client, DEFAULT_USERNAME, DEFAULT_PASSWORD).json()["access_token"]
+    changed = local_client.post(
+        "/api/auth/change-credentials",
+        headers={"Authorization": f"Bearer {old_token}"},
+        json={"current_password": DEFAULT_PASSWORD, "new_password": "Replacement!2026"},
+    )
+    assert changed.status_code == 200
+    replacement = changed.headers["X-Local-Access-Token"]
+    assert local_client.get(
+        "/api/auth/me", headers={"Authorization": f"Bearer {old_token}"}
+    ).status_code == 401
+    # The stream shares the validator, so its reconnect also rejects the token.
+    assert local_client.get(
+        "/api/stream", params={"access_token": old_token}
+    ).status_code == 401
+    assert local_client.get(
+        "/api/dashboard/summary", headers={"Authorization": f"Bearer {replacement}"}
+    ).status_code == 200
+
+
+@pytest.mark.parametrize("password", ["a" * 73, "é" * 37])
+def test_password_byte_limit_rejected_on_login_and_rotation(local_client, password):
+    assert _login(local_client, DEFAULT_USERNAME, password).status_code == 422
+    token = _login(local_client, DEFAULT_USERNAME, DEFAULT_PASSWORD).json()["access_token"]
+    for field in ("current_password", "new_password"):
+        payload = {"current_password": DEFAULT_PASSWORD, "new_password": "Replacement!2026"}
+        payload[field] = password
+        assert local_client.post(
+            "/api/auth/change-credentials",
+            headers={"Authorization": f"Bearer {token}"}, json=payload,
+        ).status_code == 422
+
+
+def test_bcrypt_byte_limit_and_dummy_hash():
+    from app.security import DUMMY_PASSWORD_HASH, hash_password, verify_password
+
+    assert verify_password("warehouse-dummy-timing-check", DUMMY_PASSWORD_HASH)
+    boundary = "é" * 36
+    hashed = hash_password(boundary)
+    assert verify_password(boundary, hashed)
+    assert not verify_password(boundary + "suffix", hashed)
+    with pytest.raises(ValueError, match="UTF-8 bytes"):
+        hash_password(boundary + "suffix")
+
+
+def test_unknown_and_disabled_users_verify_valid_dummy_hash(local_client, monkeypatch):
+    from sqlalchemy import select
+
+    from app.models.users import User
+    from app.routers import auth_local
+    from app.security import DUMMY_PASSWORD_HASH
+
+    calls = []
+    monkeypatch.setattr(
+        auth_local, "verify_password", lambda password, hashed: calls.append(hashed)
+    )
+    assert _login(local_client, "unknown", DEFAULT_PASSWORD).status_code == 401
+    with db_module.SessionLocal() as db:
+        user = db.scalar(select(User).where(User.username == DEFAULT_USERNAME))
+        user.is_active = False
+        db.commit()
+    assert _login(local_client, DEFAULT_USERNAME, DEFAULT_PASSWORD).status_code == 401
+    assert calls == [DUMMY_PASSWORD_HASH, DUMMY_PASSWORD_HASH]
+
+
+def test_failed_login_rate_limit(local_client, monkeypatch):
+    from app.routers import auth_local
+
+    monkeypatch.setattr(auth_local, "verify_password", lambda *_: False)
+    for _ in range(auth_local._LOGIN_MAX_FAILURES):
+        assert _login(local_client, "unknown", DEFAULT_PASSWORD).status_code == 401
+    limited = _login(local_client, "unknown", DEFAULT_PASSWORD)
+    assert limited.status_code == 429
+    assert 1 <= int(limited.headers["Retry-After"]) <= 61
+
+
+def test_login_rate_limit_expires_and_bounds_memory(monkeypatch):
+    from app.routers import auth_local
+
+    clock = [0.0]
+    monkeypatch.setattr(auth_local, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(auth_local, "_LOGIN_MAX_PEERS", 2)
+    for _ in range(auth_local._LOGIN_MAX_FAILURES):
+        auth_local._record_login_failure("peer")
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException):
+        auth_local._check_login_rate("peer")
+    clock[0] = 61.0
+    auth_local._check_login_rate("peer")
+    for peer in ("a", "b", "c"):
+        auth_local._record_login_failure(peer)
+    assert list(auth_local._login_failures) == ["b", "c"]
 
 
 def test_now_returns_aware_datetime():

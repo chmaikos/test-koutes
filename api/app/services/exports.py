@@ -1,4 +1,5 @@
 """CSV and XLSX export helpers, sharing a common iterator."""
+
 from __future__ import annotations
 
 import csv
@@ -258,7 +259,7 @@ def _format_csv_value(value: object) -> str:
         return ""
     if isinstance(value, datetime):
         return value.strftime("%Y-%m-%d %H:%M:%S UTC")
-    return str(value)
+    return str(_safe_spreadsheet_text(value))
 
 
 def boxes_to_csv(boxes: Iterable[Box], warehouses: Mapping[int, str]) -> bytes:
@@ -290,7 +291,7 @@ def boxes_to_xlsx(boxes: Iterable[Box], warehouses: Mapping[int, str]) -> bytes:
 
     for box in boxes:
         row = _row_for(box, warehouses)
-        ws.append(row)
+        ws.append([_safe_spreadsheet_text(value) for value in row])
         row_idx = ws.max_row
         for col_idx, value in enumerate(row, start=1):
             if col_idx - 1 in _DATETIME_COLUMN_INDICES and isinstance(value, datetime):
@@ -314,7 +315,7 @@ def boxes_to_xlsx(boxes: Iterable[Box], warehouses: Mapping[int, str]) -> bytes:
 def _safe_spreadsheet_text(value: object) -> object:
     if isinstance(value, str):
         cleaned = value.replace("\x00", "").replace("\r", " ").replace("\n", " ")
-        return f"'{cleaned}" if cleaned.startswith(("=", "+", "-", "@")) else cleaned
+        return f"'{cleaned}" if cleaned.lstrip().startswith(("=", "+", "-", "@")) else cleaned
     return value
 
 
@@ -396,9 +397,7 @@ def lot_summaries_to_csv(summaries: Iterable[LotSummary]) -> bytes:
     writer = csv.writer(buf)
     writer.writerow(LOT_SUMMARY_COLUMNS)
     for summary in summaries:
-        writer.writerow(
-            [_format_csv_value(value) for value in _lot_summary_row(summary)]
-        )
+        writer.writerow([_format_csv_value(value) for value in _lot_summary_row(summary)])
     return ("\ufeff" + buf.getvalue()).encode("utf-8")
 
 
@@ -445,9 +444,7 @@ def pallet_summaries_to_csv(summaries: Iterable[PalletSummary]) -> bytes:
     writer = csv.writer(buf)
     writer.writerow(PALLET_SUMMARY_COLUMNS)
     for summary in summaries:
-        writer.writerow(
-            [_format_csv_value(value) for value in _pallet_summary_row(summary)]
-        )
+        writer.writerow([_format_csv_value(value) for value in _pallet_summary_row(summary)])
     return ("\ufeff" + buf.getvalue()).encode("utf-8")
 
 
@@ -511,9 +508,7 @@ def productivity_to_csv(rows: Iterable[ProductivitySummaryExportRow]) -> bytes:
     writer = csv.writer(buf)
     writer.writerow(PRODUCTIVITY_SUMMARY_COLUMNS)
     for row in rows:
-        writer.writerow(
-            [_format_csv_value(value) for value in _summary_export_row(row)]
-        )
+        writer.writerow([_format_csv_value(value) for value in _summary_export_row(row)])
     return ("\ufeff" + buf.getvalue()).encode("utf-8")
 
 
@@ -527,20 +522,14 @@ def _write_sheet(ws, columns: list[str], rows: Iterable[list]) -> None:
         cell.font = header_font
         cell.fill = header_fill
     for row in rows:
-        ws.append(row)
+        ws.append([_safe_spreadsheet_text(value) for value in row])
         for column_index, value in enumerate(row, start=1):
             if isinstance(value, date | datetime):
-                ws.cell(row=ws.max_row, column=column_index).number_format = (
-                    "yyyy-mm-dd"
-                )
+                ws.cell(row=ws.max_row, column=column_index).number_format = "yyyy-mm-dd"
             rendered = "" if value is None else str(value)
-            widths[column_index - 1] = max(
-                widths[column_index - 1], len(rendered)
-            )
+            widths[column_index - 1] = max(widths[column_index - 1], len(rendered))
     for column_index, width in enumerate(widths, start=1):
-        ws.column_dimensions[get_column_letter(column_index)].width = min(
-            width + 2, 40
-        )
+        ws.column_dimensions[get_column_letter(column_index)].width = min(width + 2, 40)
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = ws.dimensions
 
@@ -598,9 +587,7 @@ def request_reconciliation_to_csv(
     writer = csv.writer(buf)
     writer.writerow(REQUEST_RECONCILIATION_COLUMNS)
     for issue in issues:
-        writer.writerow(
-            [_format_csv_value(value) for value in _reconciliation_row(issue)]
-        )
+        writer.writerow([_format_csv_value(value) for value in _reconciliation_row(issue)])
     return ("\ufeff" + buf.getvalue()).encode("utf-8")
 
 
@@ -662,9 +649,7 @@ def _analytics_rows(report: RequestAnalyticsOut) -> list[list]:
         ("rejection_reason", report.rejection_reasons),
         ("cancellation_reason", report.cancellation_reasons),
     ):
-        rows.extend(
-            [section, "reason", reason.reason, reason.count] for reason in reasons
-        )
+        rows.extend([section, "reason", reason.reason, reason.count] for reason in reasons)
     for section, throughput in (
         ("warehouse_throughput", report.throughput_by_warehouse),
         ("mover_throughput", report.throughput_by_mover),

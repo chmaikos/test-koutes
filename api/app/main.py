@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -9,7 +10,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from app import db as db_module
 from app.config import get_settings
 from app.deps import require_credentials_set
+from app.events import bus
 from app.jobs.scheduler import build_scheduler
+from app.middleware import PrivateApiResponses
 from app.routers import (
     alerts,
     auth_local,
@@ -33,7 +36,20 @@ from app.routers import (
 from app.services.local_admin import ensure_local_admin
 
 
+class _RedactStreamToken(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        # Uvicorn logs the raw request target, including EventSource tokens.
+        if isinstance(record.args, tuple) and len(record.args) == 5:
+            client, method, target, version, status = record.args
+            if str(target).split("?", 1)[0] == "/api/stream":
+                record.args = (client, method, "/api/stream", version, status)
+        return True
+
+
 def _configure_logging(level: str) -> None:
+    access_logger = logging.getLogger("uvicorn.access")
+    if not any(isinstance(item, _RedactStreamToken) for item in access_logger.filters):
+        access_logger.addFilter(_RedactStreamToken())
     logging.basicConfig(
         level=level.upper(),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
@@ -54,6 +70,7 @@ async def lifespan(app: FastAPI):
     finally:
         db.close()
 
+    bus.bind_loop(asyncio.get_running_loop())
     scheduler = build_scheduler()
     scheduler.start()
     app.state.scheduler = scheduler
@@ -61,6 +78,7 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         scheduler.shutdown(wait=False)
+        bus.bind_loop(None)
 
 
 app = FastAPI(
@@ -79,7 +97,10 @@ if settings.cors_origins_list:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=["X-Local-Access-Token"],
     )
+
+app.add_middleware(PrivateApiResponses)
 
 api_router = APIRouter(prefix="/api")
 

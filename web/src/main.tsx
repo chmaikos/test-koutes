@@ -1,7 +1,6 @@
-import React from "react";
+import React, { lazy, Suspense } from "react";
 import ReactDOM from "react-dom/client";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MsalProvider } from "@azure/msal-react";
 import {
   AuthError,
@@ -18,34 +17,62 @@ import {
 import { AuthGate } from "@/auth/AuthGate";
 import { AppShell } from "@/components/AppShell";
 import { CredentialsGate } from "@/components/CredentialsGate";
-import { DashboardPage } from "@/pages/DashboardPage";
-import { BoxesPage } from "@/pages/BoxesPage";
-import { BoxDetailPage } from "@/pages/BoxDetailPage";
-import { FilesPage } from "@/pages/FilesPage";
-import { FileDetailPage } from "@/pages/FileDetailPage";
-import { LotsPage } from "@/pages/LotsPage";
-import { LotDetailPage } from "@/pages/LotDetailPage";
-import { PalletsPage } from "@/pages/PalletsPage";
-import { PalletDetailPage } from "@/pages/PalletDetailPage";
-import { AlertsPage } from "@/pages/AlertsPage";
-import { AlertDetailPage } from "@/pages/AlertDetailPage";
-import { ExportsPage } from "@/pages/ExportsPage";
-import { ProductivityPage } from "@/pages/ProductivityPage";
-import { WarehouseProductivityDetailPage } from "@/pages/WarehouseProductivityDetailPage";
-import { SettingsPage } from "@/pages/SettingsPage";
-import { RequestPage } from "@/pages/RequestPage";
-import { RequestDetailPage } from "@/pages/RequestDetailPage";
-import { RequestReconciliationPage } from "@/pages/RequestReconciliationPage";
+import { purgeLegacyApiCaches } from "@/auth/cache";
 
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      staleTime: 10_000,
-      retry: 1,
-      refetchOnWindowFocus: false,
-    },
-  },
-});
+const DashboardPage = lazy(() =>
+  import("@/pages/DashboardPage").then((module) => ({ default: module.DashboardPage })),
+);
+const BoxesPage = lazy(() =>
+  import("@/pages/BoxesPage").then((module) => ({ default: module.BoxesPage })),
+);
+const BoxDetailPage = lazy(() =>
+  import("@/pages/BoxDetailPage").then((module) => ({ default: module.BoxDetailPage })),
+);
+const FilesPage = lazy(() =>
+  import("@/pages/FilesPage").then((module) => ({ default: module.FilesPage })),
+);
+const FileDetailPage = lazy(() =>
+  import("@/pages/FileDetailPage").then((module) => ({ default: module.FileDetailPage })),
+);
+const LotsPage = lazy(() =>
+  import("@/pages/LotsPage").then((module) => ({ default: module.LotsPage })),
+);
+const LotDetailPage = lazy(() =>
+  import("@/pages/LotDetailPage").then((module) => ({ default: module.LotDetailPage })),
+);
+const PalletsPage = lazy(() =>
+  import("@/pages/PalletsPage").then((module) => ({ default: module.PalletsPage })),
+);
+const PalletDetailPage = lazy(() =>
+  import("@/pages/PalletDetailPage").then((module) => ({ default: module.PalletDetailPage })),
+);
+const AlertsPage = lazy(() =>
+  import("@/pages/AlertsPage").then((module) => ({ default: module.AlertsPage })),
+);
+const AlertDetailPage = lazy(() =>
+  import("@/pages/AlertDetailPage").then((module) => ({ default: module.AlertDetailPage })),
+);
+const ExportsPage = lazy(() =>
+  import("@/pages/ExportsPage").then((module) => ({ default: module.ExportsPage })),
+);
+const ProductivityPage = lazy(() =>
+  import("@/pages/ProductivityPage").then((module) => ({ default: module.ProductivityPage })),
+);
+const WarehouseProductivityDetailPage = lazy(() =>
+  import("@/pages/WarehouseProductivityDetailPage").then((module) => ({ default: module.WarehouseProductivityDetailPage })),
+);
+const SettingsPage = lazy(() =>
+  import("@/pages/SettingsPage").then((module) => ({ default: module.SettingsPage })),
+);
+const RequestPage = lazy(() =>
+  import("@/pages/RequestPage").then((module) => ({ default: module.RequestPage })),
+);
+const RequestDetailPage = lazy(() =>
+  import("@/pages/RequestDetailPage").then((module) => ({ default: module.RequestDetailPage })),
+);
+const RequestReconciliationPage = lazy(() =>
+  import("@/pages/RequestReconciliationPage").then((module) => ({ default: module.RequestReconciliationPage })),
+);
 
 // Microsoft errors come back as either an `AuthError` (typed, with errorCode
 // and correlationId), a generic Error, or a bare string. Normalize them into
@@ -84,6 +111,7 @@ function captureMsalError(raw: unknown) {
 }
 
 async function bootstrap() {
+  await purgeLegacyApiCaches();
   // MSAL needs window.crypto.subtle (HTTPS or localhost). When the SPA is
   // served from a plain-HTTP WAN IP the browser hides that API and
   // initialize() throws "crypto_nonexistent". We swallow it so the rest of
@@ -91,6 +119,7 @@ async function bootstrap() {
   if (ssoAvailable()) {
     try {
       await msalInstance.initialize();
+      msalInstance.enableAccountStorageEvents();
 
       const accounts = msalInstance.getAllAccounts();
       if (accounts.length > 0) {
@@ -133,10 +162,10 @@ async function bootstrap() {
   ReactDOM.createRoot(document.getElementById("root")!).render(
     <React.StrictMode>
       <MsalProvider instance={msalInstance}>
-        <QueryClientProvider client={queryClient}>
           <BrowserRouter>
             <AuthGate>
               <CredentialsGate>
+                <Suspense fallback={<div className="p-6 text-sm text-slate-500">Loading page...</div>}>
                 <Routes>
                   <Route element={<AppShell />}>
                     <Route index element={<DashboardPage />} />
@@ -169,10 +198,10 @@ async function bootstrap() {
                     <Route path="*" element={<Navigate to="/" replace />} />
                   </Route>
                 </Routes>
+                </Suspense>
               </CredentialsGate>
             </AuthGate>
           </BrowserRouter>
-        </QueryClientProvider>
       </MsalProvider>
     </React.StrictMode>,
   );

@@ -5,6 +5,7 @@ access token via the `?access_token=` query param. We validate it through the
 same dual-validator (local HS256 + Entra RS256) used elsewhere so the SSE
 stream works for both authentication paths.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -52,6 +53,19 @@ def _payload_visible_to(payload: str, allowed: set[int] | None) -> bool:
     return wid in allowed
 
 
+async def _stream_authorization(access_token: str) -> set[int] | None:
+    # Each validation uses a fresh session: never hold DB connections or ORM
+    # identity snapshots for the lifetime of the stream.
+    db = db_module.SessionLocal()
+    try:
+        user = await resolve_user_from_token(db, access_token)
+        if user.must_change_credentials:
+            raise HTTPException(status_code=428, detail="credentials_must_change")
+        return allowed_warehouse_ids(user)
+    finally:
+        db.close()
+
+
 @router.get("/stream")
 async def stream(
     request: Request,
@@ -59,59 +73,41 @@ async def stream(
 ) -> EventSourceResponse:
     if not access_token:
         raise HTTPException(status_code=401, detail="missing access_token")
-
-    # Open a short-lived session purely for auth + ACL snapshot. We must
-    # NOT take ``DbSession`` as a FastAPI dependency here: ``yield``-based
-    # dependencies are only torn down once the response is fully sent,
-    # and an SSE response stays open for the entire lifetime of the
-    # browser tab. Holding the connection that long quickly drains the
-    # pool (one slot per open tab) and starves every other handler. By
-    # closing the session before returning ``EventSourceResponse`` the
-    # stream costs zero DB connections while idle.
-    # Resolve the factory at call time so tests and alternate deployments can
-    # replace the configured session factory without this module retaining a
-    # stale import-time reference.
-    db = db_module.SessionLocal()
-    try:
-        user = await resolve_user_from_token(db, access_token)
-        # Refuse the live stream while the bootstrapped admin still has to
-        # rotate credentials, mirroring `require_credentials_set` on the
-        # rest of the API.
-        if user.must_change_credentials:
-            raise HTTPException(
-                status_code=428, detail="credentials_must_change"
-            )
-        # Snapshot the caller's ACL once at connect time; admins get None
-        # (unrestricted), everyone else gets a (possibly empty) set of
-        # warehouse ids. Restricted users with no grants will simply
-        # receive no events besides the keepalive pings.
-        allowed = allowed_warehouse_ids(user)
-    finally:
-        db.close()
-
+    await _stream_authorization(access_token)
     queue = await bus.subscribe()
 
     async def event_generator():
+        loop = asyncio.get_running_loop()
+        # Renew occasionally even for valid tokens to bound every connection.
+        deadline = loop.time() + 300
         try:
             yield {"event": "ready", "data": "{}"}
-            while True:
-                if await request.is_disconnected():
+            while not await request.is_disconnected():
+                if loop.time() >= deadline:
+                    yield {"event": "reconnect", "data": "{}"}
                     break
                 try:
                     payload = await asyncio.wait_for(
-                        queue.get(), timeout=_KEEPALIVE_INTERVAL_SECONDS
+                        queue.get(),
+                        timeout=min(_KEEPALIVE_INTERVAL_SECONDS, deadline - loop.time()),
                     )
-                    if not _payload_visible_to(payload, allowed):
-                        continue
-                    yield {"event": "message", "data": payload}
                 except TimeoutError:
+                    payload = None
+                try:
+                    # Re-check expiry, credential version, active status, role
+                    # and grants before sending data (or every idle keepalive).
+                    allowed = await _stream_authorization(access_token)
+                except HTTPException:
+                    yield {"event": "reauthenticate", "data": "{}"}
+                    break
+                if payload is None:
                     yield {"event": "ping", "data": "{}"}
+                elif _payload_visible_to(payload, allowed):
+                    yield {"event": "message", "data": payload}
         finally:
             await bus.unsubscribe(queue)
 
-    # `X-Accel-Buffering: no` discourages outer reverse proxies (nginx, some
-    # CDNs) from buffering the SSE response and stalling the live updates.
     return EventSourceResponse(
         event_generator(),
-        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-store"},
     )
